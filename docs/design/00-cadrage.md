@@ -31,11 +31,13 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 - **Service** : le processus pulse, unique sur la machine.
 - **Client** : ce qui se connecte au service. Une **session** est un client qui
   représente une session d'agent.
-- **Brique** : un module du service qui surveille une source (une forge et sa CI, un
-  quota, un gestionnaire de tâches, la mémoire d'un processus) et publie ce qu'il
-  observe. Chacun peut en ajouter une.
-- **Abonnement** : le lien entre un client et une brique, avec une clé (par exemple
-  dépôt et branche).
+- **Brique** : un programme externe, lancé par le service, qui surveille une source
+  (une forge et sa CI, un quota, un gestionnaire de tâches, la mémoire d'un processus)
+  et publie ce qu'il observe. Chacun peut en ajouter une.
+- **Abonnement** : le lien entre un client et une brique. Son contenu (par exemple
+  dépôt et branche) n'est lu que par la brique.
+- **Flux** : ce que la brique publie pour une cible donnée. La brique rattache chaque
+  abonnement à un flux par un identifiant opaque pour le service.
 
 ## Décisions prises
 
@@ -58,8 +60,9 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 - **Lancé à la demande.** L'activation par socket de systemd (unité utilisateur) tient
   le socket et ne démarre le service qu'à la première connexion. Hors usage, il n'y a
   pas de processus.
-- **Briques dormantes sans abonné.** Chaque brique compte ses abonnés par clé. Elle
-  démarre au premier et s'arrête au dernier.
+- **Briques dormantes sans abonné.** Le service compte les abonnés de chaque brique par
+  flux. Il lance la brique au premier abonné et l'arrête au dernier, lui transmet chaque
+  abonnement et la prévient quand un flux n'a plus d'abonné (voir `01-briques.md`).
 
 ## Limite assumée de la sécurité
 
@@ -104,7 +107,8 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
   le serveur envoie des événements au fil de l'eau) sur le socket Unix est la piste la
   plus simple côté client Claude Code. WebSocket, gRPC ou un protocole maison restent à
   comparer.
-- **Le schéma des messages** et son versionnement entre le service et ses clients.
+- **Le schéma des messages** et son versionnement entre le service et ses clients. Côté
+  briques, l'enveloppe, l'encodage et le canal sont décidés dans `01-briques.md`.
 - **Les requêtes qu'un client peut adresser** au service, et les droits de chacun.
 - **Le comportement quand le service est absent** ou en échec, côté client.
 - **Le langage.** Rust est le choix souhaité pour un démon léger. À confirmer.
