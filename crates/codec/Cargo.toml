@@ -1,0 +1,5 @@
+[package]
+name = "nowcast-codec"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
