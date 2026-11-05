@@ -31,7 +31,7 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 - **Service** : le processus nowcast, unique sur la machine.
 - **Client** : ce qui se connecte au service.
 - **Type de client** : une famille de clients (les sessions Claude Code, par exemple),
-  déclarée hors du cœur, avec la règle qui reconnaît son processus d'ancrage.
+  déclarée hors du code du cœur, avec la règle qui reconnaît son processus d'ancrage.
 - **Processus d'ancrage** : le processus auquel le service rattache une connexion (pour
   une session d'agent, le processus de l'agent). Ses connexions lui appartiennent, et
   tout ce qui s'y rattache s'arrête à sa mort.
@@ -69,11 +69,15 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   réutilisé. Le service remonte les parents de ce processus, en revérifiant chaque
   maillon, jusqu'à un processus d'ancrage. Cette identité sert à router une connexion
   vers son ancrage, pas à authentifier (voir la limite ci-dessous).
-- **Les types de client sont déclarés hors du cœur**, comme les briques. Chacun porte
+- **Les types de client sont déclarés hors du code du cœur**, comme les briques. Chacun porte
   une règle qui reconnaît son processus d'ancrage, par exemple un motif sur le chemin
   de l'exécutable (un motif, parce que plusieurs versions d'un agent tournent en même
   temps). Le cœur ne fait qu'une remontée générique des parents et une comparaison avec
   ces règles. Ajouter un agent, c'est ajouter une déclaration.
+- **Le dépôt fournit les déclarations des agents courants, embarquées dans le
+  binaire.** Claude Code est reconnu sans configuration. Ces déclarations restent des
+  données rangées à côté de leur adaptateur (`clients/claude-code/`), pas du code du
+  cœur ; un fichier de l'utilisateur qui porte le même nom les remplace.
 - **Un processus n'est pas une session.** Un agent peut changer de session sans que
   son processus meure : après un `/clear` ou une reprise, Claude Code continue sous un
   nouvel identifiant de session, sans événement de démarrage. Le processus est
@@ -92,6 +96,14 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 - **Briques dormantes sans abonné.** Le service compte les abonnés de chaque brique par
   flux. Il lance la brique au premier abonné et l'arrête au dernier, lui transmet chaque
   abonnement et la prévient quand un flux n'a plus d'abonné (voir `01-briques.md`).
+- **Le cœur est en Rust**, et seulement en Rust : le service comme l'outil en ligne de
+  commande. Les briques sont écrites dans le langage de leur choix. L'adaptateur
+  Claude Code est en TypeScript, parce que les plugins s'exécutent en JavaScript dans
+  le moteur de l'agent.
+- **Pas de périmètre de première version.** Les fonctionnalités arrivent l'une après
+  l'autre. Le cœur vient d'abord, puis une brique de test, nécessaire pour tester le
+  projet ; les vraies briques viennent ensuite. Le découpage est décrit dans
+  `04-decoupage.md`.
 - **Côté clients, un flux SSE et des requêtes HTTP** sur le socket Unix, événements au
   format JSON de CloudEvents. L'architecture des clients (état par session dans le
   service, un flux par session, outil en ligne de commande commun, un adaptateur par
@@ -136,8 +148,6 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
   décrites dans `02-clients.md`.
 - **Le comportement quand le service est absent** ou en échec : il vit dans l'outil
   en ligne de commande commun aux clients (voir `02-clients.md`), reste à le définir.
-- **Le langage.** Rust est le choix souhaité pour un démon léger. À confirmer.
-- **Le périmètre d'une première version** : quelles briques, quels clients.
 - **La CI en temps réel.** Sans webhook, c'est du polling, mutualisé et mieux réglé.
   Des webhooks GitHub ou Azure DevOps demanderaient une adresse joignable depuis
   Internet, donc un tunnel.

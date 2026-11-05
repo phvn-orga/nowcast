@@ -1,8 +1,8 @@
 # Les briques
 
-État au 2026-11-05 : modèle d'extension, contrat, transport et documentation de la clé
-posés, découverte des briques décidée, pas d'action dans le service ; reste du fichier
-de déclaration à concevoir.
+État au 2026-11-05 : modèle d'extension, contrat, transport, documentation de la clé
+et découverte des briques décidés, pas d'action dans le service. Le format du fichier
+de déclaration et le protocole sont fixés dans `03-contrats.md`.
 
 ## Décisions prises
 
@@ -54,7 +54,8 @@ de déclaration à concevoir.
 - **Le service trouve les briques par un répertoire de déclarations.** Installer une
   brique, c'est rendre son fichier de déclaration visible dans un répertoire que le
   service lit, comme une unité systemd. Le service ne connaît les briques que par ce
-  répertoire, jamais dans son code.
+  répertoire, jamais dans son code. Emplacement et activation par lien symbolique :
+  voir `03-contrats.md`.
 - **Le service observe, il n'agit pas.** Une action sur une source (cocher une tâche,
   par exemple) reste dans le mod client, qui agit directement sur la source avec ses
   propres identifiants. Ces identifiants se partagent par l'outillage de la source ou
@@ -111,8 +112,3 @@ du problème, et leurs choix convergent.
 
 - **Les abonnements plus larges ou partiels** : s'abonner à tout un dépôt plutôt qu'à
   une branche, par exemple, et ce que cela implique pour le service.
-- **Le reste du fichier de déclaration.** Proposition : le nom de la brique, la commande
-  à lancer, la version du protocole, les types qu'elle publie avec leur `dataschema`,
-  en plus des schémas d'abonnement déjà décidés.
-- **L'emplacement du répertoire de déclarations** et la façon d'y installer une
-  brique.

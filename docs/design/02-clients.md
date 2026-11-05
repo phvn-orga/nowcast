@@ -16,7 +16,7 @@ session posés ; mod central validé par un spike.
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
-  (par exemple `PUT /session {id}`), avant toute autre requête, puis à chaque
+  (`PUT /v1/session`, voir `03-contrats.md`), avant toute autre requête, puis à chaque
   changement (`/clear`, reprise). La mort du processus d'ancrage termine tout.
 - **Les abonnements suivent le processus d'ancrage, pas l'identifiant de session.** Un
   `/clear` ne coupe donc rien : le client se désabonne de ce qu'il ne veut plus. Le
@@ -130,8 +130,6 @@ protocole.
 
 ## À trancher
 
-- **Les détails de la déclaration de session** : forme exacte de la requête, réponse
-  du service à une requête qui arrive avant toute déclaration.
 - **Revérifier le spike en session interactive**, et avec plusieurs observateurs sur
   la même clé, avant l'implémentation du mod central.
 - **L'outil en ligne de commande** : sa distribution (binaire à part ou
