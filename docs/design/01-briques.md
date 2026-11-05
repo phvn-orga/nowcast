@@ -1,6 +1,6 @@
 # Les briques
 
-État au 2026-11-04 : modèle d'extension, contrat et transport des briques posés, socle
+État au 2026-11-05 : modèle d'extension, contrat et transport des briques posés, socle
 des briques à concevoir.
 
 ## Décisions prises
@@ -24,8 +24,9 @@ des briques à concevoir.
 - **Un contrat à deux niveaux.**
   - *L'enveloppe* est le contrat du service, la seule partie qu'il lit pour router. Ses
     champs reprennent les noms de CloudEvents : `source` (la brique), `subject` (l'identifiant
-    de flux), `type`, `id` (le numéro de séquence), `datacontenttype`, `dataschema`.
-  - *Le détail* est opaque : le service ne le décode jamais. Son contrat appartient à
+    de flux), `type`, `id` (le numéro de séquence), `dataschema`.
+  - *Le détail* est opaque : le service ne l'interprète jamais, il vérifie seulement
+    que c'est du JSON bien formé. Son contrat appartient à
     un type de donnée (par exemple `forge.pr/v1`), pas à une brique. Plusieurs briques
     peuvent publier le même type ; seuls les briques et les consommateurs de ce type le
     connaissent et le font respecter.
@@ -33,7 +34,13 @@ des briques à concevoir.
   état ou un libellé lisible par un client qui ne connaît pas le type) : un consommateur
   doit connaître le contrat du type qu'il lit. Écarté faute de besoin ; à rouvrir si des
   clients génériques apparaissent.
-- **Enveloppe en MessagePack, détail porté en `bin`.** Préféré à un en-tête binaire fait
+- **Le détail est toujours du JSON**, aucun autre format. Une brique convertit ce que
+  parle sa source (un flux binaire, du Protobuf). Images et rendu appartiennent aux
+  interfaces clientes, pas aux briques. Le service vérifie que chaque détail est un
+  JSON valide avant de le relayer : une vérification de syntaxe, jamais une
+  interprétation. Côté clients, le détail est placé tel quel dans le champ `data` de
+  l'événement, sans conversion.
+- **Enveloppe en MessagePack, détail (les octets du JSON) porté en `bin`.** Préféré à un en-tête binaire fait
   main parce que c'est un standard. Mesure du 2026-11-04 : lire l'enveloppe coûte 46 ns
   en MessagePack contre 12 ns pour un en-tête binaire, deux coûts négligeables face à un
   aller-retour de 3 à 6 µs. En lignes JSON, ce coût croît avec le détail (2,2 µs à 5 Ko).
@@ -55,6 +62,9 @@ des briques à concevoir.
 - **Canal : l'entrée et la sortie standard de la brique**, en flux d'octets, messages
   préfixés par leur longueur. Pipe, socket Unix et socket à messages donnent le même
   aller-retour à la mesure : le choix du canal ne joue pas sur la performance.
+- **Le service garde la dernière valeur de chaque flux.** Un nouvel abonné la reçoit
+  sans attendre la prochaine publication, et un client à base de hooks peut la lire en
+  un appel (voir `02-clients.md`).
 
 ## Ce qui existe déjà
 
@@ -93,7 +103,8 @@ du problème, et leurs choix convergent.
   et comment une brique en tire son identifiant de flux.
 - **Les abonnements plus larges ou partiels** : s'abonner à tout un dépôt plutôt qu'à
   une branche, par exemple, et ce que cela implique pour le service.
-- **La dernière valeur.** Le service la garde-t-il par flux, pour qu'un nouvel abonné la
-  reçoive sans attendre la prochaine publication ?
+- **Un détail invalide** : ce que fait le service d'une publication dont le détail
+  n'est pas du JSON valide (l'écarter, le journaliser, prévenir les abonnés, signaler
+  la brique).
 - **Comment une brique se fait connaître** du service : par un fichier de déclaration.
   Restent à fixer l'endroit où il vit et ce qu'il contient.

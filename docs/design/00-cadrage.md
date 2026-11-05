@@ -1,6 +1,6 @@
 # Cadrage de pulse
 
-État au 2026-11-04 : premières décisions prises, conception à poursuivre. Ce document
+État au 2026-11-05 : premières décisions prises, conception à poursuivre. Ce document
 est le point de départ de la conception, pas une spécification.
 
 ## Objet
@@ -8,7 +8,7 @@ est le point de départ de la conception, pas une spécification.
 pulse est un service local qui fournit de la donnée prête à l'emploi : l'état d'une
 PR et de sa CI, un quota d'usage, des tâches, la mémoire d'un processus. Ceux qui
 l'utilisent (les mods et extensions d'un agent comme Claude Code, Codex ou Droid, un
-tableau de bord, toute autre application) se connectent, s'authentifient, s'abonnent à
+tableau de bord, toute autre application) se connectent, s'abonnent à
 des briques et reçoivent leurs mises à jour en temps réel. Ils peuvent aussi adresser
 des requêtes au service.
 
@@ -29,8 +29,14 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 ## Vocabulaire
 
 - **Service** : le processus pulse, unique sur la machine.
-- **Client** : ce qui se connecte au service. Une **session** est un client qui
-  représente une session d'agent.
+- **Client** : ce qui se connecte au service.
+- **Type de client** : une famille de clients (les sessions Claude Code, par exemple),
+  déclarée hors du cœur, avec la règle qui reconnaît son processus d'ancrage.
+- **Processus d'ancrage** : le processus auquel le service rattache une connexion (pour
+  une session d'agent, le processus de l'agent). Ses connexions lui appartiennent, et
+  tout ce qui s'y rattache s'arrête à sa mort.
+- **Session** : une session d'agent, identifiée par l'identifiant que le client
+  déclare. Un même processus d'ancrage peut porter plusieurs sessions à la suite.
 - **Brique** : un programme externe, lancé par le service, qui surveille une source
   (une forge et sa CI, un quota, un gestionnaire de tâches, la mémoire d'un processus)
   et publie ce qu'il observe. Chacun peut en ajouter une.
@@ -42,49 +48,57 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 ## Décisions prises
 
 - **Indépendant de tout client.** Le protocole ne contient aucune notion propre à un
-  agent. Ce qui sert un agent donné est une brique ou un client, jamais le cœur.
-- **Un client est connecté**, pas un simple émetteur. Il ouvre une connexion,
-  s'authentifie, s'abonne, reçoit un flux et peut envoyer des requêtes. Le service sait
-  à tout instant quels clients sont connectés.
+  agent. Ce qui sert un agent donné est une brique, un type de client ou un client,
+  jamais le cœur.
+- **Un client est connecté**, pas un simple émetteur. Il tient un flux ouvert, déclare
+  sa session, s'abonne et envoie des requêtes. Le service sait à tout instant quels
+  clients sont connectés.
 - **Transport local : un socket Unix**, dans `$XDG_RUNTIME_DIR` (répertoire privé que
   Linux crée pour chaque utilisateur connecté), droits `0600`. Aucun port TCP : ni le
   réseau ni une page web ouverte dans le navigateur ne peuvent l'atteindre.
-- **Authentification par l'identité du noyau.** Sur un socket Unix, le noyau donne au
-  service le PID et l'UID du processus qui se connecte (`SO_PEERCRED`), sans que le
-  client puisse mentir. En remontant ses processus parents, le service retrouve le
-  processus de l'agent, donc la session.
-- **Détection d'une fermeture brutale** par deux signaux, sans battement de cœur :
-  un `pidfd` ouvert sur le processus de la session (le noyau prévient à sa mort, même
-  sur `kill -9`, sans risque de confusion avec un PID réutilisé), et la coupure de la
-  connexion du flux.
+- **Rattachement par l'identité du noyau.** Sur un socket Unix, le noyau donne au
+  service l'UID et un `pidfd` du processus qui se connecte (`SO_PEERPIDFD`, Linux 6.5
+  et plus), sans que le client puisse mentir et sans risque de confusion avec un PID
+  réutilisé. Le service remonte les parents de ce processus, en revérifiant chaque
+  maillon, jusqu'à un processus d'ancrage. Cette identité sert à router une connexion
+  vers son ancrage, pas à authentifier (voir la limite ci-dessous).
+- **Les types de client sont déclarés hors du cœur**, comme les briques. Chacun porte
+  une règle qui reconnaît son processus d'ancrage, par exemple un motif sur le chemin
+  de l'exécutable (un motif, parce que plusieurs versions d'un agent tournent en même
+  temps). Le cœur ne fait qu'une remontée générique des parents et une comparaison avec
+  ces règles. Ajouter un agent, c'est ajouter une déclaration.
+- **Un processus n'est pas une session.** Un agent peut changer de session sans que
+  son processus meure : après un `/clear` ou une reprise, Claude Code continue sous un
+  nouvel identifiant de session, sans événement de démarrage. Le processus est
+  l'ancrage ; c'est le client qui déclare la session en cours et annonce ses
+  changements.
+- **Détection d'une fermeture brutale** par deux signaux, sans battement de cœur : le
+  `pidfd` du processus d'ancrage (le noyau prévient à sa mort, même sur `kill -9`), et
+  la coupure du flux. Un changement de session, lui, n'est connu que par le client.
 - **Lancé à la demande.** L'activation par socket de systemd (unité utilisateur) tient
   le socket et ne démarre le service qu'à la première connexion. Hors usage, il n'y a
   pas de processus.
 - **Briques dormantes sans abonné.** Le service compte les abonnés de chaque brique par
   flux. Il lance la brique au premier abonné et l'arrête au dernier, lui transmet chaque
   abonnement et la prévient quand un flux n'a plus d'abonné (voir `01-briques.md`).
+- **Côté clients, un flux SSE et des requêtes HTTP** sur le socket Unix, événements au
+  format JSON de CloudEvents. L'architecture des clients (état par session dans le
+  service, un flux par session, outil en ligne de commande commun, un adaptateur par
+  agent) est décrite dans `02-clients.md`.
 
 ## Limite assumée de la sécurité
 
 Le socket privé et l'identité du noyau protègent contre les autres comptes, les autres
 machines et le navigateur. Ils ne prouvent pas qu'un client est « vraiment » une session
 d'agent face à un programme qui tourne sous le même utilisateur : un tel programme peut
-lancer l'agent lui-même ou lire ce qu'il lit. Aucune authentification locale ne tient
-contre ce cas, qui relève de la sécurité de la machine. Conséquence : plus le service
-offre d'actions (ouvrir un port, lancer une commande), plus il faut limiter ce que
-chaque client a le droit de demander.
-
-## Contraintes d'un client Claude Code
-
-Vérifiées le 2026-11-04 dans les types de l'API plugin de Claude Code 2.1.318.
-
-- Le contexte, le cache, le modèle et l'effort d'une session n'existent que dans le
-  moteur, qui les donne aux plugins par ses événements. pulse ne peut pas les lire
-  lui-même : le client les lui transmet.
-- `$.http.fetch` sait passer par un socket Unix (`socketPath`), mais ne rend la réponse
-  qu'une fois complète. Il ne lit pas un flux.
-- `$.process.spawn` lit la sortie d'un processus au fil de l'eau. Un client comme
-  `curl -N` sur le flux du service suffit donc à recevoir des événements en continu.
+lancer l'agent lui-même, remplacer son exécutable (il appartient à l'utilisateur) ou
+s'y injecter. Aucune authentification locale ne tient contre ce cas, qui relève de la
+sécurité de la machine. Pour de la lecture, le risque est faible : un tel programme
+peut déjà lire directement ce que lisent les briques. Il grandit avec les actions
+offertes (ouvrir un port, lancer une commande) : plus il y en a, plus il faut limiter
+ce que chaque type de client a le droit de demander. Ces droits s'arrêtent à la
+session : le noyau ne distingue pas deux mods d'une même session, qui partagent le
+même processus.
 
 ## Premier jet : la brique forge
 
@@ -103,19 +117,17 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
 
 ## À trancher
 
-- **Le protocole temps réel** : SSE (Server-Sent Events, une connexion HTTP ouverte où
-  le serveur envoie des événements au fil de l'eau) sur le socket Unix est la piste la
-  plus simple côté client Claude Code. WebSocket, gRPC ou un protocole maison restent à
-  comparer.
-- **Le schéma des messages** et son versionnement entre le service et ses clients. Côté
-  briques, l'enveloppe, l'encodage et le canal sont décidés dans `01-briques.md`.
-- **Les requêtes qu'un client peut adresser** au service, et les droits de chacun.
-- **Le comportement quand le service est absent** ou en échec, côté client.
+- **Le schéma des messages** et son versionnement. Côté briques, l'enveloppe, l'encodage
+  et le canal sont décidés dans `01-briques.md` ; côté clients, voir `02-clients.md`.
+- **Les droits de chaque type de client** sur les requêtes qu'il peut adresser au
+  service. Les requêtes elles-mêmes sont décrites dans `02-clients.md`.
+- **Le comportement quand le service est absent** ou en échec : il vit dans l'outil
+  en ligne de commande commun aux clients (voir `02-clients.md`), reste à le définir.
 - **Le langage.** Rust est le choix souhaité pour un démon léger. À confirmer.
 - **Le périmètre d'une première version** : quelles briques, quels clients.
 - **La CI en temps réel.** Sans webhook, c'est du polling, mutualisé et mieux réglé.
   Des webhooks GitHub ou Azure DevOps demanderaient une adresse joignable depuis
   Internet, donc un tunnel.
 - **L'installation et la distribution** (paquet, unité systemd fournie).
-- **Les autres agents.** Non instruit ici : si Codex ou Droid offrent de quoi
-  brancher un client.
+- **Un processus orphelin** (lancé en double fork) perd sa filiation et ne remonte plus
+  à son ancrage : à refuser, ou à rattacher autrement.
