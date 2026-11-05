@@ -273,7 +273,10 @@ exe = ["*/claude/versions/*"]
 Règle de rattachement : à la connexion, le service remonte les parents du processus
 qui se connecte et retient **l'ancêtre le plus proche** dont l'exécutable correspond à
 un motif d'un type déclaré, quel que soit ce type. Ce processus devient l'ancrage de la
-connexion. Si aucun ancêtre ne correspond, la connexion est refusée.
+connexion. Si aucun ancêtre ne correspond, l'ancrage est le processus connecté
+lui-même : ses abonnements meurent avec lui, et il déclare sa propre session comme
+n'importe quel client. C'est le cas de `nowcast watch` lancé depuis un terminal. Un
+refus ne protégerait rien, puisque tout se passe sous le même UID.
 
 ## À trancher
 

@@ -73,7 +73,8 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   une règle qui reconnaît son processus d'ancrage, par exemple un motif sur le chemin
   de l'exécutable (un motif, parce que plusieurs versions d'un agent tournent en même
   temps). Le cœur ne fait qu'une remontée générique des parents et une comparaison avec
-  ces règles. Ajouter un agent, c'est ajouter une déclaration.
+  ces règles. Ajouter un agent, c'est ajouter une déclaration. Un processus dont
+  aucun ancêtre ne correspond est son propre ancrage (voir `03-contrats.md`).
 - **Le dépôt fournit les déclarations des agents courants, embarquées dans le
   binaire.** Claude Code est reconnu sans configuration. Ces déclarations restent des
   données rangées à côté de leur adaptateur (`clients/claude-code/`), pas du code du
@@ -153,4 +154,5 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
   Internet, donc un tunnel.
 - **L'installation et la distribution** (paquet, unité systemd fournie).
 - **Un processus orphelin** (lancé en double fork) perd sa filiation et ne remonte plus
-  à son ancrage : à refuser, ou à rattacher autrement.
+  à son ancrage : il devient son propre ancrage et ne suit plus la session de son
+  agent. À rattacher autrement si le besoin apparaît.
