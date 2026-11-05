@@ -33,17 +33,17 @@ session posés ; mod central validé par un spike.
   candidats écartés sont plus bas.
 - **Une requête ponctuelle « dernière valeur d'un flux »**, pour les clients qui
   lisent à un instant donné plutôt qu'en continu.
-- **Un outil en ligne de commande fourni avec pulse, commun à tous les agents.** Par
-  exemple `pulse watch` (tient le flux, se reconnecte), `pulse get <flux>` (dernière
-  valeur, en un appel), `pulse subscribe`. La reconnexion et la conduite à tenir quand
+- **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
+  exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
+  valeur, en un appel), `nowcast subscribe`. La reconnexion et la conduite à tenir quand
   le service est absent sont écrites une fois, là.
-- **Un adaptateur mince par agent, dans le dépôt de pulse** (par exemple
+- **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et
   s'appuie sur l'outil commun pour le reste. Un agent qui n'a que des hooks ponctuels
-  s'en sert par `pulse get`.
+  s'en sert par `nowcast get`.
 - **Pour Claude Code, l'adaptateur est le mod central de la session ; seul le flux est
-  centralisé.** Le mod central lance `pulse watch`, tient l'unique flux SSE de la
+  centralisé.** Le mod central lance `nowcast watch`, tient l'unique flux SSE de la
   session, déclare la session et ses changements (début, `/clear`, reprise), et écrit
   chaque flux reçu dans son état de plugin (`$.state`). Les requêtes (s'abonner, se
   désabonner, demander un rafraîchissement) partent directement de chaque mod vers le service en HTTP : tous
@@ -134,12 +134,8 @@ protocole.
   du service à une requête qui arrive avant toute déclaration.
 - **Revérifier le spike en session interactive**, et avec plusieurs observateurs sur
   la même clé, avant l'implémentation du mod central.
-- **L'outil en ligne de commande** : son nom, sa distribution (binaire à part ou
-  sous-commande du service).
-- **Le nom du projet.** Il doit changer : le répertoire `$XDG_RUNTIME_DIR/pulse/` est
-  déjà pris par PipeWire-Pulse (le socket de compatibilité PulseAudio), et « pulse »
-  évoque PulseAudio sous Linux. Le nouveau nom vaudra pour le socket, l'outil en ligne
-  de commande et le dépôt ; des candidats sont à l'étude.
+- **L'outil en ligne de commande** : sa distribution (binaire à part ou
+  sous-commande du service). Il s'appelle `nowcast`, comme le projet.
 
 ## Hors périmètre pour l'instant
 

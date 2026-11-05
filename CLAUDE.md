@@ -1,4 +1,4 @@
-# pulse
+# nowcast
 
 ## The `design` branch
 
@@ -14,7 +14,7 @@ under "À trancher", not written as a decision.
 The repository is public. No personal data in it: no names, home paths, private
 repositories, accounts, tokens, or details of one person's machine.
 
-pulse stands on its own. The data it publishes is not shaped for any particular client:
+nowcast stands on its own. The data it publishes is not shaped for any particular client:
 an agent extension, a dashboard or another app connects to it the way it would to any
 external service. When a need comes from one client, describe it as a capability any
 client could use.

@@ -1,18 +1,18 @@
-# Cadrage de pulse
+# Cadrage de nowcast
 
 État au 2026-11-05 : premières décisions prises, conception à poursuivre. Ce document
 est le point de départ de la conception, pas une spécification.
 
 ## Objet
 
-pulse est un service local qui fournit de la donnée prête à l'emploi : l'état d'une
+nowcast est un service local qui fournit de la donnée prête à l'emploi : l'état d'une
 PR et de sa CI, un quota d'usage, des tâches, la mémoire d'un processus. Ceux qui
 l'utilisent (les mods et extensions d'un agent comme Claude Code, Codex ou Droid, un
 tableau de bord, toute autre application) se connectent, s'abonnent à
 des briques et reçoivent leurs mises à jour en temps réel. Ils peuvent aussi adresser
 des requêtes au service.
 
-pulse existe pour lui-même. Ses données ne sont taillées pour aucun client en
+nowcast existe pour lui-même. Ses données ne sont taillées pour aucun client en
 particulier : un mod ou un tableau de bord se branche dessus, comme sur n'importe quel
 service externe.
 
@@ -28,7 +28,7 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 
 ## Vocabulaire
 
-- **Service** : le processus pulse, unique sur la machine.
+- **Service** : le processus nowcast, unique sur la machine.
 - **Client** : ce qui se connecte au service.
 - **Type de client** : une famille de clients (les sessions Claude Code, par exemple),
   déclarée hors du cœur, avec la règle qui reconnaît son processus d'ancrage.
@@ -47,14 +47,21 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
 
 ## Décisions prises
 
+- **Le projet s'appelle nowcast.** En météorologie, le *nowcast* est la prévision du
+  présent : l'état courant, prêt à l'emploi. Le premier nom, pulse, entrait en
+  collision avec PipeWire-Pulse, dont le socket de compatibilité PulseAudio occupe déjà
+  `$XDG_RUNTIME_DIR/pulse/`, et le mot évoque PulseAudio sous Linux. Au 2026-11-05,
+  nowcast était libre sur crates.io, npm, Debian, Arch et AUR (scopes npm et marques
+  déposées non vérifiés). Le nom vaut pour le service, le socket, l'outil en ligne de
+  commande et le dépôt.
 - **Indépendant de tout client.** Le protocole ne contient aucune notion propre à un
   agent. Ce qui sert un agent donné est une brique, un type de client ou un client,
   jamais le cœur.
 - **Un client est connecté**, pas un simple émetteur. Il tient un flux ouvert, déclare
   sa session, s'abonne et envoie des requêtes. Le service sait à tout instant quels
   clients sont connectés.
-- **Transport local : un socket Unix**, dans `$XDG_RUNTIME_DIR` (répertoire privé que
-  Linux crée pour chaque utilisateur connecté), droits `0600`. Aucun port TCP : ni le
+- **Transport local : un socket Unix**, dans `$XDG_RUNTIME_DIR/nowcast/` (sous le
+  répertoire privé que Linux crée pour chaque utilisateur connecté), droits `0600`. Aucun port TCP : ni le
   réseau ni une page web ouverte dans le navigateur ne peuvent l'atteindre.
 - **Rattachement par l'identité du noyau.** Sur un socket Unix, le noyau donne au
   service l'UID et un `pidfd` du processus qui se connecte (`SO_PEERPIDFD`, Linux 6.5

@@ -7,7 +7,7 @@ de déclaration à concevoir.
 ## Décisions prises
 
 - **Une brique est un programme externe au service.** Elle vit dans son propre dépôt,
-  dans le langage de son choix. Le dépôt de pulse en fournit quelques-unes, sans
+  dans le langage de son choix. Le dépôt de nowcast en fournit quelques-unes, sans
   privilège : le service ne distingue pas une brique de son dépôt d'une brique écrite
   ailleurs.
 - **Le service est un relais.** Il met en relation briques et clients, sans imposer de
@@ -64,7 +64,7 @@ de déclaration à concevoir.
   rafraîchissement immédiat d'un flux, que le service relaie à la brique, typiquement
   après qu'un mod a agi sur la source.
 - **Le service lance chaque brique**, au premier consommateur, et l'arrête au dernier.
-  pulse est le centre : une brique sans consommateur ne sert à rien, elle n'existe pas
+  nowcast est le centre : une brique sans consommateur ne sert à rien, elle n'existe pas
   hors de lui, et aucune ne tourne pour rien. Une brique toujours active pourra devenir
   un besoin plus tard ; ce n'en est pas un aujourd'hui.
 - **Un processus par brique, qui sert toutes ses clés.** La brique gère sa liste de
@@ -93,7 +93,7 @@ de déclaration à concevoir.
 
 ## Ce qui existe déjà
 
-Aucun outil trouvé ne fait ce que fait pulse en entier. Plusieurs ont résolu une partie
+Aucun outil trouvé ne fait ce que fait nowcast en entier. Plusieurs ont résolu une partie
 du problème, et leurs choix convergent.
 
 | Outil | Ce qu'il montre |
