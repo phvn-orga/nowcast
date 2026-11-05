@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["remote", "branch"],
+  "properties": {
+    "remote": { "type": "string", "description": "URL of the git remote (SSH, HTTPS or SSH alias)." },
+    "branch": { "type": "string", "description": "Branch name." }
+  },
+  "additionalProperties": false
+}

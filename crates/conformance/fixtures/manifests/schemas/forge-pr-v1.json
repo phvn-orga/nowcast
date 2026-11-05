@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["number", "state"],
+  "properties": {
+    "number": { "type": "integer" },
+    "state": { "type": "string" }
+  }
+}

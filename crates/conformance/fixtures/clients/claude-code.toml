@@ -1,0 +1,6 @@
+# The embedded declaration of contract section 5.
+name = "claude-code"
+description = "Claude Code sessions"
+
+[anchor]
+exe = ["*/claude/versions/*"]

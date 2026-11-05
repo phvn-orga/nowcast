@@ -1,0 +1,17 @@
+# No [run] env, which is optional.
+manifest_version = 1
+name = "minimal"
+version = "1.2.3-beta.1"
+description = "Declares the least a brick can."
+protocol = 1
+
+[run]
+command = ["bin/minimal"]
+
+[subscriptions.pr]
+description = "A PR."
+schema = "schemas/subscription-pr.json"
+publishes = "forge.pr/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"
