@@ -115,6 +115,7 @@ répond `201` :
 - Le service valide `params` contre le JSON Schema déclaré pour cette sorte
   d'abonnement : `400` `invalid_params` sinon. `404` `unknown_brick` ou
   `unknown_kind` si la brique ou la sorte n'existe pas.
+- `503` `brick_unavailable` si la brique ne répond pas `ready` à temps (section 4).
 - `last` porte la dernière valeur du flux (un événement, voir plus bas), ou `null`.
 - L'identifiant d'abonnement est propre à chaque abonné. Deux mods d'une même session
   abonnés au même flux ont deux abonnements : le désabonnement de l'un ne coupe pas
@@ -230,7 +231,7 @@ service → {"v":1,"t":"ack","req":7}
 
 1. **Lancement** à la première souscription : le service envoie `hello` et attend
    `ready` dans un délai de 5 s. Sans réponse, la brique est arrêtée et
-   la souscription échoue (`503` côté client).
+   la souscription échoue (`503` `brick_unavailable` côté client).
 2. **Arrêt** quand plus aucun flux n'a d'abonné, après un délai de grâce
    de 30 s qui évite de relancer une brique à chaque abonnement
    éphémère. Le service envoie `shutdown`, puis `SIGTERM`, puis `SIGKILL`, chacun après
