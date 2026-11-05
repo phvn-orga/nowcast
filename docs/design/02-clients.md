@@ -1,7 +1,7 @@
 # Les clients
 
-État au 2026-11-05 : architecture des clients et format du flux posés, détails du
-protocole de session à fixer.
+État au 2026-11-05 : architecture des clients, format du flux et déclaration de
+session posés ; mod central validé par un spike.
 
 ## Décisions prises
 
@@ -9,10 +9,18 @@ protocole de session à fixer.
   vérifié (voir `01-briques.md`). Il est placé tel quel dans le champ `data` de
   l'événement, sans conversion ni base64.
 - **Des clients minces : l'état vit dans le service.** Le service garde, pour chaque
-  session, ses abonnements et l'identifiant de session en cours, et pour chaque flux sa
-  dernière valeur. Une coupure du flux ne fait rien perdre. Un client ne fait que
-  quatre choses : déclarer sa session, s'abonner, se désabonner, lire son flux. Ce qui
+  processus d'ancrage, ses abonnements et l'identifiant de session en cours, et pour
+  chaque flux sa dernière valeur. Une coupure du flux ne fait rien perdre. Un client ne fait que
+  cinq choses : déclarer sa session, s'abonner, se désabonner, lire son flux et
+  demander le rafraîchissement immédiat d'un flux. Le service n'exécute aucune action
+  sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
+- **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
+  (par exemple `PUT /session {id}`), avant toute autre requête, puis à chaque
+  changement (`/clear`, reprise). La mort du processus d'ancrage termine tout.
+- **Les abonnements suivent le processus d'ancrage, pas l'identifiant de session.** Un
+  `/clear` ne coupe donc rien : le client se désabonne de ce qu'il ne veut plus. Le
+  service n'a pas à deviner ce que signifie un changement de session.
 - **Un flux par session, des requêtes en appels HTTP.** La session tient un seul flux
   ouvert, qui regroupe tous ses abonnements. S'abonner, se désabonner, demander un
   rafraîchissement, lire la dernière valeur d'un flux ou annoncer un changement de
@@ -34,11 +42,16 @@ protocole de session à fixer.
   l'agent (début de session, changement de session, fin) en requêtes au service, et
   s'appuie sur l'outil commun pour le reste. Un agent qui n'a que des hooks ponctuels
   s'en sert par `pulse get`.
-- **Pour Claude Code, l'adaptateur est le mod central de la session.** Un plugin lance
-  `pulse watch`, traduit les événements de la session (début, `/clear`, fin) et
-  redistribue les flux aux autres mods de la session par l'état des plugins
-  (`$.state`). Les autres mods ne se connectent pas eux-mêmes : une seule connexion et
-  un seul émetteur des changements de session par session.
+- **Pour Claude Code, l'adaptateur est le mod central de la session ; seul le flux est
+  centralisé.** Le mod central lance `pulse watch`, tient l'unique flux SSE de la
+  session, déclare la session et ses changements (début, `/clear`, reprise), et écrit
+  chaque flux reçu dans son état de plugin (`$.state`). Les requêtes (s'abonner, se
+  désabonner, demander un rafraîchissement) partent directement de chaque mod vers le service en HTTP : tous
+  les mods tournent dans le même processus d'ancrage, donc le service les rattache à la
+  même session que le flux. Un mod qui s'abonne reçoit l'identifiant du flux en
+  réponse et le lit ensuite dans l'état du mod central. Une petite bibliothèque cliente
+  sert aux mods pour ces requêtes. Pas d'API de requêtes entre mods à concevoir.
+  Validé par un spike (voir « Ce que peuvent les clients »).
 - **Aucun mécanisme interne non documenté d'un agent** (variable d'environnement,
   fichier de session) n'entre dans le modèle : seules les API publiques des agents
   comptent.
@@ -63,15 +76,35 @@ protocole de session à fixer.
     moteur, qui les donne aux plugins par ses événements : le service ne peut pas les
     lire lui-même, le client les lui transmet.
   - Tout plugin lit l'état (`$.state`) de n'importe quel autre ; seul le propriétaire
-    l'écrit, et une écriture est un événement qu'on peut intercepter. Le mod central
-    peut donc publier les flux dans son état, et un mod écrire dans le sien les flux
-    qu'il veut, que le mod central intercepte. Déduit des types, pas testé.
+    l'écrit, et une écriture est un événement qu'on peut intercepter.
+
+  Spike du 2026-11-05 (Claude Code 2.1.318, session sans interface `claude -p`, deux
+  mods de test), les trois points sont validés :
+  - Un mod suit les écritures d'un autre mod dans son état par un hook `state.set` et
+    relit la valeur. Le sens inverse marche aussi : un mod écrit le flux qu'il veut
+    dans son propre état, le mod central intercepte l'écriture. Écrire dans l'état
+    d'un autre mod est refusé.
+  - Un `$.http.fetch` par `socketPath` arrive avec le processus `claude` lui-même pour
+    pair ; un `curl` lancé par `$.process.spawn` a `claude` pour parent direct. Même
+    ancrage pour les requêtes et le flux.
+  - Un `curl -N` lancé par un mod livre les événements SSE un par un, 0,1 à 3,3 ms
+    après leur émission, sans regroupement.
+
+  Contraintes à respecter dans la conception :
+  - Le hook `state.set` d'un observateur s'exécute de façon synchrone, imbriqué dans
+    l'écriture du propriétaire : un observateur lent ralentit le mod central, et un
+    observateur peut réécrire ou refuser la valeur. Les hooks des mods restent donc
+    minimaux. C'est une question de robustesse, pas de sécurité : tous les mods
+    partagent déjà le même processus.
+  - Hors rendu d'interface, ce hook est le seul moyen de suivre l'état d'un autre mod.
+  - Une référence à l'état d'un autre mod (`{plugin, key}`) doit être un littéral.
+
+  Non vérifié : une session interactive (comportement attendu identique) et plusieurs
+  observateurs sur la même clé.
 - **Codex et Droid.** Leurs hooks sont des commandes ponctuelles, lancées sur des
   événements de session ; ils lisent à un instant donné, pas en continu. Les hooks
   descendent du processus de l'agent, donc l'identité du noyau les rattache à leur
   session.
-- **Tableau de bord dans un navigateur.** Une page web ne peut pas joindre un socket
-  Unix.
 
 ## Pourquoi SSE
 
@@ -97,19 +130,23 @@ protocole.
 
 ## À trancher
 
-- **La déclaration de session** : forme de la requête, ce qui se passe entre un
-  `/clear` et la déclaration suivante, sort des abonnements d'une session qui se
-  termine alors que son processus continue.
-- **L'échange par `$.state`** entre le mod central et les autres mods : à tester.
+- **Les détails de la déclaration de session** : forme exacte de la requête, réponse
+  du service à une requête qui arrive avant toute déclaration.
+- **Revérifier le spike en session interactive**, et avec plusieurs observateurs sur
+  la même clé, avant l'implémentation du mod central.
 - **L'outil en ligne de commande** : son nom, sa distribution (binaire à part ou
   sous-commande du service).
-- **Les tableaux de bord dans un navigateur.** Sans port TCP, exclu par décision, deux
-  voies : une extension de navigateur avec native messaging (le navigateur lance un
-  programme local et lui parle par l'entrée et la sortie standard), ou un tableau de
-  bord natif qui ouvre le socket directement.
-- **Le nom.** Le répertoire `$XDG_RUNTIME_DIR/pulse/` est déjà pris par PipeWire-Pulse
-  (le socket de compatibilité PulseAudio). Il faut un autre nom de répertoire, et plus
-  largement se demander si le nom « pulse » tient sous Linux.
+- **Le nom du projet.** Il doit changer : le répertoire `$XDG_RUNTIME_DIR/pulse/` est
+  déjà pris par PipeWire-Pulse (le socket de compatibilité PulseAudio), et « pulse »
+  évoque PulseAudio sous Linux. Le nouveau nom vaudra pour le socket, l'outil en ligne
+  de commande et le dépôt ; des candidats sont à l'étude.
+
+## Hors périmètre pour l'instant
+
+- **Les tableaux de bord dans un navigateur.** Pas un besoin aujourd'hui, gardé en tête :
+  ce qui compte, c'est que Claude Code ne sera pas le seul client. Une page web ne peut
+  pas joindre un socket Unix ; sans port TCP, deux voies existeraient : une extension de
+  navigateur avec native messaging, ou un tableau de bord natif qui ouvre le socket.
 
 ## Sources
 

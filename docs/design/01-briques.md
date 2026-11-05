@@ -1,7 +1,8 @@
 # Les briques
 
-État au 2026-11-05 : modèle d'extension, contrat et transport des briques posés, socle
-des briques à concevoir.
+État au 2026-11-05 : modèle d'extension, contrat, transport et documentation de la clé
+posés, découverte des briques décidée, pas d'action dans le service ; reste du fichier
+de déclaration à concevoir.
 
 ## Décisions prises
 
@@ -12,11 +13,11 @@ des briques à concevoir.
 - **Le service est un relais.** Il met en relation briques et clients, sans imposer de
   règle sur la façon dont une brique obtient sa donnée. Fréquence, protocole et
   authentification auprès de la source sont l'affaire de la brique.
-- **Le service peut offrir un socle aux briques**, dont elles se servent si elles le
-  veulent. Premier exemple : un polling HTTP générique, une requête toutes les N
-  secondes, N choisi par la brique. Ce socle s'arrête où commence le spécifique d'une
-  source : un WebSocket authentifié ou le protocole propre à un outil restent dans la
-  brique.
+- **Pas de socle de polling dans le service.** Interroger une source (polling HTTP,
+  WebSocket, protocole propre à un outil) est propre à chaque brique, qui se sert des
+  bibliothèques de son choix. Le service n'offre rien de tel.
+- **Le fichier de déclaration d'une brique vit dans son dépôt**, à côté de son code.
+  Le code du service ne connaît aucune brique.
 - **Deux transports indépendants.** Celui entre les briques et le service n'est pas
   celui entre le service et ses clients. Les clients peuvent être limités (un client
   qui ne lit qu'un flux HTTP, par exemple) ; cette limite ne s'impose pas aux briques,
@@ -40,13 +41,32 @@ des briques à concevoir.
   JSON valide avant de le relayer : une vérification de syntaxe, jamais une
   interprétation. Côté clients, le détail est placé tel quel dans le champ `data` de
   l'événement, sans conversion.
+- **Une publication invalide est refusée.** Si le détail n'est pas du JSON valide, le
+  service ne relaie pas la publication et répond à la brique par une erreur. La brique
+  en fait ce qu'elle veut. Toute publication reçoit donc une réponse sur le canal de la
+  brique : un accusé de réception ou une erreur.
 - **Enveloppe en MessagePack, détail (les octets du JSON) porté en `bin`.** Préféré à un en-tête binaire fait
   main parce que c'est un standard. Mesure du 2026-11-04 : lire l'enveloppe coûte 46 ns
   en MessagePack contre 12 ns pour un en-tête binaire, deux coûts négligeables face à un
   aller-retour de 3 à 6 µs. En lignes JSON, ce coût croît avec le détail (2,2 µs à 5 Ko).
+- **Pas de briques en shell.** Une brique est un programme qui parle MessagePack ; une
+  bibliothèque existe pour cela dans tous les langages courants.
+- **Le service trouve les briques par un répertoire de déclarations.** Installer une
+  brique, c'est rendre son fichier de déclaration visible dans un répertoire que le
+  service lit, comme une unité systemd. Le service ne connaît les briques que par ce
+  répertoire, jamais dans son code.
+- **Le service observe, il n'agit pas.** Une action sur une source (cocher une tâche,
+  par exemple) reste dans le mod client, qui agit directement sur la source avec ses
+  propres identifiants. Ces identifiants se partagent par l'outillage de la source ou
+  le trousseau du système, jamais par le service. N'importe qui écrira des mods
+  spécifiques : faire passer chaque action par le service n'aurait pas de sens. La seule
+  requête qu'un client adresse à une brique, en dehors des abonnements, est le
+  rafraîchissement immédiat d'un flux, que le service relaie à la brique, typiquement
+  après qu'un mod a agi sur la source.
 - **Le service lance chaque brique**, au premier consommateur, et l'arrête au dernier.
   pulse est le centre : une brique sans consommateur ne sert à rien, elle n'existe pas
-  hors de lui.
+  hors de lui, et aucune ne tourne pour rien. Une brique toujours active pourra devenir
+  un besoin plus tard ; ce n'en est pas un aujourd'hui.
 - **Un processus par brique, qui sert toutes ses clés.** La brique gère sa liste de
   clés et peut mutualiser ses appels entre elles.
 - **La clé appartient à la brique ; le service ne connaît que des flux.** Le contenu
@@ -59,6 +79,11 @@ des briques à concevoir.
   obligatoire dans le protocole, c'est l'identifiant de flux. Ce qu'est une clé (un ou
   plusieurs champs, la branche d'un dépôt, un lieu pour la météo) reste l'affaire de la
   brique ; une brique à cible unique répond toujours par le même identifiant.
+- **La clé est documentée par le fichier de déclaration.** Pour chaque sorte
+  d'abonnement, la brique y déclare un JSON Schema de son contenu, avec la description
+  de chaque champ. C'est à la fois la documentation de la clé pour l'auteur d'un client
+  et un contrat vérifiable. La règle qui ramène deux écritures d'une même cible au même
+  flux reste dans le code de la brique ; sa documentation la décrit.
 - **Canal : l'entrée et la sortie standard de la brique**, en flux d'octets, messages
   préfixés par leur longueur. Pipe, socket Unix et socket à messages donnent le même
   aller-retour à la mesure : le choix du canal ne joue pas sur la performance.
@@ -84,27 +109,10 @@ du problème, et leurs choix convergent.
 
 ## À trancher
 
-- **Les briques qui ne savent pas parler MessagePack** (un script shell) : un mode en
-  lignes JSON, plus lent, annoncé au démarrage comme chez Nushell, ou un adaptateur qui
-  traduit pour elles.
-- **Où vit le socle des briques.** Trois emplacements, non exclusifs :
-  - *Dans le service.* Une brique se déclare dans un fichier (URL, fréquence, filtre) et
-    le service exécute le polling. Aucun code à écrire, mais le service exécute alors la
-    logique d'une brique.
-  - *Dans une bibliothèque* que la brique importe : boucle de polling, attente
-    croissante après erreur, détection de changement. La brique reste un programme ;
-    il faut une bibliothèque par langage.
-  - *Dans des briques génériques*, livrées par le dépôt et paramétrées par instance
-    (une brique de polling HTTP, par exemple). Le service reste un relais pur.
-- **Les signaux que le service envoie à une brique en marche**, en plus de
-  « abonnement transmis » et « flux abandonné » : un rafraîchissement immédiat demandé
-  par un client (relire une PR qui vient de changer), et ce qui manquerait encore.
-- **Décrire la clé pour les auteurs de briques** : ce que peut contenir un abonnement,
-  et comment une brique en tire son identifiant de flux.
 - **Les abonnements plus larges ou partiels** : s'abonner à tout un dépôt plutôt qu'à
   une branche, par exemple, et ce que cela implique pour le service.
-- **Un détail invalide** : ce que fait le service d'une publication dont le détail
-  n'est pas du JSON valide (l'écarter, le journaliser, prévenir les abonnés, signaler
-  la brique).
-- **Comment une brique se fait connaître** du service : par un fichier de déclaration.
-  Restent à fixer l'endroit où il vit et ce qu'il contient.
+- **Le reste du fichier de déclaration.** Proposition : le nom de la brique, la commande
+  à lancer, la version du protocole, les types qu'elle publie avec leur `dataschema`,
+  en plus des schémas d'abonnement déjà décidés.
+- **L'emplacement du répertoire de déclarations** et la façon d'y installer une
+  brique.

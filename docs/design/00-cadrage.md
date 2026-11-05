@@ -71,13 +71,17 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   son processus meure : après un `/clear` ou une reprise, Claude Code continue sous un
   nouvel identifiant de session, sans événement de démarrage. Le processus est
   l'ancrage ; c'est le client qui déclare la session en cours et annonce ses
-  changements.
+  changements. Aucun abonnement sans session déclarée, mais les abonnements suivent
+  l'ancrage : un changement de session ne les coupe pas (voir `02-clients.md`).
 - **Détection d'une fermeture brutale** par deux signaux, sans battement de cœur : le
   `pidfd` du processus d'ancrage (le noyau prévient à sa mort, même sur `kill -9`), et
   la coupure du flux. Un changement de session, lui, n'est connu que par le client.
 - **Lancé à la demande.** L'activation par socket de systemd (unité utilisateur) tient
   le socket et ne démarre le service qu'à la première connexion. Hors usage, il n'y a
   pas de processus.
+- **Observation, pas action.** Le service écoute et publie ; il n'agit jamais sur une
+  source. Les actions restent dans les clients (voir `01-briques.md`).
+- **Mêmes droits pour tous les clients**, pour l'instant (voir la limite ci-dessous).
 - **Briques dormantes sans abonné.** Le service compte les abonnés de chaque brique par
   flux. Il lance la brique au premier abonné et l'arrête au dernier, lui transmet chaque
   abonnement et la prévient quand un flux n'a plus d'abonné (voir `01-briques.md`).
@@ -94,9 +98,9 @@ d'agent face à un programme qui tourne sous le même utilisateur : un tel progr
 lancer l'agent lui-même, remplacer son exécutable (il appartient à l'utilisateur) ou
 s'y injecter. Aucune authentification locale ne tient contre ce cas, qui relève de la
 sécurité de la machine. Pour de la lecture, le risque est faible : un tel programme
-peut déjà lire directement ce que lisent les briques. Il grandit avec les actions
-offertes (ouvrir un port, lancer une commande) : plus il y en a, plus il faut limiter
-ce que chaque type de client a le droit de demander. Ces droits s'arrêtent à la
+peut déjà lire directement ce que lisent les briques. Le service n'offre aucune action
+sur une source ; s'il en offrait un jour d'autres que le rafraîchissement, il faudrait
+limiter ce que chaque type de client a le droit de demander. Ces droits s'arrêtent à la
 session : le noyau ne distingue pas deux mods d'une même session, qui partagent le
 même processus.
 
@@ -119,8 +123,10 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
 
 - **Le schéma des messages** et son versionnement. Côté briques, l'enveloppe, l'encodage
   et le canal sont décidés dans `01-briques.md` ; côté clients, voir `02-clients.md`.
-- **Les droits de chaque type de client** sur les requêtes qu'il peut adresser au
-  service. Les requêtes elles-mêmes sont décrites dans `02-clients.md`.
+- **Des droits différents selon le type de client.** Pour l'instant, tous les clients
+  ont les mêmes droits. Le service n'offrant aucune action sur une source, la question
+  ne se pose qu'au-delà du rafraîchissement. Les requêtes elles-mêmes sont
+  décrites dans `02-clients.md`.
 - **Le comportement quand le service est absent** ou en échec : il vit dans l'outil
   en ligne de commande commun aux clients (voir `02-clients.md`), reste à le définir.
 - **Le langage.** Rust est le choix souhaité pour un démon léger. À confirmer.
