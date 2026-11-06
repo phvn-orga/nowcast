@@ -1030,4 +1030,25 @@ mod tests {
         assert!(f.state.names().is_empty());
         assert!(f.state.take_effects().is_empty(), "no relaunch");
     }
+
+    #[test]
+    fn a_brick_given_up_on_gets_its_restarts_back_on_a_new_subscription() {
+        let mut f = fixture(Config {
+            max_restarts: 1,
+            ..Config::default()
+        });
+        let (generation, _brick) = f.running();
+        f.state.exited(&probe::name(), generation, &f.router);
+        assert_eq!(f.phase(), Phase::Backoff);
+        let (_, timer) = f.phase_timer();
+        f.fire(&timer);
+        let (generation, _brick) = f.launch();
+        f.message(generation, BrickMessage::Ready);
+        f.state.exited(&probe::name(), generation, &f.router);
+        assert!(f.state.names().is_empty(), "given up");
+
+        let (generation, _brick) = f.running();
+        f.state.exited(&probe::name(), generation, &f.router);
+        assert_eq!(f.phase(), Phase::Backoff, "relaunched, not given up");
+    }
 }
