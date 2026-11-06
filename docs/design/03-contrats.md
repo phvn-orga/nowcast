@@ -167,6 +167,12 @@ lui. La dernière valeur suffit, il n'y a pas d'historique à rejouer. Un client
 donc s'abonner avant ou après avoir ouvert le flux sans perdre de valeur ; il reçoit
 parfois en double une valeur déjà lue dans `last`, reconnaissable à son `id`.
 
+Les identifiants d'événement croissent aussi d'une exécution du service à l'autre : au
+démarrage, le compteur part de l'horloge, en microsecondes depuis 1970, puis avance de
+1 par événement. Un client peut donc reprendre avec un `Last-Event-ID` obtenu avant un
+redémarrage du service : tout ce qui a été publié depuis porte un identifiant plus
+grand. Seule une horloge remise en arrière rompt cette garantie.
+
 ```
 event: update
 id: 42

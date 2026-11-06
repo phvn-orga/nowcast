@@ -39,15 +39,15 @@ interface.
 - **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
   valeur, en un appel), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
-  immédiat). La reconnexion et la conduite à tenir quand le service est absent sont
-  écrites une fois, là.
+  immédiat, rien d'affiché en cas de succès). La reconnexion et la conduite à tenir
+  quand le service est absent sont écrites une fois, là.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
-  après cet identifiant, sans recevoir à nouveau toutes les dernières valeurs. Sous
-  `--json`, chaque ligne de mise à jour porte l'`id` SSE de l'événement, et des lignes
-  d'état disent où en est la connexion : `{"status":"connected"}` à chaque connexion,
-  la première comprise, et `{"status":"retrying","reason":"..."}`. Un client suit
-  ainsi l'état du flux et reprend après une coupure sans analyser de messages
-  destinés à un humain.
+  après cet identifiant, sans recevoir à nouveau toutes les dernières valeurs.
+  L'identifiant à lui passer est l'`id` de l'événement CloudEvents, dans `data`, égal
+  à l'`id` SSE. Sous `--json`, des lignes d'état disent aussi où en est la connexion :
+  `{"status":"connected"}` à chaque connexion, la première comprise, et
+  `{"status":"retrying","reason":"..."}`. Un client suit ainsi l'état du flux et
+  reprend après une coupure sans analyser de messages destinés à un humain.
 - **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et
