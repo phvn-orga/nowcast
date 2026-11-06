@@ -3,3 +3,18 @@ name = "nowcast-daemon"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+nowcast-discovery = { path = "../discovery" }
+nowcast-identity = { path = "../identity" }
+nowcast-router = { path = "../router" }
+nowcast-server = { path = "../server" }
+nowcast-traits = { path = "../traits" }
+rustix = "1.1.6"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "signal", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+rustix = { version = "1.1.6", features = ["process"] }
+tempfile = "3.27.0"
