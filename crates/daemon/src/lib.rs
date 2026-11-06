@@ -1,5 +1,6 @@
 //! The nowcast daemon: assembles the modules and serves the client API on the
-//! service's Unix socket.
+//! service's Unix socket. [`run`] is the whole service; the `nowcast` binary
+//! runs it as `nowcast daemon`.
 //!
 //! Started by systemd on the first connection (`systemd/nowcast.socket`), it
 //! takes the listening socket systemd passes. Started by hand, it binds
@@ -63,7 +64,11 @@ const STOP_MARGIN: Duration = Duration::from_secs(2);
 
 type Supervisor = BrickSupervisor<FsDiscovery, ProcessLauncher, FlowRouter>;
 
-fn main() -> ExitCode {
+/// Runs the service until it is stopped or idle, and returns its exit status.
+///
+/// Reads the environment and edits it while taking the socket: call it from
+/// the main thread, before any other thread starts.
+pub fn run() -> ExitCode {
     init_logging();
     let idle = match idle_setting(std::env::var_os(IDLE_VAR)) {
         Ok(idle) => idle,
@@ -94,7 +99,7 @@ fn main() -> ExitCode {
         .enable_all()
         .build();
     let result = match runtime {
-        Ok(runtime) => runtime.block_on(run(socket, idle)),
+        Ok(runtime) => runtime.block_on(serve(socket, idle)),
         Err(e) => Err(format!("cannot start the runtime: {e}").into()),
     };
     match result {
@@ -155,8 +160,8 @@ fn stderr_is_journal() -> bool {
     stream.to_str() == Some(format!("{}:{}", metadata.dev(), metadata.ino()).as_str())
 }
 
-async fn run(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Error>> {
-    // Dropped last, when `run` returns, whether it succeeds or fails.
+async fn serve(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Error>> {
+    // Dropped last, when `serve` returns, whether it succeeds or fails.
     let Socket {
         listener,
         bound: _bound,

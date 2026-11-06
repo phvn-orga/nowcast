@@ -718,6 +718,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "nowcast-daemon",
  "nowcast-types",
  "serde_json",
  "tempfile",

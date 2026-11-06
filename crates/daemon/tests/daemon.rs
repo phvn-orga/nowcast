@@ -1,7 +1,7 @@
-//! Runs the daemon binary: under socket activation, started by hand, and with
-//! the real test brick behind it.
+//! Runs the daemon as `nowcast daemon`: under socket activation, started by
+//! hand, and with the real test brick behind it.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
@@ -24,7 +24,6 @@ use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-const DAEMON: &str = env!("CARGO_BIN_EXE_nowcast-daemon");
 const SOCKET_ACTIVATE: &str = "/usr/bin/systemd-socket-activate";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
@@ -64,7 +63,7 @@ impl Dirs {
     /// Activates the test brick, built if needed: its declaration names the
     /// bare program, which [`Dirs::command`] puts on the `PATH`.
     fn link_probe_brick(&self) {
-        build_test_brick();
+        build_binaries();
         let bricks = self.config().join("bricks");
         fs::create_dir_all(&bricks).unwrap();
         let manifest = nowcast_test_brick::manifest();
@@ -84,7 +83,14 @@ impl Dirs {
         fs::write(clients.join("connector.toml"), kind).unwrap();
     }
 
-    fn command(&self, program: &str) -> Command {
+    /// `nowcast daemon` with the environment the daemon reads.
+    fn daemon(&self) -> Command {
+        let mut command = self.command(nowcast());
+        command.arg("daemon");
+        command
+    }
+
+    fn command(&self, program: impl AsRef<OsStr>) -> Command {
         fs::create_dir_all(self.runtime()).unwrap();
         // As private as a real runtime directory, whatever the umask.
         fs::set_permissions(self.runtime(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -107,15 +113,20 @@ impl Dirs {
     }
 }
 
-/// Builds the test brick once per test run. Cargo builds it for its own
-/// package's tests only, under `cargo test --workspace`.
-fn build_test_brick() {
+/// Builds the `nowcast` binary, which runs this crate as `nowcast daemon`,
+/// and the test brick, once per test run. Cargo builds them for their own
+/// packages' tests only, under `cargo test --workspace`.
+fn build_binaries() {
     static BUILT: OnceLock<()> = OnceLock::new();
     BUILT.get_or_init(|| {
         let mut cargo = Command::new(env!("CARGO"));
         cargo.args([
             "build",
             "--quiet",
+            "-p",
+            "nowcast-cli",
+            "--bin",
+            "nowcast",
             "-p",
             "nowcast-test-brick",
             "--bin",
@@ -124,8 +135,15 @@ fn build_test_brick() {
         if !cfg!(debug_assertions) {
             cargo.arg("--release");
         }
-        assert!(cargo.status().unwrap().success(), "the test brick builds");
+        assert!(cargo.status().unwrap().success(), "the binaries build");
     });
+}
+
+/// The `nowcast` binary, built if needed, beside the test brick.
+fn nowcast() -> PathBuf {
+    build_binaries();
+    let brick = nowcast_test_brick::binary().expect("the profile directory of the tests");
+    brick.with_file_name(format!("nowcast{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// The `PATH` with the test brick's directory first.
@@ -241,11 +259,12 @@ fn a_first_connection_starts_the_daemon() {
     for var in ["XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HOME", "NOWCAST_LOG"] {
         command.args(["-E", var]);
     }
-    let mut activator = Running(command.arg(DAEMON).spawn().unwrap());
+    command.arg(nowcast()).arg("daemon");
+    let mut activator = Running(command.spawn().unwrap());
     wait_until("the socket is listening", || dirs.socket().exists());
 
     // The activator replaces itself with the daemon on the first connection.
-    let daemon = fs::canonicalize(DAEMON).unwrap();
+    let daemon = fs::canonicalize(nowcast()).unwrap();
     assert_ne!(
         exe(activator.pid()),
         daemon,
@@ -263,7 +282,7 @@ fn a_first_connection_starts_the_daemon() {
 #[test]
 fn a_daemon_started_by_hand_binds_a_private_socket() {
     let dirs = Dirs::new();
-    let _daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let _daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
 
     assert!(fs::metadata(dirs.socket()).unwrap().file_type().is_socket());
@@ -273,11 +292,36 @@ fn a_daemon_started_by_hand_binds_a_private_socket() {
 }
 
 #[test]
+fn the_client_variables_are_ignored() {
+    let dirs = Dirs::new();
+    let elsewhere = dirs.root.path().join("elsewhere.sock");
+    let mut command = dirs.daemon();
+    command
+        .env("NOWCAST_SOCKET", &elsewhere)
+        .env("NOWCAST_SESSION", "s1");
+    let _daemon = Running(command.spawn().unwrap());
+    wait_until("the socket is bound", || dirs.socket().exists());
+    assert!(!elsewhere.exists());
+}
+
+#[test]
+fn the_client_options_are_refused() {
+    let dirs = Dirs::new();
+    for option in [&["--socket", "/s"][..], &["--session", "s1"], &["--json"]] {
+        let output = dirs.daemon().args(option).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{option:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot be used with daemon"), "{stderr}");
+    }
+    assert!(!dirs.socket_dir().exists(), "refused before the bind");
+}
+
+#[test]
 fn an_existing_directory_is_made_private() {
     let dirs = Dirs::new();
     fs::create_dir_all(dirs.socket_dir()).unwrap();
     fs::set_permissions(dirs.socket_dir(), fs::Permissions::from_mode(0o755)).unwrap();
-    let _daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let _daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
 
     assert_eq!(mode(&dirs.socket_dir()), 0o700);
@@ -289,7 +333,7 @@ fn a_linked_socket_directory_is_refused() {
     let dirs = Dirs::new();
     let elsewhere = dirs.root.path().join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     std::os::unix::fs::symlink(&elsewhere, dirs.socket_dir()).unwrap();
     let mut daemon = Running(command.spawn().unwrap());
 
@@ -300,7 +344,7 @@ fn a_linked_socket_directory_is_refused() {
 #[test]
 fn a_socket_directory_that_is_a_file_is_refused() {
     let dirs = Dirs::new();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     fs::write(dirs.socket_dir(), "").unwrap();
     let mut daemon = Running(command.spawn().unwrap());
 
@@ -310,7 +354,7 @@ fn a_socket_directory_that_is_a_file_is_refused() {
 #[test]
 fn a_runtime_directory_others_can_write_is_refused() {
     let dirs = Dirs::new();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     fs::set_permissions(dirs.runtime(), fs::Permissions::from_mode(0o777)).unwrap();
     let mut daemon = Running(command.spawn().unwrap());
 
@@ -324,7 +368,7 @@ fn a_stale_socket_is_replaced() {
     fs::create_dir_all(dirs.socket_dir()).unwrap();
     // A listener dropped without removing its file, as after a crash.
     drop(UnixListener::bind(dirs.socket()).unwrap());
-    let _daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let _daemon = Running(dirs.daemon().spawn().unwrap());
 
     wait_until("the daemon answers", || {
         declare_session(&dirs.socket()).is_ok_and(|status| status == 204)
@@ -334,7 +378,7 @@ fn a_stale_socket_is_replaced() {
 #[test]
 fn a_file_at_the_socket_path_is_not_removed() {
     let dirs = Dirs::new();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     fs::create_dir(dirs.socket_dir()).unwrap();
     fs::write(dirs.socket(), "not a socket").unwrap();
     let mut daemon = Running(command.spawn().unwrap());
@@ -348,7 +392,7 @@ fn a_socket_in_use_is_not_taken_over() {
     let dirs = Dirs::new();
     fs::create_dir_all(dirs.socket_dir()).unwrap();
     let other = UnixListener::bind(dirs.socket()).unwrap();
-    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let mut daemon = Running(dirs.daemon().spawn().unwrap());
 
     assert!(!daemon.wait().success());
     other.set_nonblocking(true).unwrap();
@@ -359,7 +403,7 @@ fn a_socket_in_use_is_not_taken_over() {
 #[test]
 fn sigterm_stops_the_daemon_and_removes_its_socket() {
     let dirs = Dirs::new();
-    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let mut daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
     // An open connection does not hold the daemon back.
     let _connection = UnixStream::connect(dirs.socket()).unwrap();
@@ -375,7 +419,7 @@ fn a_failed_start_removes_the_socket() {
     // The discovery cannot create its directories under a file.
     let config = dirs.root.path().join("config-file");
     fs::write(&config, "").unwrap();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     let mut daemon = Running(command.env("XDG_CONFIG_HOME", &config).spawn().unwrap());
 
     assert!(!daemon.wait().success());
@@ -389,7 +433,7 @@ fn a_failed_start_removes_the_socket() {
 #[test]
 fn a_socket_replaced_meanwhile_is_left_on_exit() {
     let dirs = Dirs::new();
-    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let mut daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
     // What `nowcast.socket` does when it starts: unlink, bind again.
     fs::remove_file(dirs.socket()).unwrap();
@@ -418,6 +462,15 @@ fn the_socket_unit_matches_the_daemon() {
 fn the_service_unit_lets_the_daemon_stop_its_bricks() {
     let unit = include_str!("../systemd/nowcast.service");
     assert!(unit.lines().any(|l| l == "KillMode=mixed"));
+}
+
+#[test]
+fn the_service_unit_runs_nowcast_daemon() {
+    let unit = include_str!("../systemd/nowcast.service");
+    assert!(
+        unit.lines()
+            .any(|l| l == "ExecStart=%h/.local/bin/nowcast daemon")
+    );
 }
 
 /// Not a test of its own: the connector, this binary run again with
@@ -498,7 +551,7 @@ fn the_session_of_an_anchor_ends_with_its_process() {
     let dirs = Dirs::new();
     dirs.link_probe_brick();
     dirs.declare_connector_kind();
-    let _daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let _daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
     let (mut anchor, connection) = connection_anchored_on_a_connector(&dirs);
 
@@ -524,7 +577,7 @@ async fn a_value_from_the_test_brick_reaches_the_stream() {
     let dirs = Dirs::new();
     dirs.link_probe_brick();
     let control = Control::bind(dirs.root.path().join("control")).unwrap();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     let mut daemon = Running(command.env(CONTROL_VAR, control.path()).spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
 
@@ -613,7 +666,7 @@ fn activator(dirs: &Dirs, idle: Option<&str>) -> Command {
             .arg("-E")
             .arg(format!("NOWCAST_IDLE_TIMEOUT={idle}"));
     }
-    command.arg(DAEMON);
+    command.arg(nowcast()).arg("daemon");
     command
 }
 
@@ -645,7 +698,7 @@ fn an_activated_daemon_waits_a_minute_by_default() {
 #[test]
 fn a_daemon_started_by_hand_runs_until_stopped_by_default() {
     let dirs = Dirs::new();
-    let (mut daemon, logs) = Logs::spawn(&mut dirs.command(DAEMON));
+    let (mut daemon, logs) = Logs::spawn(&mut dirs.daemon());
     logs.wait_for("runs until stopped");
     daemon.terminate();
     assert!(daemon.wait().success());
@@ -654,7 +707,7 @@ fn a_daemon_started_by_hand_runs_until_stopped_by_default() {
 #[test]
 fn an_invalid_idle_delay_is_refused() {
     let dirs = Dirs::new();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     let mut daemon = Running(command.env("NOWCAST_IDLE_TIMEOUT", "soon").spawn().unwrap());
     assert!(!daemon.wait().success());
     assert!(!dirs.socket_dir().exists(), "refused before the bind");
@@ -679,10 +732,12 @@ impl Systemd {
         let socket = OwnedFd::from(self.listener.try_clone().unwrap());
         // The socket comes in as stdin; the shell moves it to 3, then gives
         // way to the daemon under its own pid.
-        let script = r#"exec 3<&0 0</dev/null; export LISTEN_PID=$$ LISTEN_FDS=1; exec "$0""#;
+        let script =
+            r#"exec 3<&0 0</dev/null; export LISTEN_PID=$$ LISTEN_FDS=1; exec "$0" daemon"#;
         let child = dirs
             .command("sh")
-            .args(["-c", script, DAEMON])
+            .args(["-c", script])
+            .arg(nowcast())
             .env("NOWCAST_IDLE_TIMEOUT", IDLE)
             .stdin(Stdio::from(socket))
             .spawn()
@@ -721,7 +776,7 @@ async fn a_subscription_keeps_an_unused_daemon_until_its_anchor_dies() {
     dirs.link_probe_brick();
     dirs.declare_connector_kind();
     let control = Control::bind(dirs.root.path().join("control")).unwrap();
-    let mut command = dirs.command(DAEMON);
+    let mut command = dirs.daemon();
     command
         .env(CONTROL_VAR, control.path())
         .env("NOWCAST_IDLE_TIMEOUT", IDLE);
@@ -806,7 +861,7 @@ fn sigterm_sends_shutdown_to_a_running_brick_before_any_signal_and_waits_for_it(
     let input = dirs.root.path().join("brick.in");
     let log = dirs.root.path().join("brick.log");
     link_recording_brick(&dirs, &input, &log);
-    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    let mut daemon = Running(dirs.daemon().spawn().unwrap());
     wait_until("the socket is bound", || dirs.socket().exists());
 
     // The brick never answers: the request stays in flight on a ready brick.

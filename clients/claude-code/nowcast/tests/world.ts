@@ -105,6 +105,8 @@ export type WorldOptions = {
   answer?: (request: Request) => Partial<HttpResponse> | string
   /** Makes starting a process fail, as with a command not installed. */
   spawnFails?: boolean
+  /** The files that exist, for `$.fs.exists`; none when absent. */
+  files?: string[]
   /** A flow whose writes are refused, as an observer of the state may. */
   refuse?: string
 }
@@ -140,6 +142,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   const children: Child[] = []
   const session = { id: 'session-1' }
 
+  on('fs.exists', (_, e) => ({ value: options.files?.includes(e.path) ?? false }))
   on('session.id', () => ({ value: session.id }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))

@@ -233,7 +233,17 @@ async fn read_brick<D: Discovery, L: BrickLauncher, R: Router>(
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        inner.update(|state, router| state.message(&brick, generation, msg, router));
+        let discovery = inner.discovery.clone();
+        inner.update(|state, router| {
+            // A brick removed from discovery while one of its subscriptions
+            // was in flight: the removal waits in discovery's changes, and
+            // handling it first fails that subscription as unknown_brick
+            // instead of completing it.
+            if matches!(msg, BrickMessage::Subscribed { .. }) && discovery.brick(&brick).is_none() {
+                state.removed(&brick, router);
+            }
+            state.message(&brick, generation, msg, router)
+        });
     }
     if let Some(inner) = inner.upgrade() {
         inner.update(|state, router| state.exited(&brick, generation, router));
