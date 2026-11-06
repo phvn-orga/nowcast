@@ -6,7 +6,8 @@
 //!   each flow, keeps its last value, and signals when a flow has no subscriber
 //!   left. It never starts or stops a brick.
 //! - The [`Supervisor`] owns bricks: it decides to start or stop one, maps a
-//!   subscription to a flow, and feeds what bricks publish into the router.
+//!   subscription to a flow and makes it in the router, and feeds what bricks
+//!   publish into the router.
 //! - [`Discovery`] owns the declarations of bricks and client kinds.
 //! - [`Identity`] maps a connection to its anchor process.
 //! - [`Sessions`] maps an anchor to the session it declared.
@@ -28,4 +29,4 @@ pub use discovery::{
 pub use identity::Identity;
 pub use router::{Router, UnknownFlow, UnknownSubscription};
 pub use sessions::Sessions;
-pub use supervisor::{BrickUnavailable, ResolveError, Supervisor};
+pub use supervisor::{BrickUnavailable, ResolveError, Resolved, Supervisor};

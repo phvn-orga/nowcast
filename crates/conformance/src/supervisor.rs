@@ -1,6 +1,8 @@
 //! Contract section 4, the service's side of the brick protocol and the brick
 //! lifecycle, plus the end of a removed brick from section 2. Checked on a
-//! [`Supervisor`] wired to the fakes, the probe declared.
+//! [`Supervisor`] wired to the fakes, the probe declared. The supervisor makes
+//! the router subscriptions itself, so the suite subscribes through
+//! [`Supervisor::resolve`] only.
 //!
 //! The tests run on a paused clock: the supervisor must take its delays from
 //! `tokio::time`, and the contract's 5 s and 30 s pass instantly.
@@ -9,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter, Signal};
-use nowcast_traits::{AnchorId, ResolveError, Router, Supervisor, UnknownFlow};
+use nowcast_traits::{AnchorId, ResolveError, Resolved, Router, Supervisor, UnknownFlow};
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
     READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
@@ -72,12 +74,17 @@ fn qualified(id: &str) -> QualifiedFlowId {
 }
 
 impl<S: Supervisor> World<S> {
-    fn resolve(&self, id: &str) -> JoinHandle<Result<QualifiedFlowId, ResolveError>> {
+    /// Subscribes anchor `A` to the probe's flow `id`, as the server does.
+    fn resolve(&self, id: &str) -> JoinHandle<Result<Resolved, ResolveError>> {
+        self.resolve_as(A, id)
+    }
+
+    fn resolve_as(&self, anchor: AnchorId, id: &str) -> JoinHandle<Result<Resolved, ResolveError>> {
         let supervisor = self.supervisor.clone();
         let params = probe::params(id);
         tokio::spawn(async move {
             supervisor
-                .resolve(&probe::name(), probe::KIND, &params)
+                .resolve(anchor, &probe::name(), probe::KIND, &params)
                 .await
         })
     }
@@ -96,16 +103,21 @@ impl<S: Supervisor> World<S> {
         brick
     }
 
-    /// Resolves `id` on a fresh brick and subscribes anchor `A` to it, as the
-    /// server does.
+    /// Subscribes anchor `A` to `id` on a fresh brick.
     async fn subscribed(&self, id: &str) -> FakeBrick {
         let pending = self.resolve(id);
         let mut brick = self.ready_brick().await;
         serve(&mut brick, id).await;
-        assert_eq!(pending.await.unwrap(), Ok(qualified(id)));
-        self.router.subscribe(A, qualified(id));
+        assert_eq!(flow_of(pending).await, Ok(qualified(id)));
         brick
     }
+}
+
+/// The flow a pending resolution ends up on.
+async fn flow_of(
+    pending: JoinHandle<Result<Resolved, ResolveError>>,
+) -> Result<QualifiedFlowId, ResolveError> {
+    pending.await.unwrap().map(|resolved| resolved.flow)
 }
 
 async fn recv(brick: &mut FakeBrick) -> ServiceMessage {
@@ -172,13 +184,18 @@ pub async fn the_first_subscription_launches_the_brick<S: SupervisorSubject>() {
 }
 
 /// `subscribe` carries the kind and the params as JSON bytes; the flow the
-/// brick answers is prefixed with its name.
+/// brick answers is prefixed with its name, and the anchor is subscribed to it
+/// in the router.
 pub async fn subscribe_maps_to_a_prefixed_flow<S: SupervisorSubject>() {
     let world = world::<S>();
     let pending = world.resolve("a");
     let mut brick = world.ready_brick().await;
     serve(&mut brick, "a").await;
-    assert_eq!(pending.await.unwrap(), Ok(qualified("a")));
+    let resolved = pending.await.unwrap().unwrap();
+    assert_eq!(resolved.flow, qualified("a"));
+    assert_eq!(resolved.last, None);
+    assert_eq!(world.router.subscribers(&qualified("a")), 1);
+    assert_eq!(world.router.unsubscribe(A, &resolved.subscription), Ok(()));
 }
 
 /// A running brick serves the next subscriptions: no second launch.
@@ -187,7 +204,7 @@ pub async fn a_running_brick_is_reused<S: SupervisorSubject>() {
     let mut brick = world.subscribed("a").await;
     let pending = world.resolve("b");
     serve(&mut brick, "b").await;
-    assert_eq!(pending.await.unwrap(), Ok(qualified("b")));
+    assert_eq!(flow_of(pending).await, Ok(qualified("b")));
     assert!(world.launcher.try_next().is_none());
 }
 
@@ -204,7 +221,7 @@ pub async fn a_brick_missing_ready_is_unavailable<S: SupervisorSubject>() {
             .is_err(),
         "gave up before the ready timeout"
     );
-    let result = pending.await.unwrap();
+    let result = flow_of(pending).await;
     assert_eq!(
         result,
         Err(ResolveError::Unavailable(nowcast_traits::BrickUnavailable(
@@ -233,7 +250,7 @@ pub async fn a_refused_subscription_fails<S: SupervisorSubject>() {
         })
         .unwrap();
     assert_eq!(
-        pending.await.unwrap(),
+        flow_of(pending).await,
         Err(ResolveError::Refused {
             code: "no_such_item".into(),
             message: "No item a.".into()
@@ -306,10 +323,9 @@ pub async fn a_publish_on_a_released_flow_is_refused<S: SupervisorSubject>() {
     let world = world::<S>();
     let mut brick = world.subscribed("a").await;
     // Another anchor keeps the brick busy on flow b.
-    let pending = world.resolve("b");
+    let pending = world.resolve_as(AnchorId(2), "b");
     serve(&mut brick, "b").await;
     pending.await.unwrap().unwrap();
-    world.router.subscribe(AnchorId(2), qualified("b"));
     world.router.remove_anchor(A);
     assert_eq!(
         recv(&mut brick).await,
@@ -386,7 +402,7 @@ pub async fn an_idle_brick_is_kept_for_the_grace_period<S: SupervisorSubject>() 
     sleep(GRACE - Duration::from_secs(1)).await;
     let pending = world.resolve("b");
     serve(&mut brick, "b").await;
-    assert_eq!(pending.await.unwrap(), Ok(qualified("b")));
+    assert_eq!(flow_of(pending).await, Ok(qualified("b")));
     assert!(world.launcher.try_next().is_none());
 }
 
@@ -470,12 +486,111 @@ pub async fn a_removed_brick_stops_and_its_flows_end<S: SupervisorSubject>() {
     stopped(&mut brick).await;
 }
 
+/// A value the brick publishes right after `subscribed` is not lost: it is
+/// acknowledged, and is either the subscription's `last` or delivered to the
+/// anchor's stream.
+pub async fn a_value_published_right_after_subscribed_is_not_lost<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let mut stream = world.router.stream(A, None);
+    let pending = world.resolve("a");
+    let mut brick = world.ready_brick().await;
+    let ServiceMessage::Subscribe { req, .. } = recv(&mut brick).await else {
+        panic!("expected subscribe");
+    };
+    // Both sent at once: the service reads them back to back.
+    brick
+        .to_service
+        .send(BrickMessage::Subscribed {
+            req,
+            flow: flow("a"),
+        })
+        .unwrap();
+    publish(&mut brick, 1, "a", probe::TYPE, br#"{"first":true}"#).await;
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::Ack { req: RequestId(1) }
+    );
+    let resolved = pending.await.unwrap().unwrap();
+    let value = match resolved.last {
+        Some(event) => event,
+        None => match timeout(LONG, stream.recv()).await {
+            Ok(Some(StreamEvent::Update(event))) => event,
+            other => panic!("expected the first value, got {other:?}"),
+        },
+    };
+    assert_eq!(value.flow, qualified("a"));
+    assert_eq!(value.data, br#"{"first":true}"#);
+}
+
+/// A subscription abandoned while the brick answers leaves no subscriber: the
+/// flow is released.
+pub async fn an_abandoned_subscription_leaves_no_subscriber<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let pending = world.resolve("a");
+    let mut brick = world.ready_brick().await;
+    let ServiceMessage::Subscribe { req, .. } = recv(&mut brick).await else {
+        panic!("expected subscribe");
+    };
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    brick
+        .to_service
+        .send(BrickMessage::Subscribed {
+            req,
+            flow: flow("a"),
+        })
+        .unwrap();
+    match recv(&mut brick).await {
+        ServiceMessage::Release { flow: released } => assert_eq!(released, flow("a")),
+        // Stopping the idle brick releases it as well.
+        ServiceMessage::Shutdown => {}
+        other => panic!("expected release, got {other:?}"),
+    }
+    assert_eq!(world.router.subscribers(&qualified("a")), 0);
+}
+
+/// A flow whose last subscriber leaves while another subscription to it is in
+/// flight stays served: the brick never receives `release` for it.
+pub async fn a_flow_left_while_subscribed_again_stays_served<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let mut brick = world.subscribed("a").await;
+    // Lets the first subscription settle.
+    sleep(Duration::from_secs(10)).await;
+    let pending = world.resolve_as(AnchorId(2), "a");
+    let ServiceMessage::Subscribe { req, .. } = recv(&mut brick).await else {
+        panic!("expected subscribe");
+    };
+    world.router.remove_anchor(A);
+    sleep(Duration::from_secs(1)).await;
+    brick
+        .to_service
+        .send(BrickMessage::Subscribed {
+            req,
+            flow: flow("a"),
+        })
+        .unwrap();
+    assert_eq!(flow_of(pending).await, Ok(qualified("a")));
+    let mut stream = world.router.stream(AnchorId(2), None);
+    publish(&mut brick, 1, "a", probe::TYPE, b"{}").await;
+    // Anything sent since the new subscription, `release` included, comes
+    // before the answer to this publish.
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::Ack { req: RequestId(1) }
+    );
+    assert!(matches!(
+        timeout(LONG, stream.recv()).await,
+        Ok(Some(StreamEvent::Update(_)))
+    ));
+    assert_eq!(world.router.subscribers(&qualified("a")), 1);
+}
+
 /// A brick discovery does not hold cannot be subscribed to.
 pub async fn an_unknown_brick_is_refused<S: SupervisorSubject>() {
     let world = world::<S>();
     let nope = BrickName::new("nope").unwrap();
     assert_eq!(
-        world.supervisor.resolve(&nope, "item", b"{}").await,
+        world.supervisor.resolve(A, &nope, "item", b"{}").await,
         Err(ResolveError::UnknownBrick(nope))
     );
 }
@@ -511,6 +626,9 @@ macro_rules! supervisor_suite {
                     a_crashed_brick_is_relaunched,
                     a_crash_without_subscribers_is_not_relaunched,
                     a_removed_brick_stops_and_its_flows_end,
+                    a_value_published_right_after_subscribed_is_not_lost,
+                    an_abandoned_subscription_leaves_no_subscriber,
+                    a_flow_left_while_subscribed_again_stays_served,
                     an_unknown_brick_is_refused,
                 ]
             );
