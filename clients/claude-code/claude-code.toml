@@ -1,0 +1,18 @@
+# The Claude Code client kind (contract section 5), compiled into nowcast. A
+# session's anchor is the Claude Code process: its mods' requests leave from
+# it, and the stream's `nowcast watch` is its child.
+name = "claude-code"
+description = "Claude Code sessions"
+
+[anchor]
+# Where the Claude Code executable lies, for each way it is installed.
+exe = [
+  # The native installer: one file per version, `~/.local/share/claude/versions/<version>`.
+  "*/claude/versions/*",
+  # npm, globally or in a project: the native binary the package links into place.
+  "*/@anthropic-ai/claude-code/bin/claude.exe",
+  # npm, run through the package's `cli-wrapper.cjs` fallback: the platform package's binary.
+  "*/@anthropic-ai/claude-code-*/claude",
+  # The apt, dnf and apk packages.
+  "/usr/bin/claude",
+]

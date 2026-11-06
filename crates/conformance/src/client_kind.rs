@@ -1,7 +1,8 @@
 //! Contract section 5, client kinds: their declarations, checked on a
 //! [`DiscoverySubject`], and the attachment rule, checked on an
-//! [`AttachmentSubject`]. The fixtures are in `fixtures/clients/`:
-//! `claude-code.toml` is the embedded declaration, `user/` a user directory.
+//! [`AttachmentSubject`]. The embedded declaration is the one the repository
+//! ships, `clients/claude-code/claude-code.toml`; `fixtures/clients/user/` is
+//! a user directory.
 
 use std::path::{Path, PathBuf};
 
@@ -15,8 +16,16 @@ pub fn dir() -> PathBuf {
     crate::fixtures().join("clients")
 }
 
+/// The Claude Code declaration the repository ships.
+fn claude_code() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../clients/claude-code/claude-code.toml")
+        .canonicalize()
+        .expect("clients/claude-code/claude-code.toml exists")
+}
+
 fn embedded() -> Vec<(String, String)> {
-    let text = std::fs::read_to_string(dir().join("claude-code.toml")).unwrap();
+    let text = std::fs::read_to_string(claude_code()).unwrap();
     vec![("claude-code.toml".into(), text)]
 }
 
@@ -60,7 +69,12 @@ pub async fn embedded_kinds_need_no_configuration<S: DiscoverySubject>() {
         vec![ClientKind {
             name: ClientKindName::new("claude-code").unwrap(),
             description: "Claude Code sessions".into(),
-            exe: vec!["*/claude/versions/*".into()],
+            exe: vec![
+                "*/claude/versions/*".into(),
+                "*/@anthropic-ai/claude-code/bin/claude.exe".into(),
+                "*/@anthropic-ai/claude-code-*/claude".into(),
+                "/usr/bin/claude".into(),
+            ],
         }]
     );
 }
