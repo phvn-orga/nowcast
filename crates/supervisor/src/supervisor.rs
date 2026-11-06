@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::future::Future;
-use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use nowcast_traits::{
@@ -62,11 +61,18 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
         kind: &str,
         params: &[u8],
     ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send {
-        let answer = match self.inner.discovery.brick(brick) {
-            Some(_) => Ok(Answer {
-                reply: self
-                    .inner
-                    .update(|state, router| state.resolve(anchor, brick, kind, params, router)),
+        let discovery = &self.inner.discovery;
+        // Checked under the lock: a removal is handled under it too, so it
+        // comes either before the check or after the subscription is
+        // registered, which it then fails.
+        let reply = self.inner.update(|state, router| {
+            discovery
+                .brick(brick)
+                .map(|_| state.resolve(anchor, brick, kind, params, router))
+        });
+        let answer = match reply {
+            Some(reply) => Ok(Answer {
+                reply,
                 anchor,
                 router: self.inner.router.clone(),
                 taken: false,
@@ -157,16 +163,17 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Inner<D, L, R> {
     /// declaration applies from the next launch.
     fn launch(self: &Arc<Self>, state: &mut State, brick: BrickName, generation: u64) {
         let router = &*self.router;
-        let launched = match self.discovery.brick(&brick) {
-            Some(declaration) => self
-                .launcher
-                .launch(&declaration)
-                .map(|connection| (declaration, connection)),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the brick is no longer declared",
-            )),
+        let Some(declaration) = self.discovery.brick(&brick) else {
+            // Removed since the subscription was checked: its removal is on
+            // its way, handled here so that waiters learn the brick is gone.
+            state.removed(&brick, router);
+            state.exited(&brick, generation, router);
+            return;
         };
+        let launched = self
+            .launcher
+            .launch(&declaration)
+            .map(|connection| (declaration, connection));
         match launched {
             Ok((declaration, connection)) => {
                 let BrickConnection {
