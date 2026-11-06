@@ -13,7 +13,6 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -278,13 +277,6 @@ impl Service {
             .expect("the daemon launches the brick")
             .unwrap()
     }
-
-    /// A connection to the daemon, anchored on the test process.
-    pub fn connect(&self) -> Connection {
-        let stream = UnixStream::connect(self.socket()).unwrap();
-        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
-        Connection(stream)
-    }
 }
 
 impl Drop for Service {
@@ -381,14 +373,20 @@ impl Watch {
         }
     }
 
-    /// The next event printed, as `{"event": <name>, "data": <data>}`.
+    /// The next event printed, as `{"event": <name>, "data": <data>}`. The
+    /// connection status lines, `{"status": ...}`, are skipped.
     pub async fn next(&mut self) -> Value {
-        let line = timeout(TIMEOUT, self.stdout.next_line())
-            .await
-            .expect("watch prints an event")
-            .unwrap()
-            .expect("watch is running");
-        serde_json::from_str(&line).unwrap()
+        loop {
+            let line = timeout(TIMEOUT, self.stdout.next_line())
+                .await
+                .expect("watch prints an event")
+                .unwrap()
+                .expect("watch is running");
+            let printed: Value = serde_json::from_str(&line).unwrap();
+            if printed.get("status").is_none() {
+                return printed;
+            }
+        }
     }
 
     pub async fn kill(&mut self) {
@@ -453,60 +451,4 @@ pub async fn received(
         messages.iter().any(&matches).then_some(messages)
     })
     .await
-}
-
-/// A raw HTTP/1.1 connection to the daemon, for what the tool has no command
-/// for.
-pub struct Connection(UnixStream);
-
-impl Connection {
-    /// Sends one request and returns the status and body of the answer.
-    pub fn request(&self, method: &str, path: &str, body: &str) -> (u16, String) {
-        self.try_request(method, path, body).unwrap()
-    }
-
-    fn try_request(&self, method: &str, path: &str, body: &str) -> io::Result<(u16, String)> {
-        write!(
-            &self.0,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\n\r\n{body}",
-            body.len()
-        )?;
-        let mut reader = BufReader::new(&self.0);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let status = line
-            .strip_prefix("HTTP/1.1 ")
-            .and_then(|rest| rest.get(..3))
-            .and_then(|code| code.parse().ok())
-            .ok_or_else(|| io::Error::other(format!("not an HTTP response: {line:?}")))?;
-        let mut length = 0;
-        loop {
-            line.clear();
-            reader.read_line(&mut line)?;
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                length = value.trim().parse().map_err(io::Error::other)?;
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body)?;
-        Ok((status, String::from_utf8_lossy(&body).into_owned()))
-    }
-}
-
-/// Every byte but ASCII letters and digits percent-encoded, for a path
-/// segment.
-pub fn encode(segment: &str) -> String {
-    segment
-        .bytes()
-        .map(|b| match b {
-            b if b.is_ascii_alphanumeric() => char::from(b).to_string(),
-            b => format!("%{b:02X}"),
-        })
-        .collect()
 }

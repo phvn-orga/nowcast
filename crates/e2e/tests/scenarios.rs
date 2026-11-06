@@ -6,7 +6,7 @@ mod harness;
 
 use std::time::{Duration, Instant};
 
-use harness::{AGENT_SESSION, Service, TIMEOUT, encode, params, received};
+use harness::{AGENT_SESSION, Service, TIMEOUT, params, received};
 use nowcast_test_brick::{ControlledBrick, Mode, TYPE};
 use nowcast_types::{FlowId, PublishErrorCode, ServiceMessage};
 use serde_json::{Value, json};
@@ -111,17 +111,17 @@ async fn a_refresh_reaches_the_brick_which_publishes_again() {
     let mut brick = service.brick().await;
     watch.subscribed("probe/a").await;
 
-    // The tool has no refresh command: the test subscribes and refreshes on
-    // a connection of its own.
-    let connection = service.connect();
-    let (status, _) = connection.request("PUT", "/v1/session", r#"{"id":"refresher"}"#);
-    assert_eq!(status, 204);
-    let subscribe = json!({ "brick": "probe", "kind": "item", "params": { "id": "a" } });
-    let (status, body) = connection.request("POST", "/v1/subscriptions", &subscribe.to_string());
-    assert_eq!(status, 201, "{body}");
-    let refresh = format!("/v1/flows/{}/refresh", encode("probe/a"));
-    let (status, body) = connection.request("POST", &refresh, "");
-    assert_eq!(status, 202, "{body}");
+    // `refresh` acts on the flows of its anchor: the agent subscribes, then
+    // refreshes, each through a hook of its own.
+    let mut agent = service.agent();
+    let subscribed = agent
+        .run(&["--json", "subscribe", "probe", "item", &params("a")])
+        .await
+        .json();
+    assert_eq!(subscribed["flow"], "probe/a");
+    let refreshed = agent.run(&["--json", "refresh", "probe/a"]).await;
+    assert_eq!(refreshed.status, Some(0), "{refreshed:?}");
+    assert_eq!(refreshed.stdout, "", "{refreshed:?}");
 
     received(
         &mut brick,
