@@ -1,6 +1,6 @@
 # Les clients
 
-État au 2026-11-06 : architecture des clients, format du flux et déclaration de
+État au 2026-11-07 : architecture des clients, format du flux et déclaration de
 session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
 et le rafraîchissement aussi en session interactive.
 
@@ -50,10 +50,12 @@ et le rafraîchissement aussi en session interactive.
   reprend après une coupure sans analyser de messages destinés à un humain.
 - **Un seul binaire, `nowcast`** : l'outil en ligne de commande, et le service sous la
   sous-commande `nowcast daemon`, que lance l'unité systemd. L'outil et le service
-  sortent toujours à la même version : une seule chose à installer. Il s'installe dans
-  `~/.local/bin` (`cargo install --root ~/.local`), d'ordinaire dans le `PATH`,
-  contrairement à `~/.cargo/bin` ; l'adaptateur Claude Code lance `nowcast` depuis le
-  `PATH`.
+  sortent toujours à la même version : une seule chose à installer. Homebrew le place
+  dans son répertoire `bin`, qui est dans le `PATH`, et l'unité qu'installe la formule
+  le lance par le chemin `opt` de Homebrew, stable d'une version à l'autre. Depuis les
+  sources, pour le développement, il s'installe dans `~/.local/bin`
+  (`cargo install --root ~/.local`), d'ordinaire dans le `PATH`, contrairement à
+  `~/.cargo/bin`. L'adaptateur Claude Code lance `nowcast` depuis le `PATH`.
 - **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et

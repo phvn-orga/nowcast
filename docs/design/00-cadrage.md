@@ -1,6 +1,6 @@
 # Cadrage de nowcast
 
-État au 2026-11-06 : premières décisions prises, conception à poursuivre. Ce document
+État au 2026-11-07 : premières décisions prises, conception à poursuivre. Ce document
 est le point de départ de la conception, pas une spécification.
 
 ## Objet
@@ -115,6 +115,12 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   format JSON de CloudEvents. L'architecture des clients (état par session dans le
   service, un flux par session, outil en ligne de commande commun, un adaptateur par
   agent) est décrite dans `02-clients.md`.
+- **Distribution par binaire précompilé.** Un tag de version (`v0.1.0`) fait
+  construire par la CI un binaire statique (`x86_64-unknown-linux-musl`), publié avec
+  les unités systemd dans une release GitHub. Homebrew l'installe depuis une formule
+  rangée dans le dépôt même (`Formula/`), sans dépôt de tap à part. Installer ne
+  demande aucune compilation ; `cargo install` reste la voie du développement (voir
+  `02-clients.md`).
 
 ## Limite assumée de la sécurité
 
@@ -158,9 +164,6 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
 - **La CI en temps réel.** Sans webhook, c'est du polling, mutualisé et mieux réglé.
   Des webhooks GitHub ou Azure DevOps demanderaient une adresse joignable depuis
   Internet, donc un tunnel.
-- **La distribution** : un paquet, ou une autre voie que `cargo install`. Le binaire
-  unique, son emplacement (`~/.local/bin`) et l'unité systemd fournie sont décidés
-  (voir `02-clients.md`).
 - **Un processus orphelin** (lancé en double fork) perd sa filiation et ne remonte plus
   à son ancrage : il devient son propre ancrage et ne suit plus la session de son
   agent. À rattacher autrement si le besoin apparaît.
