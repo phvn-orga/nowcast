@@ -3,3 +3,18 @@ name = "nowcast-identity"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+globset = "0.4.21"
+libc = "0.2.191"
+nowcast-traits = { path = "../traits" }
+nowcast-types = { path = "../types" }
+rustix = { version = "1.1.6", features = ["process", "event"] }
+tokio = { version = "1.54.1", features = ["net", "rt", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+nowcast-conformance = { path = "../conformance" }
+rustix = { version = "1.1.6", features = ["net", "process"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "macros", "net", "time"] }
