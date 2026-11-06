@@ -3,3 +3,18 @@ name = "nowcast-test-brick"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+nowcast-codec = { path = "../codec" }
+nowcast-types = { path = "../types" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt", "io-std", "io-util", "net", "macros", "sync"] }
+
+[dev-dependencies]
+nowcast-conformance = { path = "../conformance" }
+nowcast-traits = { path = "../traits" }
+semver = "1.0.28"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "io-std", "io-util", "net", "macros", "sync", "time", "process"] }
+toml = "1.2.0"
