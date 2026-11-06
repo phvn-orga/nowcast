@@ -3,3 +3,20 @@ name = "nowcast-supervisor"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+nowcast-codec = { path = "../codec" }
+nowcast-traits = { path = "../traits" }
+nowcast-types = { path = "../types" }
+rustix = { version = "1.1.6", features = ["process"] }
+serde = "1.0.229"
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+nowcast-conformance = { path = "../conformance" }
+nowcast-test-brick = { path = "../test-brick" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
