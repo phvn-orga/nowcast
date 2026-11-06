@@ -793,6 +793,14 @@ dependencies = [
 [[package]]
 name = "nowcast-e2e"
 version = "0.0.0"
+dependencies = [
+ "nowcast-discovery",
+ "nowcast-test-brick",
+ "nowcast-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "nowcast-identity"
