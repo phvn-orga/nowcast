@@ -3,6 +3,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use nowcast_traits::{AnchorId, Router, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::watch;
 
 use crate::state::State;
 
@@ -44,7 +45,10 @@ impl Router for FlowRouter {
         anchor: AnchorId,
         flow: QualifiedFlowId,
     ) -> (SubscriptionId, Option<Event>) {
-        self.state().subscribe(anchor, flow)
+        let mut state = self.state();
+        let subscribed = state.subscribe(anchor, flow);
+        state.sync_has_subscriptions();
+        subscribed
     }
 
     fn unsubscribe(
@@ -52,7 +56,10 @@ impl Router for FlowRouter {
         anchor: AnchorId,
         subscription: &SubscriptionId,
     ) -> Result<(), UnknownSubscription> {
-        self.state().unsubscribe(anchor, subscription)
+        let mut state = self.state();
+        let unsubscribed = state.unsubscribe(anchor, subscription);
+        state.sync_has_subscriptions();
+        unsubscribed
     }
 
     fn publish(
@@ -73,7 +80,9 @@ impl Router for FlowRouter {
     }
 
     fn end_flow(&self, flow: &QualifiedFlowId) {
-        self.state().end_flow(flow);
+        let mut state = self.state();
+        state.end_flow(flow);
+        state.sync_has_subscriptions();
     }
 
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
@@ -88,7 +97,13 @@ impl Router for FlowRouter {
         self.state().empty_flows()
     }
 
+    fn has_subscriptions(&self) -> watch::Receiver<bool> {
+        self.state().has_subscriptions()
+    }
+
     fn remove_anchor(&self, anchor: AnchorId) {
-        self.state().remove_anchor(anchor);
+        let mut state = self.state();
+        state.remove_anchor(anchor);
+        state.sync_has_subscriptions();
     }
 }

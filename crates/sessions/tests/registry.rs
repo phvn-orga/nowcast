@@ -88,6 +88,10 @@ impl Router for Spy {
         self.router.empty_flows()
     }
 
+    fn has_subscriptions(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.router.has_subscriptions()
+    }
+
     fn remove_anchor(&self, anchor: AnchorId) {
         let session = self
             .sessions

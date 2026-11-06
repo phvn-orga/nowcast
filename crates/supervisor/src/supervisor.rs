@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::future::Future;
+use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use nowcast_traits::{
@@ -9,7 +10,7 @@ use nowcast_traits::{
 use nowcast_types::{BrickMessage, BrickName, QualifiedFlowId};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::warn;
 
 use crate::Config;
@@ -32,6 +33,9 @@ struct Inner<D, L, R> {
     launcher: Arc<L>,
     router: Arc<R>,
     state: Mutex<State>,
+    /// Turns `true` once [`BrickSupervisor::shutdown`] has stopped every
+    /// brick.
+    drained: watch::Sender<bool>,
 }
 
 impl<D: Discovery, L: BrickLauncher, R: Router> BrickSupervisor<D, L, R> {
@@ -46,10 +50,27 @@ impl<D: Discovery, L: BrickLauncher, R: Router> BrickSupervisor<D, L, R> {
             launcher,
             router,
             state: Mutex::new(State::new(config)),
+            drained: watch::Sender::new(false),
         });
         tokio::spawn(follow_empty_flows(Arc::downgrade(&inner), empty));
         tokio::spawn(follow_discovery(Arc::downgrade(&inner), changes));
         Self { inner }
+    }
+
+    /// Stops every brick for good, and returns once each one's process has
+    /// exited, with what it left in its process group.
+    ///
+    /// Each brick gets `shutdown`, then `SIGTERM` after
+    /// [`Config::terminate_after`], then `SIGKILL` after [`Config::kill_after`],
+    /// stopping at the step where it exits; a brick already stopping goes on
+    /// from where it is, and one waiting to be relaunched after a crash is
+    /// forgotten. Subscriptions in progress fail as unavailable, the flows
+    /// end in the router, and every later subscription fails as unavailable.
+    pub async fn shutdown(&self) {
+        let mut drained = self.inner.drained.subscribe();
+        self.inner.update(|state, router| state.shutdown(router));
+        // The sender lives in `inner`, which `self` holds.
+        let _ = drained.wait_for(|drained| *drained).await;
     }
 }
 
@@ -131,6 +152,10 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Inner<D, L, R> {
         let mut state = self.lock();
         let out = transition(&mut state, &*self.router);
         self.apply(&mut state);
+        if state.is_drained() {
+            self.drained
+                .send_if_modified(|drained| !mem::replace(drained, true));
+        }
         out
     }
 

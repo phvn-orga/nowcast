@@ -1,4 +1,5 @@
-# Started by nowcast.socket only, hence no [Install] section.
+# Started by nowcast.socket only, hence no [Install] section. The daemon exits
+# on its own once unused; the socket starts it again on the next connection.
 [Unit]
 Description=nowcast
 Requires=nowcast.socket
@@ -7,3 +8,6 @@ After=nowcast.socket
 [Service]
 # Installation is out of scope: this is where `cargo install` puts the binary.
 ExecStart=%h/.cargo/bin/nowcast-daemon
+# SIGTERM reaches the daemon alone, which stops its bricks through their
+# protocol (`shutdown` first); whatever is left gets SIGKILL.
+KillMode=mixed

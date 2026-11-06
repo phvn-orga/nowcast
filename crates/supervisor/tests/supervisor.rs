@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use nowcast_conformance::probe;
 use nowcast_supervisor::{BrickSupervisor, Config};
-use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter};
+use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter, Signal};
 use nowcast_traits::{AnchorId, BrickUnavailable, ResolveError, Router, Supervisor, UnknownFlow};
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, QualifiedFlowId, RequestId, ServiceMessage, StreamEvent,
@@ -681,4 +681,156 @@ async fn a_brick_that_exits_after_shutdown_gets_no_signal() {
     drop(to_service);
     sleep(world.config.terminate_after + world.config.kill_after + LONG).await;
     assert_eq!(signals.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+// Stopping the service: `BrickSupervisor::shutdown`, whatever each brick is
+// doing at that moment.
+
+/// Runs `shutdown` in a task, to watch what the bricks get meanwhile.
+fn shut_down(world: &World) -> JoinHandle<()> {
+    let supervisor = world.supervisor.clone();
+    tokio::spawn(async move { supervisor.shutdown().await })
+}
+
+async fn signal(brick: &mut FakeBrick) -> Signal {
+    timeout(LONG, brick.signals.recv())
+        .await
+        .expect("a signal")
+        .expect("the process handle is kept")
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_sends_shutdown_then_sigterm_then_sigkill_with_the_delays() {
+    let world = world();
+    let mut brick = world.subscribed("a").await;
+    let mut stream = world.router.stream(A, None);
+    let start = Instant::now();
+    let stopping = shut_down(&world);
+
+    assert_eq!(recv(&mut brick).await, ServiceMessage::Shutdown);
+    flow_ended(&mut stream, "a").await;
+    assert_eq!(world.router.subscribers(&qualified("a")), 0);
+    assert_eq!(brick.signals.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(signal(&mut brick).await, Signal::Term);
+    assert_eq!(start.elapsed(), world.config.terminate_after);
+    assert_eq!(signal(&mut brick).await, Signal::Kill);
+    assert_eq!(
+        start.elapsed(),
+        world.config.terminate_after + world.config.kill_after
+    );
+    // Not done until the process has exited.
+    sleep(LONG).await;
+    assert!(!stopping.is_finished());
+    drop(brick);
+    timeout(LONG, stopping).await.unwrap().unwrap();
+    world.no_launch_within(LONG).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_ends_as_soon_as_the_brick_exits() {
+    let world = world();
+    let mut brick = world.subscribed("a").await;
+    let start = Instant::now();
+    let stopping = shut_down(&world);
+    assert_eq!(recv(&mut brick).await, ServiceMessage::Shutdown);
+    let FakeBrick {
+        to_service,
+        mut signals,
+        ..
+    } = brick;
+    drop(to_service);
+    timeout(LONG, stopping).await.unwrap().unwrap();
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    assert_eq!(signals.try_recv(), Err(TryRecvError::Disconnected));
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_with_no_brick_ends_at_once() {
+    let world = world();
+    timeout(Duration::ZERO, world.supervisor.shutdown())
+        .await
+        .expect("nothing to wait for");
+    // Twice is harmless.
+    timeout(Duration::ZERO, world.supervisor.shutdown())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_a_start_stops_the_brick_and_fails_its_subscriptions() {
+    let world = world();
+    let pending = world.resolve("a");
+    let mut brick = world.launch().await;
+    let stopping = shut_down(&world);
+    assert_eq!(recv(&mut brick).await, ServiceMessage::Shutdown);
+    assert_eq!(pending.await.unwrap(), Err(unavailable()));
+    // A `ready` arriving now is too late to bring anything back.
+    brick.to_service.send(BrickMessage::Ready).unwrap();
+    settle().await;
+    assert_quiet(&mut brick);
+    assert_eq!(signal(&mut brick).await, Signal::Term);
+    drop(brick);
+    timeout(LONG, stopping).await.unwrap().unwrap();
+    world.no_launch_within(LONG).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_fails_a_subscription_the_brick_has_not_answered() {
+    let world = world();
+    let mut brick = world.subscribed("a").await;
+    let b = world.resolve_as(B, "b");
+    let req = subscribe_req(&mut brick, "b").await;
+    let stopping = shut_down(&world);
+    assert_eq!(b.await.unwrap(), Err(unavailable()));
+    assert_eq!(recv(&mut brick).await, ServiceMessage::Shutdown);
+    // The answer arrives after all: nobody gets subscribed.
+    answer(&brick, req, "b");
+    settle().await;
+    assert_eq!(world.router.subscribers(&qualified("b")), 0);
+    drop(brick);
+    timeout(LONG, stopping).await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_the_backoff_relaunches_nothing() {
+    let world = world();
+    let brick = world.subscribed("a").await;
+    let mut stream = world.router.stream(A, None);
+    drop(brick);
+    flow_error(&mut stream, "a").await;
+    timeout(Duration::ZERO, world.supervisor.shutdown())
+        .await
+        .expect("no process to wait for");
+    flow_ended(&mut stream, "a").await;
+    world.no_launch_within(LONG).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_while_a_brick_stops_goes_on_from_its_current_step() {
+    let world = world();
+    let mut brick = world.subscribed("a").await;
+    world.router.remove_anchor(A);
+    shutdown(&mut brick).await;
+    let since_shutdown = Instant::now();
+    // A subscription queued behind the stop would relaunch the brick.
+    let queued = world.resolve_as(B, "b");
+    sleep(world.config.terminate_after / 2).await;
+    let stopping = shut_down(&world);
+    assert_eq!(queued.await.unwrap(), Err(unavailable()));
+    assert_eq!(signal(&mut brick).await, Signal::Term);
+    assert_eq!(since_shutdown.elapsed(), world.config.terminate_after);
+    assert_quiet(&mut brick);
+    drop(brick);
+    timeout(LONG, stopping).await.unwrap().unwrap();
+    world.no_launch_within(LONG).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn subscriptions_after_shutdown_fail_at_once() {
+    let world = world();
+    world.supervisor.shutdown().await;
+    let start = Instant::now();
+    assert_eq!(world.resolve("a").await.unwrap(), Err(unavailable()));
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    world.no_launch_within(LONG).await;
 }
