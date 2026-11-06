@@ -104,3 +104,16 @@ test('lines outside the contract are skipped', async ($, on) => {
   expect(w.writes.filter(write => write.key === 'flows').map(write => write.id)).toEqual(['probe/x'])
   expect(w.child().running).toBe(true)
 })
+
+test('a write refused by another mod is skipped, and the stream goes on', async ($, on) => {
+  const w = world(on, { refuse: 'probe/x' })
+  await $.session.start(START)
+  await w.clock.settle()
+  w.child().event('update', update('probe/x', '1', { n: 1 }))
+  w.child().event('update', update('probe/y', '2', { n: 2 }))
+  await w.clock.settle()
+
+  expect(w.flow('probe/y')?.last?.data).toEqual({ n: 2 })
+  expect(w.children.length).toBe(1)
+  expect(w.child().running).toBe(true)
+})

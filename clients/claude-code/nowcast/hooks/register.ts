@@ -141,7 +141,7 @@ function start($: $, session: string): Watch {
       const startedAt = await $.clock.now()
       if (stopped) return
       child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch'] })
-      const why = await run($, child)
+      const why = await run($, child, () => stopped)
       if (stopped) return
       await setStream($, { status: 'stopped', error: why })
       $.ui.log(`nowcast: ${why}`, { to: 'debug' })
@@ -161,17 +161,23 @@ function start($: $, session: string): Watch {
   }
 }
 
-/** Reads one `watch` until it ends, and says why it ended. */
-async function run($: $, child: ReturnType<$['process']['spawn']>): Promise<string> {
+/**
+ * Reads one `watch` until it ends, and says why it ended. Once `stopped`, what
+ * the stopped `watch` still prints belongs to the session left behind: it is
+ * dropped.
+ */
+async function run($: $, child: ReturnType<$['process']['spawn']>, stopped: () => boolean): Promise<string> {
   const stdout = new Lines()
   const stderr = new Lines()
   let lastError = ''
   try {
     for await (const { stream, text } of child) {
+      if (stopped()) break
       if (stream === 'stdout') {
-        for (const line of stdout.push(text)) await onEvent($, line)
+        for (const line of stdout.push(text)) if (!stopped()) await onEvent($, line)
       } else {
         for (const line of stderr.push(text)) {
+          if (stopped()) break
           lastError = parseConnection(line)?.status === 'up' ? '' : errorText(line)
           await onStderr($, line)
         }
@@ -191,7 +197,7 @@ async function onEvent($: $, line: string): Promise<void> {
   const next = nextFlow(flows.get(event.flow), event)
   if (next === null) return
   flows.set(event.flow, next)
-  await $.state.set({ ...FLOWS, id: event.flow }, next)
+  await write($, () => $.state.set({ ...FLOWS, id: event.flow }, next), `flow ${event.flow}`)
 }
 
 async function onStderr($: $, line: string): Promise<void> {
@@ -208,7 +214,21 @@ async function onStderr($: $, line: string): Promise<void> {
 
 async function setStream($: $, change: Partial<NowcastStream>): Promise<void> {
   stream = { ...stream, ...change }
-  await $.state.set(STREAM, stream)
+  const value = stream
+  await write($, () => $.state.set(STREAM, value), 'stream')
+}
+
+/**
+ * A write to the state. One another mod refuses (its `state.set` hook may)
+ * is logged and skipped: it must not end the stream, which would only replay
+ * the same value into the same refusal.
+ */
+async function write($: $, set: () => Promise<unknown>, what: string): Promise<void> {
+  try {
+    await set()
+  } catch (error) {
+    $.ui.log(`nowcast: cannot write ${what}: ${message(error)}`, { to: 'debug' })
+  }
 }
 
 /** A fatal error's message from `--json` output, or the line as it is. */

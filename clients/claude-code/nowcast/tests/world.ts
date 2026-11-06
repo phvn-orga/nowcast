@@ -88,6 +88,8 @@ export type WorldOptions = {
   answer?: (request: Request) => Partial<HttpResponse> | string
   /** Makes starting a process fail, as with a command not installed. */
   spawnFails?: boolean
+  /** A flow whose writes are refused, as an observer of the state may. */
+  refuse?: string
 }
 
 export type World = {
@@ -130,6 +132,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: undefined }
   })
   on('state.set', { plugin: 'nowcast', key: 'flows' }, (_, e, next) => {
+    if (e.id === options.refuse) return { deny: 'refused by an observer' }
     writes.push({ key: e.key, id: e.id, value: e.value })
     return next(e)
   })
