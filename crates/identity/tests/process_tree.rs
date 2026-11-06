@@ -25,6 +25,9 @@ use tokio::time::timeout;
 /// Set on the connecting process: the socket to connect to.
 const CONNECT: &str = "NOWCAST_IDENTITY_TEST_CONNECT";
 
+/// Set on the connecting process: exit right after connecting.
+const LEAVE: &str = "NOWCAST_IDENTITY_TEST_LEAVE";
+
 /// Long enough for a loaded CI runner to start a process.
 const PATIENCE: Duration = Duration::from_secs(30);
 
@@ -45,7 +48,9 @@ fn connector() {
         return;
     };
     let mut stream = StdUnixStream::connect(socket).expect("connect to the test");
-    let _ = stream.read(&mut [0]);
+    if std::env::var_os(LEAVE).is_none() {
+        let _ = stream.read(&mut [0]);
+    }
 }
 
 /// Serializes writing executables and spawning processes: a process forked
@@ -272,4 +277,31 @@ async fn an_unknown_anchor_has_no_pid_and_counts_as_exited() {
     timeout(PATIENCE, identity.exited(unknown))
         .await
         .expect("nothing to wait for");
+}
+
+#[tokio::test]
+async fn a_connected_process_already_reaped_is_reported_as_not_found() {
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut connector = {
+        let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        Command::new(std::env::current_exe().unwrap())
+            .args(["connector", "--exact", "--test-threads=1"])
+            .env(CONNECT, &socket)
+            .env(LEAVE, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let (accepted, _) = timeout(PATIENCE, listener.accept())
+        .await
+        .expect("the connector connects")
+        .unwrap();
+    assert!(connector.wait().unwrap().success());
+    let identity = PeerIdentity::new(&kinds());
+    let error = identity.identify(accepted.as_fd()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
 }
