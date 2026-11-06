@@ -65,9 +65,13 @@
 //! # Ok::<_, nowcast_codec::CodecError>(())
 //! ```
 //!
-//! After any read error the stream position is unknown: the reader should
-//! stop and treat the peer as broken. The read functions are not cancel safe;
-//! read each stream from one task that owns it.
+//! After [`CodecError::Io`], [`CodecError::Truncated`] or
+//! [`CodecError::TooLarge`] the stream position is unknown: the reader should
+//! stop and treat the peer as broken. Any other read error comes from a frame
+//! read whole, so the next frame can still be read. Neither the read nor the
+//! write functions are cancel safe: dropping one mid-frame loses or cuts a
+//! frame, so read a stream from one task that owns it, and write it from one
+//! task at a time.
 //!
 //! [`BrickMessage`]: nowcast_types::BrickMessage
 //! [`ServiceMessage`]: nowcast_types::ServiceMessage

@@ -52,7 +52,8 @@ where
 }
 
 /// Writes the whole frame, then flushes so that the peer sees it now even
-/// behind a buffered writer.
+/// behind a buffered writer. Not cancel safe: dropping the future mid-write
+/// leaves a partial frame on the stream.
 async fn write_frame<W>(writer: &mut W, frame: &[u8]) -> Result<(), CodecError>
 where
     W: AsyncWrite + Unpin + ?Sized,

@@ -68,6 +68,9 @@ pub fn unframe(frame: &[u8]) -> Result<&[u8], CodecError> {
 /// After an error the stream position is unknown: stop reading it. Not cancel
 /// safe: dropping the future mid-frame loses the bytes already read, so read
 /// a stream from one task that owns it.
+///
+/// The message readers built on it add decoding errors, which come after the
+/// whole frame was read and so leave the stream at the next frame.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, CodecError>
 where
     R: AsyncRead + Unpin + ?Sized,
