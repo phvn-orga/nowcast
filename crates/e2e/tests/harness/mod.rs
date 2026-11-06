@@ -189,16 +189,24 @@ impl Service {
     }
 
     /// Runs `nowcast` with `args` through `sh -c`, as typed in a terminal.
-    pub async fn run_from_shell(&self, args: &[&str]) -> Ran {
+    /// The shell outlives the tool: it stays until the [`Shell`] is dropped,
+    /// so that a test can tell the tool's anchor from its parent's.
+    pub async fn run_from_shell(&self, args: &[&str]) -> (Ran, Shell) {
+        let outputs = TempDir::new_in(self.root.path()).unwrap();
+        let (out, err) = (outputs.path().join("out"), outputs.path().join("err"));
         let mut command = self.cli();
         let command = command.as_std_mut();
         let mut shell = Command::new("sh");
         shell
             .arg("-c")
-            .arg("\"$0\" \"$@\"")
+            // The status on stdout, then wait for stdin to close.
+            .arg(r#""$0" "$@" >"$E2E_OUT" 2>"$E2E_ERR" </dev/null; echo "$?"; read -r _"#)
             .arg(command.get_program())
             .args(args)
-            .stdin(Stdio::null())
+            .env("E2E_OUT", &out)
+            .env("E2E_ERR", &err)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .kill_on_drop(true);
         for (name, value) in command.get_envs() {
             match value {
@@ -206,7 +214,19 @@ impl Service {
                 None => shell.env_remove(name),
             };
         }
-        Ran::from(run_to_end(&mut shell).await)
+        let mut child = shell.spawn().unwrap();
+        let mut stdout = AsyncBufReader::new(child.stdout.take().unwrap()).lines();
+        let status = timeout(TIMEOUT * 2, stdout.next_line())
+            .await
+            .expect("the tool ends")
+            .unwrap()
+            .expect("the shell prints the tool's status");
+        let ran = Ran {
+            status: Some(status.parse().unwrap()),
+            stdout: fs::read_to_string(out).unwrap(),
+            stderr: fs::read_to_string(err).unwrap(),
+        };
+        (ran, Shell(child))
     }
 
     /// Starts `nowcast --json watch` with one `--subscribe probe item` per
@@ -373,6 +393,15 @@ impl Watch {
 
     pub async fn kill(&mut self) {
         self.child.kill().await.unwrap();
+    }
+}
+
+/// The shell that ran the tool, alive until dropped.
+pub struct Shell(Child);
+
+impl Shell {
+    pub fn is_alive(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
     }
 }
 

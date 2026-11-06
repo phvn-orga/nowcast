@@ -299,16 +299,17 @@ async fn a_brick_without_subscribers_stops_after_the_grace_period() {
 async fn the_tool_from_a_plain_shell_is_its_own_anchor() {
     let service = Service::start().await;
 
-    let ran = service
+    let (ran, mut shell) = service
         .run_from_shell(&["--json", "subscribe", "probe", "item", &params("a")])
         .await;
     let subscribed = ran.json();
     assert_eq!(subscribed["flow"], "probe/a");
     assert!(subscribed["subscription"].is_string(), "{subscribed}");
 
-    // The subscription ended with the tool.
+    // The subscription ended with the tool, not with the shell, still alive.
     let mut brick = service.brick().await;
     received(&mut brick, "the flow is released", is_release_of("a")).await;
-    let got = service.run_from_shell(&["--json", "get", "probe/a"]).await;
+    assert!(shell.is_alive(), "the shell outlives the tool");
+    let (got, _) = service.run_from_shell(&["--json", "get", "probe/a"]).await;
     assert_eq!(got.error_code(), "unknown_flow");
 }
