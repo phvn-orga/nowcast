@@ -9,7 +9,8 @@ protocole des briques et la déclaration d'un type de client. Il applique les d�
 
 ## 1. Le fichier de déclaration d'une brique
 
-Un fichier TOML par brique, nommé `<nom>.toml`, qui vit dans le dépôt de la brique.
+Un fichier TOML par brique, qui vit dans le dépôt de la brique. Son nom y est libre :
+c'est le lien qui l'active qui porte le nom de la brique (section 2).
 
 | Champ | Type | Rôle |
 |---|---|---|
@@ -73,14 +74,17 @@ schema = "schemas/forge-pr-v1.json"
 - Activer une brique, c'est y poser un lien symbolique vers son fichier de
   déclaration, comme on active une unité systemd. La désactiver, c'est retirer le
   lien.
+- Le lien s'appelle `<name>.toml`, où `<name>` est le `name` que déclare le fichier.
+  Un lien nommé autrement est refusé et journalisé. Deux briques ne peuvent donc pas
+  porter le même nom, et le nom d'un lien retiré suffit à savoir quelle brique
+  s'arrête.
 - Les chemins relatifs du fichier (`command`, `schema`) se résolvent depuis son
   emplacement réel, lien résolu. La brique reste donc dans son dépôt ou son répertoire
   d'installation.
 - Le service lit le répertoire à son démarrage, puis suit ses changements (inotify).
   Une brique retirée alors qu'elle tourne s'arrête comme à la perte de son dernier
   abonné, et ses flux reçoivent `flow-ended`.
-- Un fichier invalide est ignoré et journalisé. Deux fichiers qui déclarent le même
-  `name` sont refusés tous les deux, et journalisés : aucun ne gagne en silence.
+- Un fichier invalide est ignoré et journalisé.
 
 ## 3. L'API des clients
 
