@@ -218,3 +218,73 @@ fn a_broken_link_is_refused() {
     assert!(matches!(error, ManifestError::Resolve { .. }), "{error}");
     assert!(load_manifest(Path::new("/nonexistent/brick.toml")).is_err());
 }
+
+#[test]
+fn a_link_to_something_other_than_a_file_is_refused() {
+    let repo = Repo::new();
+    let fifo = repo.root.join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let link = repo.root.join("brick.toml");
+    std::os::unix::fs::symlink(&fifo, &link).unwrap();
+    // Reading a FIFO blocks until a writer comes: run it aside, with a limit.
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(load_manifest(&link).map(|_| ()));
+    });
+    let error = result
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("loading does not block")
+        .unwrap_err();
+    assert!(matches!(error, ManifestError::Read { .. }), "{error}");
+}
+
+#[test]
+fn a_schema_that_is_not_a_file_is_refused() {
+    let repo = Repo::new();
+    let path = repo.write(
+        "brick.toml",
+        r#"
+manifest_version = 1
+name = "brick"
+version = "0.1.0"
+description = "A brick."
+protocol = 1
+run = { command = ["b"] }
+types."t/v1" = { schema = "/dev/zero" }
+"#,
+    );
+    let error = load_manifest(&path).unwrap_err();
+    assert!(matches!(error, ManifestError::SchemaRead { .. }), "{error}");
+}
+
+#[test]
+fn a_command_path_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let repo = Repo::new();
+    let dir = repo.root.join(std::ffi::OsStr::from_bytes(b"repo-\xff"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("brick.toml");
+    std::fs::write(
+        &path,
+        r#"
+manifest_version = 1
+name = "brick"
+version = "0.1.0"
+description = "A brick."
+protocol = 1
+run = { command = ["bin/b"] }
+"#,
+    )
+    .unwrap();
+    // A lossy conversion would launch a program that does not exist.
+    let error = load_manifest(&path).unwrap_err();
+    assert!(
+        matches!(error, ManifestError::NonUtf8Command { .. }),
+        "{error}"
+    );
+}

@@ -33,6 +33,8 @@ pub enum ManifestError {
     },
     #[error("[run] command is empty")]
     EmptyCommand,
+    #[error("the command resolves to {path}, which is not valid UTF-8")]
+    NonUtf8Command { path: PathBuf },
     #[error("subscription kind {kind:?} publishes {publishes:?}, which [types] does not declare")]
     UndeclaredType { kind: String, publishes: String },
     #[error("cannot read the schema {path}: {source}")]
@@ -106,10 +108,12 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
         })?;
     // A canonical path to a file always has a parent.
     let dir = real.parent().unwrap_or(Path::new("/")).to_path_buf();
-    let text = std::fs::read_to_string(&real).map_err(|source| ManifestError::Read {
-        path: real.clone(),
-        source,
-    })?;
+    let text = regular_file(&real)
+        .and_then(|()| std::fs::read_to_string(&real))
+        .map_err(|source| ManifestError::Read {
+            path: real.clone(),
+            source,
+        })?;
 
     match toml::from_str::<Versioned>(&text)?.manifest_version {
         None => return Err(ManifestError::NoManifestVersion),
@@ -180,9 +184,14 @@ fn resolve_command(mut command: Vec<String>, dir: &Path) -> Result<Vec<String>, 
     }
     if program.contains('/') {
         let resolved = normalize(&dir.join(&*program));
-        // `dir` comes from a canonical path, which is valid UTF-8 here since
-        // the program is: the join stays valid UTF-8.
-        *program = resolved.to_string_lossy().into_owned();
+        // The trait holds the command as strings: a directory whose path is
+        // not UTF-8 cannot be represented without changing it.
+        *program = resolved
+            .to_str()
+            .ok_or_else(|| ManifestError::NonUtf8Command {
+                path: resolved.clone(),
+            })?
+            .to_owned();
     }
     Ok(command)
 }
@@ -197,10 +206,12 @@ fn normalize(path: &Path) -> PathBuf {
 /// Reads a schema file, relative to `dir`, and checks it compiles.
 fn load_schema(dir: &Path, schema: &Path) -> Result<serde_json::Value, ManifestError> {
     let path = normalize(&dir.join(schema));
-    let bytes = std::fs::read(&path).map_err(|source| ManifestError::SchemaRead {
-        path: path.clone(),
-        source,
-    })?;
+    let bytes = regular_file(&path)
+        .and_then(|()| std::fs::read(&path))
+        .map_err(|source| ManifestError::SchemaRead {
+            path: path.clone(),
+            source,
+        })?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|source| ManifestError::SchemaJson {
             path: path.clone(),
@@ -211,4 +222,17 @@ fn load_schema(dir: &Path, schema: &Path) -> Result<serde_json::Value, ManifestE
         message: e.to_string(),
     })?;
     Ok(value)
+}
+
+/// Fails unless `path` leads to a regular file. Reading a FIFO would block
+/// until a writer comes, and a device such as `/dev/zero` never ends.
+fn regular_file(path: &Path) -> io::Result<()> {
+    if std::fs::metadata(path)?.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
 }
