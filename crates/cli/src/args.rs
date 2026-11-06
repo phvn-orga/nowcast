@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Parser, Subcommand};
 
-/// Client of the nowcast service.
+/// Client of the nowcast service, and the service itself (`nowcast daemon`).
 ///
 /// Exit status: 0 on success, 1 when the service answers with an error (its
 /// code is printed on stderr), 2 on invalid usage, 3 when the service cannot
@@ -93,6 +94,37 @@ pub enum Command {
         /// Content of the subscription, a JSON value [default: {}]
         params: Option<String>,
     },
+
+    /// Run the service, as systemd starts it on the first connection
+    ///
+    /// Listens on the socket systemd passes, otherwise binds
+    /// $XDG_RUNTIME_DIR/nowcast/nowcast.sock itself. Stops on SIGTERM or
+    /// SIGINT, and once unused for 60 s when systemd passed the socket:
+    /// NOWCAST_IDLE_TIMEOUT sets that delay in seconds, and also applies when
+    /// started by hand. Logs go to stderr, filtered by NOWCAST_LOG (default:
+    /// info).
+    ///
+    /// The client options --socket, --session and --json are refused;
+    /// NOWCAST_SOCKET and NOWCAST_SESSION are ignored.
+    Daemon,
+}
+
+/// The client options `daemon` refuses, as they were written on the command
+/// line. Their variables do not count: a shell or an agent may export them
+/// for the clients it runs.
+pub const CLIENT_OPTIONS: [(&str, &str); 3] = [
+    ("socket", "--socket"),
+    ("session", "--session"),
+    ("json", "--json"),
+];
+
+/// The client options given on the command line, among [`CLIENT_OPTIONS`].
+pub fn client_options_given(matches: &ArgMatches) -> Vec<&'static str> {
+    CLIENT_OPTIONS
+        .iter()
+        .filter(|(id, _)| matches.value_source(id) == Some(ValueSource::CommandLine))
+        .map(|(_, flag)| *flag)
+        .collect()
 }
 
 #[cfg(test)]
@@ -152,6 +184,25 @@ mod tests {
         };
         assert_eq!(flow, "a/b");
         assert!(Cli::try_parse_from(["nowcast", "refresh"]).is_err());
+    }
+
+    fn daemon_matches(args: &[&str]) -> ArgMatches {
+        let matches = Cli::command().try_get_matches_from(args).unwrap();
+        assert_eq!(matches.subcommand_name(), Some("daemon"));
+        matches
+    }
+
+    #[test]
+    fn daemon_takes_no_client_option() {
+        let none: [&str; 0] = [];
+        assert_eq!(
+            client_options_given(&daemon_matches(&["nowcast", "daemon"])),
+            none
+        );
+        let matches = daemon_matches(&["nowcast", "--json", "daemon", "--socket", "/s"]);
+        assert_eq!(client_options_given(&matches), ["--socket", "--json"]);
+        let matches = daemon_matches(&["nowcast", "daemon", "--session", "s1"]);
+        assert_eq!(client_options_given(&matches), ["--session"]);
     }
 
     #[test]

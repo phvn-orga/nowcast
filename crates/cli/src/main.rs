@@ -1,5 +1,6 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `subscribe`.
+//! `refresh`, `subscribe`. `nowcast daemon` runs the service itself, from the
+//! `nowcast-daemon` library: one binary to install, at one version.
 //!
 //! Every command declares a session (`PUT /v1/session`) before any other call
 //! to the client API. The service attaches the tool to its anchor process: an
@@ -17,14 +18,19 @@ mod sse;
 use std::io;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, FromArgMatches};
 
 use crate::args::{Cli, Command};
 use crate::client::Client;
 use crate::error::CliError;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Command::Daemon = cli.command {
+        return daemon(&matches);
+    }
     let json = cli.json;
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -38,6 +44,19 @@ fn main() -> ExitCode {
             ExitCode::from(error.exit_code())
         }
     }
+}
+
+/// Runs the service, before anything else starts: the daemon builds its own
+/// runtime and logging, and takes its socket while the process has one thread.
+fn daemon(matches: &clap::ArgMatches) -> ExitCode {
+    let refused = args::client_options_given(matches);
+    if !refused.is_empty() {
+        let message = format!("{} cannot be used with daemon", refused.join(", "));
+        Cli::command()
+            .error(ErrorKind::ArgumentConflict, message)
+            .exit();
+    }
+    nowcast_daemon::run()
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
@@ -64,5 +83,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let resume = last_event_id.as_deref();
             commands::watch(&client, &subscribe, resume, cli.json, &mut out, &mut err).await
         }
+        Command::Daemon => unreachable!("main runs the daemon before any client command"),
     }
 }

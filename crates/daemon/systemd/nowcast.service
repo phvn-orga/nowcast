@@ -6,8 +6,8 @@ Requires=nowcast.socket
 After=nowcast.socket
 
 [Service]
-# Installation is out of scope: this is where `cargo install` puts the binary.
-ExecStart=%h/.cargo/bin/nowcast-daemon
+# Where `cargo install --root ~/.local` puts the binary, see the README.
+ExecStart=%h/.local/bin/nowcast daemon
 # SIGTERM reaches the daemon alone, which stops its bricks through their
 # protocol (`shutdown` first); whatever is left gets SIGKILL.
 KillMode=mixed
