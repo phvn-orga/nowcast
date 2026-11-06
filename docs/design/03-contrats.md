@@ -1,6 +1,6 @@
 # Les contrats
 
-État au 2026-11-06 : contrats décidés ; restent les valeurs de quelques délais.
+État au 2026-11-06 : contrats décidés, délais fixés, arrêt du service à vide décrit.
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -105,6 +105,10 @@ contenir `/`).
 C'est le premier appel obligatoire pour un processus d'ancrage, répété à chaque
 changement de session (`/clear`, reprise). Tout autre appel avant lui répond `428`
 avec le code `session_required`.
+
+Le service oublie les sessions à chaque arrêt, l'arrêt à vide compris (section 4). Un
+`428` reçu en cours de session signifie donc que le service a été relancé : le client
+déclare à nouveau sa session, puis renvoie sa requête.
 
 ### Abonnements
 
@@ -264,6 +268,20 @@ service → {"v":1,"t":"ack","req":7}
    plantage suivant termine tous les flux de la brique, chacun avec un `flow-error`.
    Un abonnement ultérieur relance la brique à neuf, avec ses 8 relances.
    Pendant l'attente, une nouvelle souscription échoue en `503` `brick_unavailable`.
+4. **Arrêt du service**, quelle qu'en soit la cause (arrêt à vide, `SIGTERM`,
+   `SIGINT`) : le service ferme d'abord toutes ses connexions, puis arrête toutes ses
+   briques à la fois par la même séquence, `shutdown`, `SIGTERM`, `SIGKILL`, avec les
+   mêmes délais, sans `release` préalable. L'unité systemd porte `KillMode=mixed` :
+   `systemctl stop` n'envoie `SIGTERM` qu'au service, et les briques reçoivent
+   `shutdown` d'abord.
+
+L'arrêt à vide a lieu après 60 s sans connexion ouverte ni abonnement, de n'importe
+quel processus d'ancrage. Une session déclarée sans connexion ni abonnement ne compte
+pas. Le délai dépasse celui de l'arrêt d'une brique (30 + 5 + 5 s) : les briques se
+sont normalement arrêtées d'elles-mêmes avant. Il n'est actif par défaut que sous
+activation par socket ; `NOWCAST_IDLE_TIMEOUT` (en secondes, décimales permises) le
+remplace et l'active pour un service lancé à la main. Une valeur invalide empêche le
+service de démarrer.
 
 ## 5. La déclaration d'un type de client
 
@@ -286,15 +304,28 @@ Deux sources, chargées dans cet ordre :
 | `description` | Une ligne pour un humain. |
 | `[anchor] exe` | Liste de motifs (glob) sur le chemin de l'exécutable du processus d'ancrage. Des motifs, parce que plusieurs versions d'un agent tournent en même temps. |
 
-La déclaration embarquée pour Claude Code :
+La déclaration embarquée pour Claude Code, un motif par façon de l'installer :
 
 ```toml
 name = "claude-code"
 description = "Sessions Claude Code"
 
 [anchor]
-exe = ["*/claude/versions/*"]
+exe = [
+  # Installateur natif : un fichier par version.
+  "*/claude/versions/*",
+  # Paquet npm : le binaire natif que le paquet met en place.
+  "*/@anthropic-ai/claude-code/bin/claude.exe",
+  # Paquet npm lancé par son repli `cli-wrapper.cjs` : le binaire du paquet de plateforme.
+  "*/@anthropic-ai/claude-code-*/claude",
+  # Paquets apt, dnf et apk.
+  "/usr/bin/claude",
+]
 ```
+
+Ne sont pas couverts : le Claude Code fourni avec l'application de bureau, ou un
+lanceur qui copie le binaire ailleurs. Une déclaration utilisateur du même nom la
+remplace, avec les motifs manquants en plus.
 
 Règle de rattachement : à la connexion, le service examine le processus qui se
 connecte, puis ses parents, et retient **le plus proche** dont l'exécutable correspond

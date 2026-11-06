@@ -1,6 +1,6 @@
 # Cadrage de nowcast
 
-État au 2026-11-05 : premières décisions prises, conception à poursuivre. Ce document
+État au 2026-11-06 : premières décisions prises, conception à poursuivre. Ce document
 est le point de départ de la conception, pas une spécification.
 
 ## Objet
@@ -90,7 +90,13 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   la coupure du flux. Un changement de session, lui, n'est connu que par le client.
 - **Lancé à la demande.** L'activation par socket de systemd (unité utilisateur) tient
   le socket et ne démarre le service qu'à la première connexion. Hors usage, il n'y a
-  pas de processus.
+  pas de processus : le service s'arrête de lui-même après 60 s sans connexion ouverte
+  ni abonnement, et systemd le relance à la connexion suivante. Cet arrêt n'est actif
+  par défaut que sous activation par socket : un service lancé à la main qui
+  s'arrêterait seul ne serait relancé par personne. `NOWCAST_IDLE_TIMEOUT` (en
+  secondes) remplace le délai, et active l'arrêt pour un service lancé à la main.
+  L'arrêt des briques et l'oubli des sessions qui s'ensuit sont décrits dans
+  `03-contrats.md`.
 - **Observation, pas action.** Le service écoute et publie ; il n'agit jamais sur une
   source. Les actions restent dans les clients (voir `01-briques.md`).
 - **Mêmes droits pour tous les clients**, pour l'instant (voir la limite ci-dessous).
