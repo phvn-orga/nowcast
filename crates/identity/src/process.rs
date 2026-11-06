@@ -133,14 +133,7 @@ fn peer_pidfd(socket: BorrowedFd<'_>) -> io::Result<OwnedFd> {
         )
     };
     if ret != 0 {
-        let error = io::Error::last_os_error();
-        return Err(match error.raw_os_error() {
-            Some(libc::ENOPROTOOPT) => io::Error::new(
-                io::ErrorKind::Unsupported,
-                "SO_PEERPIDFD is not supported: Linux 6.5 or later is required",
-            ),
-            _ => error,
-        });
+        return Err(peer_pidfd_error(io::Error::last_os_error()));
     }
     if fd < 0 {
         return Err(io::Error::other("SO_PEERPIDFD returned no descriptor"));
@@ -148,6 +141,21 @@ fn peer_pidfd(socket: BorrowedFd<'_>) -> io::Result<OwnedFd> {
     // SAFETY: on success the kernel installed a new pidfd in our table, which
     // nothing else owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Names the failures of `SO_PEERPIDFD` that the caller handles apart: an old
+/// kernel, and a connected process already reaped. Depending on the kernel
+/// version, a reaped process is refused with `EINVAL` or `ESRCH`, or gets a
+/// pidfd whose pid is gone, which [`Process::peer_of`] reports the same way.
+fn peer_pidfd_error(error: io::Error) -> io::Error {
+    match error.raw_os_error() {
+        Some(libc::ENOPROTOOPT) => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SO_PEERPIDFD is not supported: Linux 6.5 or later is required",
+        ),
+        Some(libc::EINVAL | libc::ESRCH) => exited(),
+        _ => error,
+    }
 }
 
 /// The pid `pidfd` refers to, from `/proc/self/fdinfo`, or `None` once the
@@ -245,6 +253,18 @@ mod tests {
             .take(2)
             .collect();
         assert_eq!(chain[1].pid as u32, std::os::unix::process::parent_id());
+    }
+
+    #[test]
+    fn a_peer_already_reaped_is_not_found_whatever_the_kernel() {
+        for errno in [libc::EINVAL, libc::ESRCH] {
+            let error = peer_pidfd_error(io::Error::from_raw_os_error(errno));
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{errno}");
+        }
+        let error = peer_pidfd_error(io::Error::from_raw_os_error(libc::ENOPROTOOPT));
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let error = peer_pidfd_error(io::Error::from_raw_os_error(libc::ENODATA));
+        assert_eq!(error.raw_os_error(), Some(libc::ENODATA));
     }
 
     #[test]

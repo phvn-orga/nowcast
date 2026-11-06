@@ -21,7 +21,9 @@ const FALLBACK_POLL: Duration = Duration::from_secs(1);
 /// Finds the anchor of each connection from the kernel's identity of the
 /// connected process, and watches the anchor's death through a pidfd.
 ///
-/// Linux only, 6.5 or later (`SO_PEERPIDFD`).
+/// Linux only, 6.5 or later (`SO_PEERPIDFD`). [`Identity::identify`] fails
+/// with [`io::ErrorKind::Unsupported`] on an older kernel, and with
+/// [`io::ErrorKind::NotFound`] when the connected process has already exited.
 pub struct PeerIdentity {
     kinds: KindMatcher,
     anchors: Mutex<Anchors>,
