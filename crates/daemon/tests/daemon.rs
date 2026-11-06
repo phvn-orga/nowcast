@@ -1,5 +1,7 @@
-//! Runs the daemon binary: under socket activation, and started by hand.
+//! Runs the daemon binary: under socket activation, started by hand, and with
+//! the real test brick behind it.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
@@ -8,15 +10,19 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use nowcast_test_brick::{CONTROL_VAR, Control, TYPE};
+use nowcast_types::FlowId;
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
 };
 use rustix::process::{Pid, Signal, kill_process};
 use tempfile::TempDir;
+use tokio::time::timeout;
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_nowcast-daemon");
 const SOCKET_ACTIVATE: &str = "/usr/bin/systemd-socket-activate";
@@ -55,12 +61,13 @@ impl Dirs {
         self.root.path().join("config/nowcast")
     }
 
-    /// Activates the test brick, which the fake supervisor resolves without
-    /// launching it.
+    /// Activates the test brick, built if needed: its declaration names the
+    /// bare program, which [`Dirs::command`] puts on the `PATH`.
     fn link_probe_brick(&self) {
+        build_test_brick();
         let bricks = self.config().join("bricks");
         fs::create_dir_all(&bricks).unwrap();
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-brick/brick/probe.toml");
+        let manifest = nowcast_test_brick::manifest();
         std::os::unix::fs::symlink(manifest, bricks.join("probe.toml")).unwrap();
     }
 
@@ -84,7 +91,8 @@ impl Dirs {
             .env("XDG_RUNTIME_DIR", self.runtime())
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("HOME", self.root.path())
-            .env("NOWCAST_LOG", "debug");
+            .env("NOWCAST_LOG", "debug")
+            .env("PATH", path_with_test_brick());
         for var in [
             "LISTEN_PID",
             "LISTEN_FDS",
@@ -95,6 +103,35 @@ impl Dirs {
         }
         command
     }
+}
+
+/// Builds the test brick once per test run. Cargo builds it for its own
+/// package's tests only, under `cargo test --workspace`.
+fn build_test_brick() {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let mut cargo = Command::new(env!("CARGO"));
+        cargo.args([
+            "build",
+            "--quiet",
+            "-p",
+            "nowcast-test-brick",
+            "--bin",
+            "nowcast-test-brick",
+        ]);
+        if !cfg!(debug_assertions) {
+            cargo.arg("--release");
+        }
+        assert!(cargo.status().unwrap().success(), "the test brick builds");
+    });
+}
+
+/// The `PATH` with the test brick's directory first.
+fn path_with_test_brick() -> OsString {
+    let brick = nowcast_test_brick::binary().expect("the profile directory of the tests");
+    let dir = brick.parent().unwrap().to_path_buf();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap()
 }
 
 /// A process killed when the test ends, whatever its outcome.
@@ -391,4 +428,51 @@ fn the_session_of_an_anchor_ends_with_its_process() {
     wait_until("the session ends", || {
         request(&connection, "GET", &flow, "").unwrap().0 == 428
     });
+}
+
+#[tokio::test]
+async fn a_value_from_the_test_brick_reaches_the_stream() {
+    let dirs = Dirs::new();
+    dirs.link_probe_brick();
+    let control = Control::bind(dirs.root.path().join("control")).unwrap();
+    let mut command = dirs.command(DAEMON);
+    let mut daemon = Running(command.env(CONTROL_VAR, control.path()).spawn().unwrap());
+    wait_until("the socket is bound", || dirs.socket().exists());
+
+    let client = UnixStream::connect(dirs.socket()).unwrap();
+    let (status, _) = request(&client, "PUT", "/v1/session", r#"{"id":"agent"}"#).unwrap();
+    assert_eq!(status, 204);
+    let subscribe = r#"{"brick":"probe","kind":"item","params":{"id":"a"}}"#;
+    let (status, body) = request(&client, "POST", "/v1/subscriptions", subscribe).unwrap();
+    assert_eq!(status, 201, "{body}");
+    let mut brick = timeout(TIMEOUT, control.accept()).await.unwrap().unwrap();
+
+    // The stream is open, its headers read, before the brick publishes.
+    let mut stream = UnixStream::connect(dirs.socket()).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(stream, "GET /v1/stream HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut received = Vec::new();
+    read_until(&mut stream, &mut received, "\r\n\r\n");
+    assert!(received.starts_with(b"HTTP/1.1 200"));
+
+    let detail = br#"{"id":"a","note":"from the test brick"}"#;
+    let flow = FlowId::new("a").unwrap();
+    let published = brick.publish(&flow, TYPE, detail);
+    timeout(TIMEOUT, published).await.unwrap().unwrap().unwrap();
+    read_until(&mut stream, &mut received, "from the test brick");
+
+    daemon.terminate();
+    assert!(daemon.wait().success());
+    // The brick does not outlive the daemon.
+    timeout(TIMEOUT, brick.exited()).await.unwrap().unwrap();
+}
+
+/// Reads `stream` into `received` until it holds `text`.
+fn read_until(stream: &mut UnixStream, received: &mut Vec<u8>, text: &str) {
+    let mut buffer = [0; 4096];
+    while !String::from_utf8_lossy(received).contains(text) {
+        let n = stream.read(&mut buffer).unwrap();
+        assert!(n > 0, "the stream ended before {text:?}");
+        received.extend_from_slice(&buffer[..n]);
+    }
 }

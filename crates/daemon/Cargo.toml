@@ -10,6 +10,7 @@ nowcast-identity = { path = "../identity" }
 nowcast-router = { path = "../router" }
 nowcast-server = { path = "../server" }
 nowcast-sessions = { path = "../sessions" }
+nowcast-supervisor = { path = "../supervisor" }
 nowcast-traits = { path = "../traits" }
 rustix = "1.1.6"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "signal", "macros"] }
@@ -17,6 +18,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
+nowcast-test-brick = { path = "../test-brick" }
+nowcast-types = { path = "../types" }
 rustix = { version = "1.1.6", features = ["net", "process"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "macros", "time"] }

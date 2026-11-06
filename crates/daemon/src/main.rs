@@ -25,8 +25,8 @@ use nowcast_identity::PeerIdentity;
 use nowcast_router::FlowRouter;
 use nowcast_server::Server;
 use nowcast_sessions::SessionRegistry;
-use nowcast_traits::fake::FakeSupervisor;
-use nowcast_traits::{Discovery, Router};
+use nowcast_supervisor::{BrickSupervisor, Config, ProcessLauncher};
+use nowcast_traits::Discovery;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
@@ -37,6 +37,8 @@ use crate::socket::Socket;
 /// Worker threads of the runtime: enough that one blocked task does not
 /// stall the others, few enough for a mostly idle service.
 const WORKER_THREADS: usize = 2;
+
+type Supervisor = BrickSupervisor<FsDiscovery, ProcessLauncher, FlowRouter>;
 
 fn main() -> ExitCode {
     init_logging();
@@ -136,21 +138,23 @@ async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The brick supervisor and the session registry, the one place where they
-/// are built. It runs inside the runtime, so both can spawn their tasks.
+/// The brick supervisor and the session registry. Both spawn their tasks on
+/// the runtime this runs in.
 ///
-/// FIXME: fake. The in-memory supervisor stands in until the real one (#12)
-/// lands: a subscription resolves and subscribes the anchor in the router
-/// without launching any brick. The real supervisor replaces it here and in
-/// the return type. It gets the router (subscriptions, publications,
-/// `empty_flows`) and the discovery (declarations and their changes), and it
-/// has to stop its bricks when `run` returns.
+/// The bricks a supervisor launches are killed when the runtime shuts down,
+/// as `main` returns: each one's process handle lives in a task of the
+/// runtime and kills the process when dropped.
 fn supervisor_and_sessions(
     router: &Arc<FlowRouter>,
-    _discovery: &Arc<FsDiscovery>,
+    discovery: &Arc<FsDiscovery>,
     identity: &Arc<PeerIdentity>,
-) -> (Arc<FakeSupervisor>, Arc<SessionRegistry>) {
-    let supervisor = FakeSupervisor::new(Arc::clone(router) as Arc<dyn Router>);
+) -> (Arc<Supervisor>, Arc<SessionRegistry>) {
+    let supervisor = BrickSupervisor::start(
+        Arc::clone(discovery),
+        Arc::new(ProcessLauncher),
+        Arc::clone(router),
+        Config::default(),
+    );
     let sessions = SessionRegistry::new(Arc::clone(identity), Arc::clone(router));
     (Arc::new(supervisor), Arc::new(sessions))
 }
