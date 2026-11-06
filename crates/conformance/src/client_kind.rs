@@ -158,7 +158,8 @@ fn named(n: &str) -> Option<ClientKindName> {
 
 const CLAUDE: &str = "/home/user/.local/share/claude/versions/2.1.0";
 
-/// The nearest ancestor whose executable matches becomes the anchor.
+/// The nearest process whose executable matches, the connected one included,
+/// becomes the anchor.
 pub fn the_nearest_matching_ancestor_anchors<S: AttachmentSubject>() {
     let chain = chain(&["/usr/bin/curl", "/usr/bin/bash", CLAUDE, "/usr/bin/zsh"]);
     assert_eq!(S::attach(&chain, &kinds()), (2, named("claude-code")));

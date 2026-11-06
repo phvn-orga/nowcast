@@ -1,0 +1,18 @@
+# A bare program name is looked up in PATH; its arguments stay.
+manifest_version = 1
+name = "bare"
+version = "0.1.0"
+description = "State of a PR and its CI on GitHub and Azure DevOps."
+protocol = 1
+
+[run]
+command = ["python3", "brick.py"]
+env = { RUST_LOG = "info" }
+
+[subscriptions.pr]
+description = "The PR of a branch and its CI checks."
+schema = "schemas/subscription-pr.json"
+publishes = "forge.pr/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"

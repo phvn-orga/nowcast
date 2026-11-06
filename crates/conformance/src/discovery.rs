@@ -152,6 +152,7 @@ pub async fn paths_resolve_from_the_real_file<S: DiscoverySubject>() {
         Path::new(&forge.command[0]),
         layout.path("repo/bin/nowcast-forge")
     );
+    assert_eq!(forge.dir, layout.path("repo"));
     let expected: serde_json::Value = serde_json::from_slice(
         &std::fs::read(layout.path("repo/schemas/subscription-pr.json")).unwrap(),
     )

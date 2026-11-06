@@ -63,6 +63,8 @@ error_codes!(
         UnknownFlow => "unknown_flow",
         /// The brick did not answer `ready` in time.
         BrickUnavailable => "brick_unavailable",
+        /// The brick answered `subscribe` with `error`.
+        SubscriptionRefused => "subscription_refused",
     }
 );
 

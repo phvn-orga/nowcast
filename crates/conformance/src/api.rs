@@ -25,7 +25,12 @@ pub enum ProbeMode {
     Ready,
     /// Never answers, so subscribing fails with `503`.
     NeverReady,
+    /// Answers every `subscribe` with `error`, code [`REFUSAL_CODE`].
+    Refusing,
 }
+
+/// The code the probe refuses subscriptions with, in [`ProbeMode::Refusing`].
+pub const REFUSAL_CODE: &str = "no_such_item";
 
 /// A running service and control over its probe.
 pub trait ApiHarness {
@@ -472,6 +477,30 @@ pub async fn an_unavailable_brick_answers_503<S: ApiSubject>() {
         .error(503, "brick_unavailable");
 }
 
+/// A brick answering `subscribe` with `error` answers `422`
+/// `subscription_refused`, the brick's code in the message.
+pub async fn a_refused_subscription_answers_422<S: ApiSubject>() {
+    let harness = S::start(ProbeMode::Refusing).await;
+    let client = Client::of(&harness);
+    client.declare_session().await;
+    let response = client
+        .request(
+            "POST",
+            "/v1/subscriptions",
+            Some(json!({ "brick": probe::NAME, "kind": probe::KIND, "params": { "id": "a" } })),
+        )
+        .await;
+    response.error(422, "subscription_refused");
+    let message = response.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.starts_with(&format!("{REFUSAL_CODE}: ")),
+        "the message starts with the brick's code: {message:?}"
+    );
+}
+
 /// Two subscribers of one flow get two subscriptions: deleting one does not cut
 /// the other. The flow is shared.
 pub async fn subscriptions_are_per_subscriber<S: ApiSubject>() {
@@ -598,7 +627,8 @@ pub async fn the_stream_includes_later_subscriptions<S: ApiSubject>() {
     assert_eq!(data["subject"], subscribed.flow);
 }
 
-/// A brick unable to serve a flow shows as `flow-error`.
+/// A brick unable to serve a flow shows as `flow-error`, with no SSE `id` and
+/// `{"flow", "message"}` as data.
 pub async fn flow_errors_reach_the_stream<S: ApiSubject>() {
     let (harness, client) = ready::<S>().await;
     let subscribed = client.subscribe("a").await;
@@ -606,10 +636,18 @@ pub async fn flow_errors_reach_the_stream<S: ApiSubject>() {
     harness
         .flow_error(&subscribed.qualified, "source down")
         .await;
-    assert_eq!(stream.next().await.event, "flow-error");
+    let event = stream.next().await;
+    assert_eq!(event.event, "flow-error");
+    assert_eq!(event.id, None, "a signal carries no id");
+    let data: Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(
+        data,
+        json!({ "flow": subscribed.flow, "message": "source down" })
+    );
 }
 
-/// A deleted subscription shows as `flow-ended`.
+/// A deleted subscription shows as `flow-ended`, with no SSE `id` and
+/// `{"flow"}` as data.
 pub async fn unsubscribing_ends_the_flow_on_the_stream<S: ApiSubject>() {
     let (_harness, client) = ready::<S>().await;
     let subscribed = client.subscribe("a").await;
@@ -622,7 +660,33 @@ pub async fn unsubscribing_ends_the_flow_on_the_stream<S: ApiSubject>() {
         )
         .await
         .status(204);
-    assert_eq!(stream.next().await.event, "flow-ended");
+    let event = stream.next().await;
+    assert_eq!(event.event, "flow-ended");
+    assert_eq!(event.id, None, "a signal carries no id");
+    let data: Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(data, json!({ "flow": subscribed.flow }));
+}
+
+/// A stream opened without `Last-Event-ID` first sends the last value of each
+/// subscribed flow: a value published between subscribing and opening the
+/// stream is not lost.
+pub async fn a_fresh_stream_sends_every_last_value<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let a = client.subscribe("a").await;
+    publish(&harness, &a.qualified, &json!({ "v": 1 })).await;
+    publish(&harness, &a.qualified, &json!({ "v": 2 })).await;
+    let mut stream = client.stream(None).await;
+    let event = stream.next().await;
+    assert_eq!(event.event, "update");
+    let data: Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(event.id.as_deref(), data["id"].as_str());
+    assert_eq!(
+        (&data["subject"], &data["data"]),
+        (&json!(a.flow), &json!({ "v": 2 }))
+    );
+    if let Some(extra) = stream.next_within(Duration::from_millis(300)).await {
+        panic!("only the last value comes, got {extra:?}");
+    }
 }
 
 /// On reconnection with `Last-Event-ID`, the last value of each flow newer
@@ -679,6 +743,7 @@ macro_rules! api_suite {
                     invalid_params_answer_400,
                     unknown_bricks_and_kinds_answer_404,
                     an_unavailable_brick_answers_503,
+                    a_refused_subscription_answers_422,
                     subscriptions_are_per_subscriber,
                     unsubscribing_answers_204,
                     refresh_answers_202_and_reaches_the_brick,
@@ -690,6 +755,7 @@ macro_rules! api_suite {
                     the_stream_includes_later_subscriptions,
                     flow_errors_reach_the_stream,
                     unsubscribing_ends_the_flow_on_the_stream,
+                    a_fresh_stream_sends_every_last_value,
                     reconnecting_replays_last_values,
                 ]
             );

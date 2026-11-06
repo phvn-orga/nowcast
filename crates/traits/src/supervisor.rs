@@ -33,7 +33,8 @@ impl From<BrickUnavailable> for ApiError {
 pub enum ResolveError {
     UnknownBrick(BrickName),
     Unavailable(BrickUnavailable),
-    /// The brick answered `subscribe` with `error`.
+    /// The brick answered `subscribe` with `error`. The client gets `422`
+    /// `subscription_refused`.
     Refused {
         code: String,
         message: String,
@@ -51,6 +52,22 @@ impl fmt::Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+impl From<ResolveError> for ApiError {
+    fn from(e: ResolveError) -> Self {
+        match e {
+            ResolveError::UnknownBrick(name) => Self {
+                code: ApiErrorCode::UnknownBrick,
+                message: format!("unknown brick {name}"),
+            },
+            ResolveError::Unavailable(e) => e.into(),
+            ResolveError::Refused { code, message } => Self {
+                code: ApiErrorCode::SubscriptionRefused,
+                message: format!("{code}: {message}"),
+            },
+        }
+    }
+}
 
 /// Starts and stops bricks on demand.
 ///

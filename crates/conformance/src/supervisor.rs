@@ -44,7 +44,10 @@ struct World<S> {
 
 fn world<S: SupervisorSubject>() -> World<S::Supervisor> {
     let discovery = Arc::new(FakeDiscovery::new());
-    discovery.insert(probe::declaration(vec!["probe".into()]));
+    discovery.insert(probe::declaration(
+        vec!["probe".into()],
+        std::env::temp_dir(),
+    ));
     let launcher = Arc::new(FakeLauncher::new());
     let router = Arc::new(FakeRouter::new());
     let supervisor = Arc::new(S::start(

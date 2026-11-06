@@ -173,18 +173,16 @@ impl Router for FakeRouter {
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
         let (tx, rx) = unbounded_channel();
         let mut state = self.state.lock().unwrap();
-        if let Some(since) = since {
-            let mut missed: Vec<_> = state
-                .flows
-                .values()
-                .filter(|f| f.has_anchor(anchor))
-                .filter_map(|f| f.last.clone())
-                .filter(|e| e.id > since)
-                .collect();
-            missed.sort_by_key(|e| e.id);
-            for event in missed {
-                let _ = tx.send(StreamEvent::Update(event));
-            }
+        let mut missed: Vec<_> = state
+            .flows
+            .values()
+            .filter(|f| f.has_anchor(anchor))
+            .filter_map(|f| f.last.clone())
+            .filter(|e| since.is_none_or(|since| e.id > since))
+            .collect();
+        missed.sort_by_key(|e| e.id);
+        for event in missed {
+            let _ = tx.send(StreamEvent::Update(event));
         }
         state.streams.entry(anchor).or_default().push(tx);
         rx

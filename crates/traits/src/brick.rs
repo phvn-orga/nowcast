@@ -26,5 +26,7 @@ pub struct BrickConnection {
 
 /// Launches brick processes and speaks the brick protocol with them.
 pub trait BrickLauncher: Send + Sync + 'static {
+    /// Runs `brick.command` in `brick.dir`, a bare program name looked up in
+    /// `PATH`, with `brick.env` added to the service's environment.
     fn launch(&self, brick: &BrickDeclaration) -> io::Result<BrickConnection>;
 }

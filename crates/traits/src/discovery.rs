@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nowcast_types::{BrickName, ClientKindName};
@@ -12,9 +13,13 @@ pub struct BrickDeclaration {
     pub description: String,
     /// The major version of the brick protocol the brick speaks.
     pub protocol: u32,
-    /// The command to launch. A relative program path is already resolved from
-    /// the real directory of the declaration file, link resolved.
+    /// The command to launch. A program path (one with a `/`) is already
+    /// absolute, a relative one resolved from [`Self::dir`]. A bare program
+    /// name is kept as is, to be looked up in `PATH` at launch.
     pub command: Vec<String>,
+    /// The real directory of the declaration file, link resolved. The brick
+    /// runs there.
+    pub dir: PathBuf,
     pub env: BTreeMap<String, String>,
     /// By subscription kind.
     pub subscriptions: BTreeMap<String, SubscriptionKind>,

@@ -99,6 +99,22 @@ pub fn keeps_an_absolute_command<S: ManifestSubject>() {
     assert_eq!(absolute.command, vec!["/opt/forge/bin/nowcast-forge"]);
 }
 
+/// A program name without `/` is kept, to be looked up in `PATH`.
+pub fn keeps_a_bare_program_name<S: ManifestSubject>() {
+    let bare = load::<S>("bare.toml").expect("bare.toml is valid");
+    assert_eq!(bare.command, vec!["python3", "brick.py"]);
+}
+
+/// The brick runs in the file's real directory, link resolved.
+pub fn runs_in_the_file_directory<S: ManifestSubject>() {
+    let forge = load::<S>("forge.toml").unwrap();
+    assert_eq!(forge.dir, dir());
+    let elsewhere = tempfile::tempdir().unwrap();
+    let link = elsewhere.path().join("forge.toml");
+    std::os::unix::fs::symlink(dir().join("forge.toml"), &link).unwrap();
+    assert_eq!(S::load(&link).unwrap().dir, dir());
+}
+
 /// `[run] env` is optional; `version` takes any semver, pre-releases included.
 pub fn accepts_the_least_a_brick_declares<S: ManifestSubject>() {
     let minimal = load::<S>("minimal.toml").expect("minimal.toml is valid");
@@ -134,7 +150,8 @@ pub fn refuses_an_undeclared_published_type<S: ManifestSubject>() {
     refused::<S>("invalid-undeclared-type.toml");
 }
 
-/// A schema path must lead to a schema.
+/// A schema path must lead to a readable JSON file, or the file is refused at
+/// load.
 pub fn refuses_a_missing_schema<S: ManifestSubject>() {
     refused::<S>("invalid-missing-subscription-schema.toml");
     refused::<S>("invalid-missing-type-schema.toml");
@@ -157,6 +174,8 @@ macro_rules! manifest_suite {
                     resolves_a_relative_command,
                     resolves_through_a_link,
                     keeps_an_absolute_command,
+                    keeps_a_bare_program_name,
+                    runs_in_the_file_directory,
                     accepts_the_least_a_brick_declares,
                     refuses_another_manifest_version,
                     refuses_an_invalid_name,

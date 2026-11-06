@@ -74,9 +74,9 @@ pub trait Router: Send + Sync + 'static {
     fn end_flow(&self, flow: &QualifiedFlowId);
 
     /// Opens a stream of everything delivered to `anchor`, including flows it
-    /// subscribes to later. With `since`, first sends the last value of each
-    /// subscribed flow whose id is greater than `since`; without it, sends no
-    /// past value. The stream closes when the anchor is removed.
+    /// subscribes to later. First sends the last value of each subscribed
+    /// flow, only those whose id is greater than `since` when given. The
+    /// stream closes when the anchor is removed.
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent>;
 
     /// How many subscriptions `flow` has, from every anchor.

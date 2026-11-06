@@ -5,6 +5,7 @@
 //! brick (the test brick) declares it with these schemas.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use nowcast_traits::{BrickDeclaration, SubscriptionKind, TypeDeclaration};
 use nowcast_types::{BrickName, PROTOCOL_VERSION};
@@ -33,14 +34,15 @@ pub fn type_schema() -> serde_json::Value {
     json!({ "type": "object" })
 }
 
-/// The probe as discovery would load it, launched by `command`.
-pub fn declaration(command: Vec<String>) -> BrickDeclaration {
+/// The probe as discovery would load it, launched by `command` in `dir`.
+pub fn declaration(command: Vec<String>, dir: PathBuf) -> BrickDeclaration {
     BrickDeclaration {
         name: name(),
         version: "0.1.0".into(),
         description: "Publishes on demand, for conformance tests.".into(),
         protocol: PROTOCOL_VERSION,
         command,
+        dir,
         env: BTreeMap::new(),
         subscriptions: BTreeMap::from([(
             KIND.into(),

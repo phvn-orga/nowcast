@@ -201,13 +201,25 @@ pub async fn reconnecting_replays_last_values_only<S: RouterSubject>() {
     assert!(z.id < seen.id);
 }
 
-/// A stream opened without `Last-Event-ID` sends no past value.
-pub async fn a_fresh_stream_sends_no_past_value<S: RouterSubject>() {
+/// A stream opened without `Last-Event-ID` first sends the last value of each
+/// subscribed flow, so that nothing published before it opened is lost.
+pub async fn a_fresh_stream_sends_every_last_value<S: RouterSubject>() {
     let router = S::new();
     router.subscribe(A, flow("x"));
+    router.subscribe(A, flow("y"));
+    router.subscribe(A, flow("empty"));
+    router.subscribe(B, flow("other"));
     publish(&router, &flow("x"), "1");
+    let x = publish(&router, &flow("x"), "2");
+    let y = publish(&router, &flow("y"), "1");
+    publish(&router, &flow("other"), "1");
     let mut stream = router.stream(A, None);
-    tokio::task::yield_now().await;
+    let mut sent = vec![
+        update(next(&mut stream).await),
+        update(next(&mut stream).await),
+    ];
+    sent.sort_by_key(|e| e.id);
+    assert_eq!(sent, vec![x, y]);
     assert_quiet(&mut stream);
 }
 
@@ -324,7 +336,7 @@ macro_rules! router_suite {
                     the_stream_follows_the_anchors_subscriptions,
                     one_update_per_stream,
                     reconnecting_replays_last_values_only,
-                    a_fresh_stream_sends_no_past_value,
+                    a_fresh_stream_sends_every_last_value,
                     flow_errors_reach_subscribers,
                     unsubscribing_ends_the_flow_for_the_anchor,
                     ending_a_flow_reaches_every_subscriber,

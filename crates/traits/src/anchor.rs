@@ -13,11 +13,12 @@ impl fmt::Display for AnchorId {
     }
 }
 
-/// The process a connection is attached to: the nearest ancestor whose
-/// executable matches a declared client kind, or the connected process itself.
+/// The process a connection is attached to: the nearest process, the
+/// connected one first and then its ancestors, whose executable matches a
+/// declared client kind; failing that, the connected process itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Anchor {
     pub id: AnchorId,
-    /// `None` when no ancestor matched and the connected process anchors itself.
+    /// `None` when no process matched and the connected process anchors itself.
     pub kind: Option<ClientKindName>,
 }
