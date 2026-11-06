@@ -3,8 +3,16 @@
 //!
 //! Started by systemd on the first connection (`systemd/nowcast.socket`), it
 //! takes the listening socket systemd passes. Started by hand, it binds
-//! `$XDG_RUNTIME_DIR/nowcast/nowcast.sock` itself. It stops on `SIGTERM` or
-//! `SIGINT`, closing every connection.
+//! `$XDG_RUNTIME_DIR/nowcast/nowcast.sock` itself.
+//!
+//! It stops on `SIGTERM` or `SIGINT`, and, when systemd passed the socket,
+//! once it has had no connection and no subscription for 60 s
+//! (`IDLE_TIMEOUT`): systemd keeps the socket and starts it again on the
+//! next connection. `NOWCAST_IDLE_TIMEOUT` sets that delay in seconds
+//! (decimals allowed); set, it applies to a daemon started by hand too,
+//! which otherwise runs until stopped. On every stop, the connections close
+//! first, then each brick gets `shutdown`, `SIGTERM` 5 s later and `SIGKILL`
+//! 5 s after that, the supervisor's delays, until it exits.
 //!
 //! Logs go to stderr, which the journal collects under systemd. `NOWCAST_LOG`
 //! sets the filter, in `tracing_subscriber::EnvFilter` syntax, `info` by
@@ -13,12 +21,14 @@
 mod socket;
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::IsTerminal;
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nowcast_discovery::{DiscoveryConfig, FsDiscovery};
 use nowcast_identity::PeerIdentity;
@@ -38,10 +48,30 @@ use crate::socket::Socket;
 /// stall the others, few enough for a mostly idle service.
 const WORKER_THREADS: usize = 2;
 
+/// The variable setting the idle delay, in seconds.
+const IDLE_VAR: &str = "NOWCAST_IDLE_TIMEOUT";
+
+/// How long a socket-activated daemon runs with no connection and no
+/// subscription before exiting. Longer than a brick's grace period and its
+/// stop together (30 s, then 5 s and 5 s), so that by then the bricks have
+/// stopped on their own and the exit does not wait for them.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the bricks get, beyond the supervisor's own stop delays, to exit
+/// once `SIGKILL` is sent, before the daemon stops waiting for them.
+const STOP_MARGIN: Duration = Duration::from_secs(2);
+
 type Supervisor = BrickSupervisor<FsDiscovery, ProcessLauncher, FlowRouter>;
 
 fn main() -> ExitCode {
     init_logging();
+    let idle = match idle_setting(std::env::var_os(IDLE_VAR)) {
+        Ok(idle) => idle,
+        Err(e) => {
+            tracing::error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Before the runtime starts any thread: taking the socket edits the
     // environment.
     let socket = match socket::open() {
@@ -51,12 +81,20 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Exiting is safe only when systemd holds the socket and starts the
+    // daemon again: a daemon started by hand runs until stopped, unless
+    // told otherwise.
+    let idle = idle.or(socket.bound.is_none().then_some(IDLE_TIMEOUT));
+    match idle {
+        Some(idle) => tracing::info!("exits after {idle:?} with no connection and no subscription"),
+        None => tracing::info!("runs until stopped"),
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
         .enable_all()
         .build();
     let result = match runtime {
-        Ok(runtime) => runtime.block_on(run(socket)),
+        Ok(runtime) => runtime.block_on(run(socket, idle)),
         Err(e) => Err(format!("cannot start the runtime: {e}").into()),
     };
     match result {
@@ -66,6 +104,24 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The idle delay [`IDLE_VAR`] sets, `None` when unset or empty.
+fn idle_setting(value: Option<OsString>) -> Result<Option<Duration>, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let invalid = || format!("{IDLE_VAR} must be a number of seconds, not {value:?}");
+    let seconds: f64 = value
+        .to_str()
+        .ok_or_else(invalid)?
+        .trim()
+        .parse()
+        .map_err(|_| invalid())?;
+    // Refuses a negative, infinite or oversized number.
+    Duration::try_from_secs_f64(seconds)
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 fn init_logging() {
@@ -99,7 +155,7 @@ fn stderr_is_journal() -> bool {
     stream.to_str() == Some(format!("{}:{}", metadata.dev(), metadata.ino()).as_str())
 }
 
-async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
+async fn run(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Error>> {
     // Dropped last, when `run` returns, whether it succeeds or fails.
     let Socket {
         listener,
@@ -120,41 +176,82 @@ async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
         Arc::new(PeerIdentity::new(move || discovery.client_kinds()))
     };
     let router = Arc::new(FlowRouter::new());
-    let (supervisor, sessions) = supervisor_and_sessions(&router, &discovery, &identity);
+    let delays = Config::default();
+    let (supervisor, sessions) =
+        supervisor_and_sessions(&router, &discovery, &identity, delays.clone());
     let server = Server {
         router,
-        supervisor,
+        supervisor: Arc::clone(&supervisor),
         discovery,
         identity,
         sessions,
     };
+    let serving = async move {
+        match idle {
+            Some(idle) => server.serve_until_idle(listener, idle).await,
+            None => server.serve(listener).await,
+        }
+    };
 
     tokio::select! {
-        () = server.serve(listener) => {}
+        () = serving => {}
         _ = terminate.recv() => tracing::info!("SIGTERM received, stopping"),
         _ = interrupt.recv() => tracing::info!("SIGINT received, stopping"),
     }
-    // The server is dropped by now, and every connection closed with it.
+    // The server is dropped by now, and every connection closed with it: no
+    // subscription can launch a brick any more. A signal arriving from here
+    // on changes nothing, the stop being bounded.
+    let bound = delays.terminate_after + delays.kill_after + STOP_MARGIN;
+    if tokio::time::timeout(bound, supervisor.shutdown())
+        .await
+        .is_err()
+    {
+        // Their process handles kill them when the runtime shuts down.
+        tracing::warn!("bricks still running after {bound:?}, killing them");
+    } else {
+        tracing::info!("every brick stopped");
+    }
     Ok(())
 }
 
 /// The brick supervisor and the session registry. Both spawn their tasks on
 /// the runtime this runs in.
-///
-/// The bricks a supervisor launches are killed when the runtime shuts down,
-/// as `main` returns: each one's process handle lives in a task of the
-/// runtime and kills the process when dropped.
 fn supervisor_and_sessions(
     router: &Arc<FlowRouter>,
     discovery: &Arc<FsDiscovery>,
     identity: &Arc<PeerIdentity>,
+    delays: Config,
 ) -> (Arc<Supervisor>, Arc<SessionRegistry>) {
     let supervisor = BrickSupervisor::start(
         Arc::clone(discovery),
         Arc::new(ProcessLauncher),
         Arc::clone(router),
-        Config::default(),
+        delays,
     );
     let sessions = SessionRegistry::new(Arc::clone(identity), Arc::clone(router));
     (Arc::new(supervisor), Arc::new(sessions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_idle_delay_outlasts_a_brick_stop() {
+        let delays = Config::default();
+        assert!(IDLE_TIMEOUT > delays.grace + delays.terminate_after + delays.kill_after);
+    }
+
+    #[test]
+    fn the_idle_delay_is_a_number_of_seconds() {
+        let set = |value: &str| idle_setting(Some(value.into()));
+        assert_eq!(idle_setting(None), Ok(None));
+        assert_eq!(set(""), Ok(None));
+        assert_eq!(set("90"), Ok(Some(Duration::from_secs(90))));
+        assert_eq!(set(" 0.5 "), Ok(Some(Duration::from_millis(500))));
+        assert_eq!(set("0"), Ok(Some(Duration::ZERO)));
+        for bad in ["-1", "1s", "inf", "NaN", "1e300", "x"] {
+            assert!(set(bad).is_err(), "{bad} accepted");
+        }
+    }
 }

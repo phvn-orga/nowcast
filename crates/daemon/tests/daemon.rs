@@ -414,10 +414,16 @@ fn the_socket_unit_matches_the_daemon() {
     }
 }
 
+#[test]
+fn the_service_unit_lets_the_daemon_stop_its_bricks() {
+    let unit = include_str!("../systemd/nowcast.service");
+    assert!(unit.lines().any(|l| l == "KillMode=mixed"));
+}
+
 /// Not a test of its own: the connector, this binary run again with
 /// [`CONNECT`] set. It connects to the daemon, which anchors the connection
-/// on it, hands the connection to the test over its stdin, then waits to be
-/// killed.
+/// on it, hands the connection to the test over its stdin, closes its own
+/// copy, then waits to be killed.
 #[test]
 fn connector() {
     let Some(socket) = std::env::var_os(CONNECT) else {
@@ -435,6 +441,8 @@ fn connector() {
         SendFlags::empty(),
     )
     .unwrap();
+    // The test holds the connection now: closing it is up to the test.
+    drop(daemon);
     loop {
         std::thread::park();
     }
@@ -556,4 +564,277 @@ fn read_until(stream: &mut UnixStream, received: &mut Vec<u8>, text: &str) {
         assert!(n > 0, "the stream ended before {text:?}");
         received.extend_from_slice(&buffer[..n]);
     }
+}
+
+// Exiting when unused, and stopping the bricks on the way out.
+
+/// The idle delay of the tests, in seconds, for `NOWCAST_IDLE_TIMEOUT`.
+const IDLE: &str = "0.5";
+const IDLE_DELAY: Duration = Duration::from_millis(500);
+
+/// What a daemon writes on stderr, read as it comes.
+struct Logs(std::sync::Arc<std::sync::Mutex<String>>);
+
+impl Logs {
+    /// Starts `command` with its stderr read into the returned logs.
+    fn spawn(command: &mut Command) -> (Running, Logs) {
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let writer = std::sync::Arc::clone(&logs);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut logs = writer.lock().unwrap();
+                logs.push_str(&line);
+                logs.push('\n');
+            }
+        });
+        (Running(child), Logs(logs))
+    }
+
+    fn wait_for(&self, text: &str) {
+        wait_until(&format!("{text:?} in the logs"), || {
+            self.0.lock().unwrap().contains(text)
+        });
+    }
+}
+
+/// `program` started under `systemd-socket-activate` on the daemon's socket,
+/// with the variables the daemon reads, and `NOWCAST_IDLE_TIMEOUT` when given.
+fn activator(dirs: &Dirs, idle: Option<&str>) -> Command {
+    fs::create_dir_all(dirs.socket_dir()).unwrap();
+    let mut command = dirs.command(SOCKET_ACTIVATE);
+    command.arg("--listen").arg(dirs.socket());
+    for var in ["XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "HOME", "NOWCAST_LOG"] {
+        command.args(["-E", var]);
+    }
+    if let Some(idle) = idle {
+        command
+            .arg("-E")
+            .arg(format!("NOWCAST_IDLE_TIMEOUT={idle}"));
+    }
+    command.arg(DAEMON);
+    command
+}
+
+#[test]
+fn an_activated_daemon_exits_once_unused() {
+    let dirs = Dirs::new();
+    let mut daemon = Running(activator(&dirs, Some(IDLE)).spawn().unwrap());
+    wait_until("the socket is listening", || dirs.socket().exists());
+
+    assert_eq!(declare_session(&dirs.socket()).unwrap(), 204);
+    let unused = Instant::now();
+    assert!(daemon.wait().success());
+    assert!(unused.elapsed() >= IDLE_DELAY, "exited before the delay");
+    // The socket is systemd's, left for the next start.
+    assert!(dirs.socket().exists());
+}
+
+#[test]
+fn an_activated_daemon_waits_a_minute_by_default() {
+    let dirs = Dirs::new();
+    let (mut daemon, logs) = Logs::spawn(&mut activator(&dirs, None));
+    wait_until("the socket is listening", || dirs.socket().exists());
+    assert_eq!(declare_session(&dirs.socket()).unwrap(), 204);
+    logs.wait_for("exits after 60s with no connection and no subscription");
+    daemon.terminate();
+    assert!(daemon.wait().success());
+}
+
+#[test]
+fn a_daemon_started_by_hand_runs_until_stopped_by_default() {
+    let dirs = Dirs::new();
+    let (mut daemon, logs) = Logs::spawn(&mut dirs.command(DAEMON));
+    logs.wait_for("runs until stopped");
+    daemon.terminate();
+    assert!(daemon.wait().success());
+}
+
+#[test]
+fn an_invalid_idle_delay_is_refused() {
+    let dirs = Dirs::new();
+    let mut command = dirs.command(DAEMON);
+    let mut daemon = Running(command.env("NOWCAST_IDLE_TIMEOUT", "soon").spawn().unwrap());
+    assert!(!daemon.wait().success());
+    assert!(!dirs.socket_dir().exists(), "refused before the bind");
+}
+
+/// Plays systemd's part in socket activation: holds the listening socket for
+/// good, and starts a daemon on it as descriptor 3, with `LISTEN_PID` and
+/// `LISTEN_FDS` set, whenever the test says a connection is waiting.
+struct Systemd {
+    listener: UnixListener,
+}
+
+impl Systemd {
+    fn listen(dirs: &Dirs) -> Self {
+        fs::create_dir_all(dirs.socket_dir()).unwrap();
+        Self {
+            listener: UnixListener::bind(dirs.socket()).unwrap(),
+        }
+    }
+
+    fn start(&self, dirs: &Dirs) -> Running {
+        let socket = OwnedFd::from(self.listener.try_clone().unwrap());
+        // The socket comes in as stdin; the shell moves it to 3, then gives
+        // way to the daemon under its own pid.
+        let script = r#"exec 3<&0 0</dev/null; export LISTEN_PID=$$ LISTEN_FDS=1; exec "$0""#;
+        let child = dirs
+            .command("sh")
+            .args(["-c", script, DAEMON])
+            .env("NOWCAST_IDLE_TIMEOUT", IDLE)
+            .stdin(Stdio::from(socket))
+            .spawn()
+            .unwrap();
+        Running(child)
+    }
+}
+
+#[test]
+fn a_connection_after_an_idle_exit_starts_the_daemon_again() {
+    let dirs = Dirs::new();
+    let systemd = Systemd::listen(&dirs);
+    let mut first = systemd.start(&dirs);
+    assert_eq!(declare_session(&dirs.socket()).unwrap(), 204);
+    assert!(first.wait().success(), "the first daemon exits once unused");
+
+    // Nobody listens on the socket but systemd: the connection and its
+    // request wait in the socket's queue.
+    let client = UnixStream::connect(dirs.socket()).unwrap();
+    write!(
+        &client,
+        "PUT /v1/session HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\n\r\n{{\"id\":\"next\"}}"
+    )
+    .unwrap();
+    let _second = systemd.start(&dirs);
+    let mut reader = BufReader::new(&client);
+    client.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut status = String::new();
+    reader.read_line(&mut status).unwrap();
+    assert!(status.starts_with("HTTP/1.1 204"), "{status:?}");
+}
+
+#[tokio::test]
+async fn a_subscription_keeps_an_unused_daemon_until_its_anchor_dies() {
+    let dirs = Dirs::new();
+    dirs.link_probe_brick();
+    dirs.declare_connector_kind();
+    let control = Control::bind(dirs.root.path().join("control")).unwrap();
+    let mut command = dirs.command(DAEMON);
+    command
+        .env(CONTROL_VAR, control.path())
+        .env("NOWCAST_IDLE_TIMEOUT", IDLE);
+    let mut daemon = Running(command.spawn().unwrap());
+    wait_until("the socket is bound", || dirs.socket().exists());
+    let (mut anchor, connection) = connection_anchored_on_a_connector(&dirs);
+
+    let (status, _) = request(&connection, "PUT", "/v1/session", r#"{"id":"agent"}"#).unwrap();
+    assert_eq!(status, 204);
+    let subscribe = r#"{"brick":"probe","kind":"item","params":{"id":"a"}}"#;
+    let (status, body) = request(&connection, "POST", "/v1/subscriptions", subscribe).unwrap();
+    assert_eq!(status, 201, "{body}");
+    let brick = timeout(TIMEOUT, control.accept()).await.unwrap().unwrap();
+
+    // No connection is left: the subscription alone keeps the daemon.
+    drop(connection);
+    sleep(IDLE_DELAY * 3);
+    assert!(daemon.0.try_wait().unwrap().is_none(), "the daemon exited");
+
+    anchor.kill();
+    let dead = Instant::now();
+    assert!(daemon.wait().success());
+    // Well within the 5 s before `SIGTERM`: the brick, still in its grace
+    // period, stopped on `shutdown`.
+    assert!(
+        dead.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        dead.elapsed()
+    );
+    timeout(TIMEOUT, brick.exited()).await.unwrap().unwrap();
+    assert!(!dirs.socket().exists());
+}
+
+/// A brick written in `sh`, declared as the probe: it answers `hello` with
+/// `ready` at once, records everything the service sends it in `input`, and
+/// on `SIGTERM` writes to `log` whether `shutdown` had arrived before, then
+/// exits.
+fn link_recording_brick(dirs: &Dirs, input: &Path, log: &Path) {
+    let bricks = dirs.config().join("bricks");
+    fs::create_dir_all(&bricks).unwrap();
+    let schemas = nowcast_test_brick::manifest()
+        .parent()
+        .unwrap()
+        .join("schemas");
+    std::os::unix::fs::symlink(schemas, bricks.join("schemas")).unwrap();
+    // `ready` is a length of 12 then the map {"v": 1, "t": "ready"}. A
+    // background job reads /dev/null: it gets the input through descriptor 3.
+    let script = r#"
+        trap 'if grep -qa shutdown "$1"; then echo after-shutdown; else echo before-shutdown; fi >> "$0"; exit 0' TERM
+        printf '\014\000\000\000\202\241v\001\241t\245ready'
+        exec 3<&0
+        cat <&3 > "$1" &
+        wait
+    "#;
+    let manifest = format!(
+        r#"manifest_version = 1
+name = "probe"
+version = "0.1.0"
+description = "Records what the service sends."
+protocol = 1
+
+[run]
+command = ["sh", "-c", '''{script}''', {log:?}, {input:?}]
+
+[subscriptions.item]
+description = "One item, named by its id."
+schema = "schemas/item.json"
+publishes = "probe.item/v1"
+
+[types."probe.item/v1"]
+schema = "schemas/probe-item-v1.json"
+"#,
+        log = log.display().to_string(),
+        input = input.display().to_string(),
+    );
+    fs::write(bricks.join("probe.toml"), manifest).unwrap();
+}
+
+#[test]
+fn sigterm_sends_shutdown_to_a_running_brick_before_any_signal_and_waits_for_it() {
+    let dirs = Dirs::new();
+    let input = dirs.root.path().join("brick.in");
+    let log = dirs.root.path().join("brick.log");
+    link_recording_brick(&dirs, &input, &log);
+    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    wait_until("the socket is bound", || dirs.socket().exists());
+
+    // The brick never answers: the request stays in flight on a ready brick.
+    let client = UnixStream::connect(dirs.socket()).unwrap();
+    assert_eq!(
+        request(&client, "PUT", "/v1/session", r#"{"id":"s"}"#)
+            .unwrap()
+            .0,
+        204
+    );
+    let subscribe = r#"{"brick":"probe","kind":"item","params":{"id":"a"}}"#;
+    write!(
+        &client,
+        "POST /v1/subscriptions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{subscribe}",
+        subscribe.len()
+    )
+    .unwrap();
+    wait_until("the brick is asked to subscribe", || {
+        fs::read(&input).is_ok_and(|bytes| bytes.windows(9).any(|w| w == b"subscribe"))
+    });
+
+    daemon.terminate();
+    let terminated = Instant::now();
+    // A second signal while the bricks stop changes nothing.
+    sleep(Duration::from_secs(1));
+    daemon.terminate();
+    assert!(daemon.wait().success());
+    // The brick ignored `shutdown`: `SIGTERM` came 5 s later, after it.
+    assert!(terminated.elapsed() >= Duration::from_secs(5));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "after-shutdown\n");
 }
