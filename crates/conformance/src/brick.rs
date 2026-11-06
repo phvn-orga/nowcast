@@ -12,7 +12,7 @@ use nowcast_types::{
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 
 use crate::reference;
 
@@ -165,8 +165,13 @@ pub async fn flow_ids_are_deterministic<S: BrickSubject>() {
 pub async fn publishes_after_a_refresh<S: BrickSubject>() {
     let mut brick = Running::ready::<S>().await;
     let flow = brick.subscribe::<S>(1).await;
-    // Acknowledge what the brick publishes on its own before asking.
-    while let Ok(frame) = timeout(Duration::from_millis(500), brick.frames.recv()).await {
+    // Acknowledge what the brick publishes on its own before asking, for a
+    // bounded time: a brick that publishes on its own forever must not hang
+    // the suite.
+    let deadline = Instant::now() + ANSWER;
+    while Instant::now() < deadline
+        && let Ok(frame) = timeout(Duration::from_millis(500), brick.frames.recv()).await
+    {
         let frame = frame.expect("the brick keeps its output open").unwrap();
         if let BrickMessage::Publish { req, .. } = reference::decode_brick(&frame).unwrap() {
             brick.send(&ServiceMessage::Ack { req }).await;

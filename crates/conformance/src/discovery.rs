@@ -45,7 +45,7 @@ pub(crate) struct Layout {
     root: PathBuf,
 }
 
-fn copy_files(from: &Path, to: &Path) {
+pub(crate) fn copy_files(from: &Path, to: &Path) {
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
@@ -185,10 +185,12 @@ pub async fn removing_the_link_deactivates<S: DiscoverySubject>() {
 /// An invalid file is left out; the valid ones still load.
 pub async fn an_invalid_file_is_ignored<S: DiscoverySubject>() {
     let layout = Layout::new();
-    layout.activate("forge.toml", "forge.toml");
+    // The broken file declares `forge`: no valid file shares that name, so
+    // this rule stays apart from the shared-name one.
+    layout.activate("minimal.toml", "minimal.toml");
     layout.activate("invalid-undeclared-type.toml", "broken.toml");
     let discovery = S::start(layout.dirs(vec![])).await;
-    assert_eq!(names(&discovery), vec!["forge"]);
+    assert_eq!(names(&discovery), vec!["minimal"]);
 }
 
 /// Two files declaring the same `name` are both refused: neither wins.

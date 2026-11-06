@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use nowcast_traits::{ClientKind, Discovery};
 use nowcast_types::ClientKindName;
 
-use crate::discovery::{DiscoverySubject, Layout};
+use crate::discovery::{DiscoverySubject, Layout, copy_files};
 
 /// `fixtures/clients/`.
 pub fn dir() -> PathBuf {
@@ -32,10 +32,7 @@ fn kind(discovery: &impl Discovery, name: &str) -> Option<ClientKind> {
 async fn start<S: DiscoverySubject>(user: bool) -> (Layout, S::Discovery) {
     let layout = Layout::new();
     if user {
-        for entry in std::fs::read_dir(dir().join("user")).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), layout.path("clients").join(entry.file_name())).unwrap();
-        }
+        copy_files(&dir().join("user"), &layout.path("clients"));
     }
     let discovery = S::start(layout.dirs(embedded())).await;
     (layout, discovery)
@@ -94,14 +91,16 @@ pub async fn a_user_file_adds_a_kind<S: DiscoverySubject>() {
 /// refused.
 pub async fn a_bad_name_is_refused<S: DiscoverySubject>() {
     let (_layout, discovery) = start::<S>(true).await;
-    assert!(kind(&discovery, "other").is_none(), "mismatched.toml");
-    assert!(kind(&discovery, "mismatched").is_none(), "mismatched.toml");
-    assert!(
-        discovery
-            .client_kinds()
-            .iter()
-            .all(|k| k.name.as_str() != "Bad"),
-        "Bad.toml"
+    let mut names: Vec<_> = discovery
+        .client_kinds()
+        .iter()
+        .map(|k| k.name.to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["claude-code", "codex"],
+        "mismatched.toml and Bad.toml are refused"
     );
 }
 
