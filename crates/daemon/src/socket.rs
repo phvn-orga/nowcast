@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -227,14 +227,25 @@ fn unsafe_path(path: &Path, why: &str) -> io::Error {
 }
 
 /// Removes a socket file left by a daemon that did not exit cleanly. Refuses
-/// to take over a socket that something still listens on.
+/// to take over a socket that something still listens on, and to remove
+/// anything that is not a socket.
 fn remove_stale(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+        Ok(metadata) if !metadata.file_type().is_socket() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", path.display()),
+            ));
+        }
+        Ok(_) => {}
+    }
     match UnixStream::connect(path) {
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("another process listens on {}", path.display()),
         )),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
             tracing::info!("removing the stale socket {}", path.display());
             fs::remove_file(path)

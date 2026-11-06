@@ -332,6 +332,18 @@ fn a_stale_socket_is_replaced() {
 }
 
 #[test]
+fn a_file_at_the_socket_path_is_not_removed() {
+    let dirs = Dirs::new();
+    let mut command = dirs.command(DAEMON);
+    fs::create_dir(dirs.socket_dir()).unwrap();
+    fs::write(dirs.socket(), "not a socket").unwrap();
+    let mut daemon = Running(command.spawn().unwrap());
+
+    assert!(!daemon.wait().success());
+    assert_eq!(fs::read_to_string(dirs.socket()).unwrap(), "not a socket");
+}
+
+#[test]
 fn a_socket_in_use_is_not_taken_over() {
     let dirs = Dirs::new();
     fs::create_dir_all(dirs.socket_dir()).unwrap();
