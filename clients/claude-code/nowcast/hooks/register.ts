@@ -39,7 +39,7 @@ let queue: Promise<void> = Promise.resolve()
 // through the `$` of a long-lived loop would answer the moment that loop's
 // dispatch began.
 const flows = new Map<string, NowcastFlow>()
-let stream: NowcastStream = { session: null, status: 'starting', reconnections: 0, error: null }
+let stream: NowcastStream = { session: null, status: 'starting', error: null }
 
 export const register: Register = on => {
   // Once per load of the mod: the session's start, or a reload. The start
@@ -226,8 +226,7 @@ async function onEvent($: $, event: StreamEvent): Promise<void> {
 
 async function onStatus($: $, status: Status): Promise<void> {
   if (status.status === 'connected') {
-    const reconnections = stream.status === 'down' ? stream.reconnections + 1 : stream.reconnections
-    await setStream($, { status: 'up', reconnections, error: null })
+    await setStream($, { status: 'up', error: null })
   } else {
     await setStream($, { status: 'down', error: status.reason })
   }

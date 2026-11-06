@@ -18,7 +18,6 @@ test('a lost service shows as down, then up once the command is back', async ($,
   expect(w.stream()).toEqual({
     session: 'session-1',
     status: 'down',
-    reconnections: 0,
     error: 'cannot reach the service at /x: connection refused',
   })
 
@@ -28,7 +27,7 @@ test('a lost service shows as down, then up once the command is back', async ($,
   expect(w.stream()?.status).toBe('down')
   w.child().connected()
   await w.clock.settle()
-  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', reconnections: 1, error: null })
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', error: null })
 
   // The command reconnected itself: the same process, no new declaration.
   expect(w.children.length).toBe(1)
@@ -46,7 +45,7 @@ test('a service absent at start is waited for', async ($, on) => {
   w.child().retrying('cannot reach the service: no such file')
   w.child().connected()
   await w.clock.settle()
-  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', reconnections: 1, error: null })
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', error: null })
 })
 
 test('a command that exits is started again, later each time', async ($, on) => {
@@ -126,7 +125,7 @@ test('a command started again shows as up once it connects at the first try', as
   await w.clock.advance(1_000)
   w.child().connected()
   await w.clock.settle()
-  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', reconnections: 0, error: null })
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', error: null })
 })
 
 test('a command started again resumes after the last update it printed', async ($, on) => {
