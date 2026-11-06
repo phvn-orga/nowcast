@@ -1,5 +1,5 @@
-//! Runs the real chain for one test: the `nowcast-daemon` binary, the test
-//! brick it launches, and the `nowcast` tool as its client.
+//! Runs the real chain for one test: the service as `nowcast daemon`, the
+//! test brick it launches, and the `nowcast` tool as its client.
 //!
 //! Each [`Service`] has a directory of its own for its socket, its bricks and
 //! its client kinds, so tests run in parallel. The brick is the test brick,
@@ -44,7 +44,7 @@ fn build_binaries() {
     BUILT.get_or_init(|| {
         let mut cargo = std::process::Command::new(env!("CARGO"));
         cargo.args(["build", "--quiet", "--bins"]);
-        for package in ["nowcast-daemon", "nowcast-cli", "nowcast-test-brick"] {
+        for package in ["nowcast-cli", "nowcast-test-brick"] {
             cargo.args(["-p", package]);
         }
         if !cfg!(debug_assertions) {
@@ -59,10 +59,6 @@ fn build_binaries() {
 fn profile_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     exe.parent().unwrap().parent().unwrap().to_path_buf()
-}
-
-pub fn daemon_binary() -> PathBuf {
-    profile_dir().join("nowcast-daemon")
 }
 
 pub fn cli_binary() -> PathBuf {
@@ -127,7 +123,8 @@ impl Service {
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         let control = Control::bind(root.path().join("control")).unwrap();
         let log = fs::File::create(root.path().join("daemon.log")).unwrap();
-        let daemon = Command::new(daemon_binary())
+        let daemon = Command::new(cli_binary())
+            .arg("daemon")
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("HOME", root.path())

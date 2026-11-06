@@ -3,7 +3,10 @@
 // and starts the command again only when it exits.
 
 import { expect, test } from 'claude-code/testing'
+import { NOT_ON_PATH } from '../hooks/register'
 import { START, update, world } from './world'
+
+const ENV = { XDG_RUNTIME_DIR: '/run/user/1000' }
 
 const RESUME = { id: 'session-1' }
 
@@ -87,16 +90,28 @@ test('a command that ran a while is started again at once', async ($, on) => {
   expect(w.children.length).toBe(3)
 })
 
-test('a command not installed is reported and tried again', async ($, on) => {
-  const w = world(on, { spawnFails: true })
+test('a command not on PATH is reported as such, and tried again', async ($, on) => {
+  // A relative entry is not looked into.
+  const env = { ...ENV, PATH: '/usr/bin:bin:/opt/nowcast/' }
+  const w = world(on, { spawnFails: true, env, files: ['bin/nowcast'] })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(w.stream()?.status).toBe('stopped')
+  expect(w.stream()?.error).toBe(NOT_ON_PATH)
+  const writes = w.writes.length
+  await w.clock.advance(1_000)
+  expect(w.writes.length).toBeGreaterThan(writes)
+})
+
+test('a command on PATH that cannot start keeps its error', async ($, on) => {
+  const env = { ...ENV, PATH: '/usr/bin:/home/u/.local/bin' }
+  const w = world(on, { spawnFails: true, env, files: ['/home/u/.local/bin/nowcast'] })
   await $.session.start(START)
   await w.clock.settle()
 
   expect(w.stream()?.status).toBe('stopped')
   expect(w.stream()?.error).toBe('cannot run nowcast: nowcast: $.process.spawn: nowcast: not found')
-  const writes = w.writes.length
-  await w.clock.advance(1_000)
-  expect(w.writes.length).toBeGreaterThan(writes)
 })
 
 test('a command the mod stopped is not started again', async ($, on) => {
