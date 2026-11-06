@@ -14,6 +14,8 @@ const STREAM = { plugin: 'nowcast', key: 'stream' } as const
 
 /** The command line tool, looked up in the session's `PATH`. */
 const CLI = 'nowcast'
+/** Why the stream stops when the command cannot start and is not on `PATH`. */
+export const NOT_ON_PATH = `the ${CLI} command is not on PATH; install it, see https://github.com/phvn-orga/nowcast#install`
 
 /** Delay before starting `watch` again after it exits, doubled up to the max. */
 const FIRST_RESTART_MS = 1_000
@@ -223,8 +225,21 @@ async function run(
     const status = signal ?? `status ${code}`
     return lastError ? `${CLI} watch exited (${status}): ${lastError}` : `${CLI} watch exited (${status})`
   } catch (error) {
-    return `cannot run ${CLI}: ${message(error)}`
+    return (await onPath($)) ? `cannot run ${CLI}: ${message(error)}` : NOT_ON_PATH
   }
+}
+
+/**
+ * Whether a file named like the command sits in a directory of `PATH`: when
+ * it cannot start, the likely cause is that it is not installed, or not
+ * where the session looks. Relative entries are skipped.
+ */
+async function onPath($: $): Promise<boolean> {
+  const dirs = ((await $.env.get('PATH')) ?? '').split(':').filter(dir => dir.startsWith('/'))
+  for (const dir of dirs) {
+    if (await $.fs.exists(`${dir.replace(/\/+$/, '')}/${CLI}`).catch(() => false)) return true
+  }
+  return false
 }
 
 /** Subscribes again to what a restarted service forgot. */
