@@ -1,5 +1,5 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `subscribe`.
+//! `refresh`, `subscribe`.
 //!
 //! Every command declares a session (`PUT /v1/session`) before any other call
 //! to the client API. The service attaches the tool to its anchor process: an
@@ -48,6 +48,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let mut err = io::stderr();
     match cli.command {
         Command::Get { flow } => commands::get(&client, &flow, cli.json, &mut out, &mut err).await,
+        Command::Refresh { flow } => commands::refresh(&client, &flow).await,
         Command::Subscribe {
             brick,
             kind,
@@ -56,8 +57,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let params = params.as_deref().unwrap_or("{}");
             commands::subscribe(&client, &brick, &kind, params, cli.json, &mut out).await
         }
-        Command::Watch { subscribe } => {
-            commands::watch(&client, &subscribe, cli.json, &mut out, &mut err).await
+        Command::Watch {
+            subscribe,
+            last_event_id,
+        } => {
+            let resume = last_event_id.as_deref();
+            commands::watch(&client, &subscribe, resume, cli.json, &mut out, &mut err).await
         }
     }
 }

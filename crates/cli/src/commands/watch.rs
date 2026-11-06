@@ -4,6 +4,11 @@
 //! with `--subscribe` still exist, then opens the stream, resuming after the
 //! last event seen. When the service goes away, the tool waits and connects
 //! again, with a growing delay.
+//!
+//! With `--json`, the connection state goes on stdout with the events:
+//! `{"status":"connected"}` each time the stream opens, and
+//! `{"status":"retrying","reason":...}` once per outage. The readable mode
+//! says the same on stderr, and says `connected` only after an outage.
 
 use std::io::Write;
 use std::time::Duration;
@@ -25,6 +30,7 @@ const MAX_RETRY: Duration = Duration::from_secs(5);
 pub async fn watch(
     client: &Client,
     subscribe: &[String],
+    last_event_id: Option<&str>,
     json: bool,
     out: &mut impl Write,
     err: &mut impl Write,
@@ -43,11 +49,18 @@ pub async fn watch(
             )),
         })
         .collect::<Result<_, _>>()?;
+    if let Some(id) = last_event_id
+        && HeaderValue::from_str(id).is_err()
+    {
+        return Err(CliError::Usage(format!(
+            "--last-event-id {id:?} cannot be sent as a header"
+        )));
+    }
     Watcher {
         client,
         json,
         wanted,
-        last_event_id: None,
+        last_event_id: last_event_id.map(str::to_owned),
         retry: FIRST_RETRY,
         down: false,
         out,
@@ -69,7 +82,8 @@ struct Watcher<'a, O, E> {
     client: &'a Client,
     json: bool,
     wanted: Vec<Wanted>,
-    /// The SSE id of the last `update` seen, sent as `Last-Event-ID`.
+    /// The SSE id of the last `update` seen, sent as `Last-Event-ID`. Starts
+    /// with `--last-event-id`.
     last_event_id: Option<String>,
     retry: Duration,
     /// The last connection failed: say so once, and say when it is back.
@@ -89,6 +103,9 @@ impl<O: Write, E: Write> Watcher<'_, O, E> {
             if !self.down {
                 self.down = true;
                 let _ = writeln!(self.err, "nowcast: {reason}; retrying");
+                if self.json {
+                    output::retrying(self.out, &reason)?;
+                }
             }
             tokio::time::sleep(self.retry).await;
             self.retry = (self.retry * 2).min(MAX_RETRY);
@@ -103,6 +120,9 @@ impl<O: Write, E: Write> Watcher<'_, O, E> {
         if std::mem::take(&mut self.down) {
             let _ = writeln!(self.err, "nowcast: connected");
         }
+        if self.json {
+            output::connected(self.out)?;
+        }
         self.retry = FIRST_RETRY;
         while let Some(event) = stream.next().await? {
             self.show(event)?;
@@ -112,7 +132,14 @@ impl<O: Write, E: Write> Watcher<'_, O, E> {
 
     /// Subscribes what is not subscribed yet, and again what the service lost,
     /// a restart for instance. The last values then all come again: the id the
-    /// stream would resume from belongs to the lost state.
+    /// stream would resume from belongs to the lost state, `--last-event-id`
+    /// included.
+    ///
+    /// On the first connection nothing is known yet, so nothing is lost: a
+    /// `--last-event-id` from before a restart of the service stays. It holds
+    /// because the service's ids keep increasing across its restarts (its
+    /// counter starts at the clock): what it publishes since is newer. The
+    /// reconnections of a watch without `--subscribe` rely on it too.
     async fn ensure_subscriptions(&mut self, session: &Session<'_>) -> Result<(), CliError> {
         let mut lost = false;
         for wanted in &mut self.wanted {
