@@ -852,6 +852,20 @@ dependencies = [
 [[package]]
 name = "nowcast-supervisor"
 version = "0.0.0"
+dependencies = [
+ "nowcast-codec",
+ "nowcast-conformance",
+ "nowcast-test-brick",
+ "nowcast-traits",
+ "nowcast-types",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "nowcast-test-brick"
@@ -1522,6 +1536,17 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "sharded-slab",
+ "thread_local",
+ "tracing-core",
 ]
 
 [[package]]
