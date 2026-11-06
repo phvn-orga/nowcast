@@ -1,6 +1,6 @@
 # Cadrage de nowcast
 
-État au 2026-11-05 : premières décisions prises, conception à poursuivre. Ce document
+État au 2026-11-06 : premières décisions prises, conception à poursuivre. Ce document
 est le point de départ de la conception, pas une spécification.
 
 ## Objet
@@ -152,7 +152,9 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
 - **La CI en temps réel.** Sans webhook, c'est du polling, mutualisé et mieux réglé.
   Des webhooks GitHub ou Azure DevOps demanderaient une adresse joignable depuis
   Internet, donc un tunnel.
-- **L'installation et la distribution** (paquet, unité systemd fournie).
+- **La distribution** : un paquet, ou une autre voie que `cargo install`. Le binaire
+  unique, son emplacement (`~/.local/bin`) et l'unité systemd fournie sont décidés
+  (voir `02-clients.md`).
 - **Un processus orphelin** (lancé en double fork) perd sa filiation et ne remonte plus
   à son ancrage : il devient son propre ancrage et ne suit plus la session de son
   agent. À rattacher autrement si le besoin apparaît.

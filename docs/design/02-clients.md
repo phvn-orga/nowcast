@@ -1,6 +1,6 @@
 # Les clients
 
-État au 2026-11-05 : architecture des clients, format du flux et déclaration de
+État au 2026-11-06 : architecture des clients, format du flux et déclaration de
 session posés ; mod central validé par un spike.
 
 ## Décisions prises
@@ -37,6 +37,12 @@ session posés ; mod central validé par un spike.
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
   valeur, en un appel), `nowcast subscribe`. La reconnexion et la conduite à tenir quand
   le service est absent sont écrites une fois, là.
+- **Un seul binaire, `nowcast`** : l'outil en ligne de commande, et le service sous la
+  sous-commande `nowcast daemon`, que lance l'unité systemd. L'outil et le service
+  sortent toujours à la même version : une seule chose à installer. Il s'installe dans
+  `~/.local/bin` (`cargo install --root ~/.local`), d'ordinaire dans le `PATH`,
+  contrairement à `~/.cargo/bin` ; l'adaptateur Claude Code lance `nowcast` depuis le
+  `PATH`.
 - **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et
@@ -132,8 +138,6 @@ protocole.
 
 - **Revérifier le spike en session interactive**, et avec plusieurs observateurs sur
   la même clé, avant l'implémentation du mod central.
-- **L'outil en ligne de commande** : sa distribution (binaire à part ou
-  sous-commande du service). Il s'appelle `nowcast`, comme le projet.
 
 ## Hors périmètre pour l'instant
 
