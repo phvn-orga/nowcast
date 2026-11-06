@@ -291,6 +291,40 @@ async fn the_launcher_speaks_the_protocol_over_standard_input_and_output() {
     );
 }
 
+/// Kills the process whose pid is in `file`, if it got there.
+fn kill_pid_in(file: &Path) {
+    if let Ok(pid) = std::fs::read_to_string(file) {
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+}
+
+#[tokio::test]
+async fn a_brick_ends_when_it_exits_even_if_its_child_holds_its_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    // A `ready` frame: length 12, then the map {"v": 1, "t": "ready"}.
+    let ready = r"\014\000\000\000\202\241v\001\241t\245ready";
+    let script = format!(r#"sleep 1000 & echo $! > "$0"; printf '{ready}'; exit 3"#);
+    let mut declaration = shell(&script, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    let received = timeout(WAIT, async {
+        (
+            connection.from_brick.recv().await,
+            connection.from_brick.recv().await,
+        )
+    })
+    .await;
+    kill_pid_in(&pid_file);
+    // What the brick wrote before exiting still arrives, then the end.
+    assert_eq!(
+        received.expect("the exit ends the output"),
+        (Some(BrickMessage::Ready), None)
+    );
+}
+
 #[tokio::test]
 async fn sigterm_ends_a_brick_that_ignores_shutdown() {
     let dir = tempfile::tempdir().unwrap();

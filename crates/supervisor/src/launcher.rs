@@ -15,8 +15,9 @@ use tracing::{debug, info, warn};
 /// standard input and output. Each line of their standard error becomes an
 /// `info` event of the brick, for the journal.
 ///
-/// The connection's `from_brick` closes once the output has ended and the
-/// process has exited, so that its end means the process is gone. A brick
+/// The connection's `from_brick` closes once the process has exited, so that
+/// its end means the process is gone. The exit ends the output even if a
+/// process the brick spawned still holds the pipe. A brick
 /// whose output cannot be read any more (a cut frame, an oversized one) is
 /// killed. A frame that reads whole but does not decode is logged and
 /// skipped.
@@ -105,18 +106,29 @@ async fn write(
     }
 }
 
-/// Reads the brick's messages until its output ends, then holds the channel
-/// open until the process has exited.
+/// Reads the brick's messages until its output ends or the process exits,
+/// whichever comes first, then holds the channel open until the process has
+/// exited.
+///
+/// The exit ends the output even if a process the brick spawned still holds
+/// the pipe. What the brick wrote before exiting is still read: the read
+/// goes first while the pipe holds whole frames.
 async fn read(
     brick: BrickName,
     stdout: ChildStdout,
     incoming: UnboundedSender<BrickMessage>,
     signals: UnboundedSender<Signal>,
-    exited: oneshot::Receiver<()>,
+    mut exited: oneshot::Receiver<()>,
 ) {
     let mut stdout = BufReader::new(stdout);
     loop {
-        match read_brick(&mut stdout).await {
+        let read = tokio::select! {
+            biased;
+            read = read_brick(&mut stdout) => read,
+            // Cuts at most a frame the brick never finished writing.
+            _ = &mut exited => return,
+        };
+        match read {
             Ok(Some(msg)) => {
                 let _ = incoming.send(msg);
             }
