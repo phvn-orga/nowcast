@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use nowcast_types::{BrickName, FlowId, QualifiedFlowId};
 
-use crate::{BrickUnavailable, ResolveError, Supervisor, UnknownFlow};
+use crate::{AnchorId, BrickUnavailable, ResolveError, Resolved, Router, Supervisor, UnknownFlow};
 
 #[derive(Default)]
 struct State {
@@ -14,15 +14,19 @@ struct State {
 }
 
 /// Resolves `<brick>/<kind>:<params>` without any brick, unless the test set
-/// the brick to fail.
-#[derive(Default)]
+/// the brick to fail, and subscribes the anchor to it in the router it was
+/// given.
 pub struct FakeSupervisor {
+    router: Arc<dyn Router>,
     state: Mutex<State>,
 }
 
 impl FakeSupervisor {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(router: Arc<dyn Router>) -> Self {
+        Self {
+            router,
+            state: Mutex::default(),
+        }
     }
 
     /// The brick misses its `ready` timeout from now on.
@@ -49,10 +53,11 @@ impl FakeSupervisor {
 impl Supervisor for FakeSupervisor {
     fn resolve(
         &self,
+        anchor: AnchorId,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
-    ) -> impl Future<Output = Result<QualifiedFlowId, ResolveError>> + Send {
+    ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send {
         let mut state = self.state.lock().unwrap();
         let result = match state.failures.get(brick) {
             Some(error) => Err(error.clone()),
@@ -61,7 +66,12 @@ impl Supervisor for FakeSupervisor {
                 let flow = FlowId::new(id).expect("fake flow ids stay under the length limit");
                 let flow = QualifiedFlowId::new(brick.clone(), flow);
                 state.resolved.insert(flow.clone());
-                Ok(flow)
+                let (subscription, last) = self.router.subscribe(anchor, flow.clone());
+                Ok(Resolved {
+                    subscription,
+                    flow,
+                    last,
+                })
             }
         };
         std::future::ready(result)

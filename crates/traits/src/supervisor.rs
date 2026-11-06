@@ -1,9 +1,9 @@
 use std::fmt;
 use std::future::Future;
 
-use nowcast_types::{ApiError, ApiErrorCode, BrickName, QualifiedFlowId};
+use nowcast_types::{ApiError, ApiErrorCode, BrickName, Event, QualifiedFlowId, SubscriptionId};
 
-use crate::UnknownFlow;
+use crate::{AnchorId, UnknownFlow};
 
 /// A brick did not answer `hello` with `ready` within
 /// [`nowcast_types::READY_TIMEOUT`]. It is stopped, and the client gets `503`
@@ -69,20 +69,44 @@ impl From<ResolveError> for ApiError {
     }
 }
 
+/// A subscription made by [`Supervisor::resolve`]: what the client's `201`
+/// answer carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub subscription: SubscriptionId,
+    pub flow: QualifiedFlowId,
+    /// The flow's last value, `None` if it has published nothing yet.
+    pub last: Option<Event>,
+}
+
 /// Starts and stops bricks on demand.
 ///
 /// The supervisor launches a brick at its first subscription, stops it once
 /// none of its flows has a subscriber (told by [`crate::Router::empty_flows`]),
 /// relaunches it after a crash, and feeds what it publishes into the router.
+///
+/// It also makes the router subscriptions to its bricks' flows, so that each
+/// one is ordered with the brick's publications and with its own decisions
+/// to release a flow: a value the brick publishes right after `subscribed`
+/// is not lost, and a flow left by its previous subscribers is not released
+/// under a new one.
 pub trait Supervisor: Send + Sync + 'static {
-    /// Maps a subscription to its flow, launching the brick if needed. `params`
-    /// are JSON bytes, already validated against the kind's schema.
+    /// Maps a subscription to its flow, launching the brick if needed, and
+    /// subscribes `anchor` to that flow in the router. `params` are JSON
+    /// bytes, already validated against the kind's schema.
+    ///
+    /// Every value the brick publishes on the flow once it has answered
+    /// `subscribed` is either [`Resolved::last`] or delivered to the anchor's
+    /// streams. On error, no subscription is made. Dropping the future before
+    /// it completes leaves no subscription behind either: a client gone
+    /// while its brick starts keeps nothing alive.
     fn resolve(
         &self,
+        anchor: AnchorId,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
-    ) -> impl Future<Output = Result<QualifiedFlowId, ResolveError>> + Send;
+    ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send;
 
     /// Relays a refresh request to the brick serving `flow`.
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow>;

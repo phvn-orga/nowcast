@@ -40,7 +40,7 @@ impl<I: Identity> Drop for Harness<I> {
 
 fn start_with<I: Identity>(identity: I, mode: ProbeMode) -> Harness<I> {
     let router = Arc::new(FakeRouter::new());
-    let supervisor = Arc::new(FakeSupervisor::new());
+    let supervisor = Arc::new(FakeSupervisor::new(router.clone()));
     let discovery = Arc::new(FakeDiscovery::new());
     let identity = Arc::new(identity);
     discovery.insert(probe::declaration(vec!["probe".into()], PathBuf::from("/")));
