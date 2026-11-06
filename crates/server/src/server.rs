@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::error::HttpError;
 use crate::event::{CloudEvent, to_line};
@@ -84,11 +85,44 @@ where
     /// every open connection with it, event streams included. A failed
     /// `accept` is logged and retried; a failed connection only ends itself.
     pub async fn serve(self, listener: UnixListener) {
+        self.run(listener, None).await;
+    }
+
+    /// Serves `listener` as [`Server::serve`] does, and returns once the
+    /// service has been idle for `idle` without a break: no open connection,
+    /// and no subscription in the router ([`Router::has_subscriptions`]).
+    ///
+    /// Any connection, an event stream with no subscription included, stops
+    /// the count, and the next idle moment starts it over. A connection
+    /// already waiting when the delay ends goes first: it is accepted and
+    /// keeps the server running. When this returns, every
+    /// connection is closed and the listener is dropped, so that a connection
+    /// arriving later waits in the socket's queue for whoever listens next.
+    pub async fn serve_until_idle(self, listener: UnixListener, idle: Duration) {
+        self.run(listener, Some(idle)).await;
+    }
+
+    async fn run(self, listener: UnixListener, idle: Option<Duration>) {
+        let mut subscribed = self.router.has_subscriptions();
         let server = Arc::new(self);
         // Owned here, so that dropping this future aborts every connection.
         let mut connections = JoinSet::new();
+        // When the service stops being used for long enough, if it is idle.
+        let mut deadline: Option<Instant> = None;
         loop {
+            // Nothing makes a subscription without a connection, so with no
+            // connection open the router's answer can only go from `true` to
+            // `false`, which `changed` reports.
+            let used = !connections.is_empty() || *subscribed.borrow_and_update();
+            deadline = match (used, idle) {
+                // A delay too long for the clock never ends.
+                (false, Some(idle)) => deadline.or_else(|| Instant::now().checked_add(idle)),
+                _ => None,
+            };
+            // Biased: a connection waiting to be accepted goes before the end
+            // of the delay, even when both are ready at once.
             tokio::select! {
+                biased;
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
                         connections.spawn(Arc::clone(&server).connection(stream));
@@ -103,6 +137,16 @@ where
                     if let Err(e) = ended {
                         tracing::warn!("a connection task failed: {e}");
                     }
+                }
+                // Only the router going away closes it, which the server's
+                // own handle prevents.
+                Ok(()) = subscribed.changed() => {}
+                () = sleep_until_some(deadline) => {
+                    tracing::info!(
+                        "no connection and no subscription for {:?}, stopping",
+                        idle.unwrap_or_default()
+                    );
+                    return;
                 }
             }
         }
@@ -273,6 +317,14 @@ where
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         Ok(response)
+    }
+}
+
+/// Sleeps until `deadline`, or forever without one.
+async fn sleep_until_some(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
