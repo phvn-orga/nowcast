@@ -370,6 +370,23 @@ fn sigterm_stops_the_daemon_and_removes_its_socket() {
 }
 
 #[test]
+fn a_failed_start_removes_the_socket() {
+    let dirs = Dirs::new();
+    // The discovery cannot create its directories under a file.
+    let config = dirs.root.path().join("config-file");
+    fs::write(&config, "").unwrap();
+    let mut command = dirs.command(DAEMON);
+    let mut daemon = Running(command.env("XDG_CONFIG_HOME", &config).spawn().unwrap());
+
+    assert!(!daemon.wait().success());
+    assert!(
+        dirs.socket_dir().exists(),
+        "the daemon got as far as the bind"
+    );
+    assert!(!dirs.socket().exists());
+}
+
+#[test]
 fn a_socket_replaced_meanwhile_is_left_on_exit() {
     let dirs = Dirs::new();
     let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());

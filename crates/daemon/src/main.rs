@@ -100,8 +100,13 @@ fn stderr_is_journal() -> bool {
 }
 
 async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
-    socket.listener.set_nonblocking(true)?;
-    let listener = UnixListener::from_std(socket.listener)?;
+    // Dropped last, when `run` returns, whether it succeeds or fails.
+    let Socket {
+        listener,
+        bound: _bound,
+    } = socket;
+    listener.set_nonblocking(true)?;
+    let listener = UnixListener::from_std(listener)?;
     // Registered before serving, so that a signal is never missed.
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -130,9 +135,6 @@ async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
         _ = interrupt.recv() => tracing::info!("SIGINT received, stopping"),
     }
     // The server is dropped by now, and every connection closed with it.
-    if let Some(bound) = socket.bound {
-        bound.remove();
-    }
     Ok(())
 }
 

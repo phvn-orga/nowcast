@@ -38,7 +38,8 @@ pub struct Socket {
     pub bound: Option<BoundFile>,
 }
 
-/// The socket file the daemon bound, identified by its device and inode.
+/// The socket file the daemon bound, identified by its device and inode,
+/// and removed when this is dropped: on every exit after the bind.
 pub struct BoundFile {
     path: PathBuf,
     dev: u64,
@@ -54,11 +55,13 @@ impl BoundFile {
             ino: metadata.ino(),
         })
     }
+}
 
+impl Drop for BoundFile {
     /// Removes the file if it is still the one the daemon bound. Another
     /// process may have replaced it since, `nowcast.socket` for one: its
     /// socket is then left alone.
-    pub fn remove(self) {
+    fn drop(&mut self) {
         match fs::symlink_metadata(&self.path) {
             Ok(m) if (m.dev(), m.ino()) == (self.dev, self.ino) => {
                 if let Err(e) = fs::remove_file(&self.path) {
