@@ -15,12 +15,14 @@ use nowcast_server::{MAX_BODY, Server};
 use nowcast_traits::fake::{FakeDiscovery, FakeIdentity, FakeRouter, FakeSessions, FakeSupervisor};
 use nowcast_traits::{
     Anchor, AnchorId, Identity, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    UnknownSubscription,
 };
-use nowcast_types::BrickName;
 use nowcast_types::QualifiedFlowId;
+use nowcast_types::{BrickName, Event, EventId, StreamEvent, SubscriptionId};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -703,6 +705,107 @@ fn an_anchor_dying_while_its_brick_resolves_keeps_no_subscription() {
         };
         response.error(428, "session_required");
         assert_eq!(router.subscribers(&probe_flow("a")), 0);
+        task.abort();
+    });
+}
+
+/// Lets the anchor die while the server opens its stream: forgets its session
+/// and removes it, in the registry's order, just before the stream is made,
+/// which recreates the anchor in the router.
+struct DyingOnStream {
+    inner: FakeRouter,
+    sessions: Arc<FakeSessions>,
+}
+
+impl Router for DyingOnStream {
+    fn subscribe(
+        &self,
+        anchor: AnchorId,
+        flow: QualifiedFlowId,
+    ) -> (SubscriptionId, Option<Event>) {
+        self.inner.subscribe(anchor, flow)
+    }
+
+    fn unsubscribe(
+        &self,
+        anchor: AnchorId,
+        subscription: &SubscriptionId,
+    ) -> Result<(), UnknownSubscription> {
+        self.inner.unsubscribe(anchor, subscription)
+    }
+
+    fn publish(
+        &self,
+        flow: &QualifiedFlowId,
+        data_type: String,
+        data: Vec<u8>,
+    ) -> Result<Event, UnknownFlow> {
+        self.inner.publish(flow, data_type, data)
+    }
+
+    fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow> {
+        self.inner.last(anchor, flow)
+    }
+
+    fn flow_error(&self, flow: &QualifiedFlowId, message: String) {
+        self.inner.flow_error(flow, message);
+    }
+
+    fn end_flow(&self, flow: &QualifiedFlowId) {
+        self.inner.end_flow(flow);
+    }
+
+    fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
+        self.sessions.forget(anchor);
+        self.inner.remove_anchor(anchor);
+        self.inner.stream(anchor, since)
+    }
+
+    fn subscribers(&self, flow: &QualifiedFlowId) -> usize {
+        self.inner.subscribers(flow)
+    }
+
+    fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId> {
+        self.inner.empty_flows()
+    }
+
+    fn remove_anchor(&self, anchor: AnchorId) {
+        self.inner.remove_anchor(anchor);
+    }
+}
+
+#[test]
+fn an_anchor_dying_while_its_stream_opens_gets_no_stream() {
+    run(async {
+        let sessions = Arc::new(FakeSessions::new());
+        let router = Arc::new(DyingOnStream {
+            inner: FakeRouter::new(),
+            sessions: sessions.clone(),
+        });
+        let discovery = Arc::new(FakeDiscovery::new());
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nowcast.sock");
+        let server = Server {
+            router: router.clone(),
+            supervisor: Arc::new(FakeSupervisor::new(router.clone())),
+            discovery,
+            identity: Arc::new(FakeIdentity::new()),
+            sessions,
+        };
+        let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
+        let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;
+        assert_eq!(declared.status(), 204);
+        let response = send(&socket, "GET", "/v1/stream", &[], "").await;
+        let response = Response {
+            status: response.status().as_u16(),
+            headers: response.headers().clone(),
+            body: timeout(Duration::from_secs(5), response.into_body().collect())
+                .await
+                .expect("the response ends")
+                .unwrap()
+                .to_bytes(),
+        };
+        response.error(428, "session_required");
         task.abort();
     });
 }
