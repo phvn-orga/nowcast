@@ -13,8 +13,17 @@
 //!   [`nowcast_traits::BrickUnavailable`]. Subscriptions arriving meanwhile
 //!   wait for the same launch.
 //! - **Subscriptions**: each one is a `subscribe`, answered with the flow,
-//!   prefixed with the brick's name, or with `error`. A brick that does not
-//!   answer in time makes it fail as unavailable.
+//!   prefixed with the brick's name, or with `error`. On the answer, the
+//!   supervisor subscribes the anchor in the router, in the same step as it
+//!   handles the brick's next messages: a value published right after
+//!   `subscribed` is the subscription's `last` or reaches the anchor's
+//!   streams. A client gone by then gets no subscription, and one made but
+//!   never read is undone. A brick that does not answer in time makes the
+//!   subscription fail as unavailable.
+//! - **A flow left while subscribed again**: a flow that loses its last
+//!   subscriber while a `subscribe` is in flight is released only once no
+//!   `subscribe` is, and only if still without a subscriber, so that the
+//!   brick never gets `release` after a `subscribe` it took for that flow.
 //! - **Publications**: each `publish` is answered with `ack`, or with `error`
 //!   for an unknown or released flow (`unknown_flow`), a type missing from the
 //!   declaration (`undeclared_type`) or a detail that is not JSON

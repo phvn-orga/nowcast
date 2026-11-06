@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nowcast_traits::{
-    BrickDeclaration, BrickProcess, BrickUnavailable, ResolveError, Router, UnknownFlow,
+    AnchorId, BrickDeclaration, BrickProcess, BrickUnavailable, ResolveError, Resolved, Router,
+    UnknownFlow,
 };
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
@@ -35,7 +36,7 @@ use tracing::{debug, error, info, warn};
 use crate::Config;
 
 /// Where the answer to a `resolve` goes.
-pub(crate) type Reply = oneshot::Sender<Result<QualifiedFlowId, ResolveError>>;
+pub(crate) type Reply = oneshot::Sender<Result<Resolved, ResolveError>>;
 
 /// What the shell carries out for the state.
 #[derive(Debug, PartialEq, Eq)]
@@ -100,8 +101,9 @@ struct Subscription {
     params: Vec<u8>,
 }
 
-/// A `resolve` waiting for its flow.
+/// A `resolve` waiting for its flow, to subscribe `anchor` to it.
 pub(crate) struct Waiter {
+    anchor: AnchorId,
     kind: String,
     params: Vec<u8>,
     reply: Reply,
@@ -139,7 +141,9 @@ struct Brick {
     /// not released since. They survive a crash.
     flows: BTreeMap<FlowId, Subscription>,
     /// Flows that lost their last subscriber while a client `subscribe` was
-    /// in flight, which may hand them out again. Released once none is.
+    /// in flight. Releasing one then could reach the brick after a
+    /// `subscribe` it already took for that flow, so it waits until none is
+    /// in flight, and is released only if still without a subscriber.
     deferred: BTreeSet<FlowId>,
     /// Subscriptions waiting for the brick to be ready.
     queue: Vec<Waiter>,
@@ -205,16 +209,20 @@ impl State {
     }
 
     /// Maps a subscription of a declared brick to its flow, launching the
-    /// brick if needed. The flow, or the error, comes on the receiver.
+    /// brick if needed, and subscribes `anchor` to it in the router once the
+    /// brick has answered. The subscription, or the error, comes on the
+    /// receiver.
     pub(crate) fn resolve(
         &mut self,
+        anchor: AnchorId,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
         router: &dyn Router,
-    ) -> oneshot::Receiver<Result<QualifiedFlowId, ResolveError>> {
+    ) -> oneshot::Receiver<Result<Resolved, ResolveError>> {
         let (reply, answer) = oneshot::channel();
         let waiter = Waiter {
+            anchor,
             kind: kind.to_owned(),
             params: params.to_vec(),
             reply,
@@ -652,23 +660,37 @@ impl Brick {
                 }
             }
             Some(Request::Client(Waiter {
+                anchor,
                 kind,
                 params,
                 reply,
             })) => {
-                let qualified = self.qualify(&flow);
                 let added = !self.flows.contains_key(&flow);
                 if added {
                     self.flows
                         .insert(flow.clone(), Subscription { kind, params });
                 }
-                if reply.send(Ok(qualified.clone())).is_ok() {
-                    // The new subscriber holds the flow: an earlier loss of
-                    // its last subscriber no longer counts.
-                    self.deferred.remove(&flow);
-                } else if added && ctx.router.subscribers(&qualified) == 0 {
-                    // The client went away before getting the flow.
-                    self.release(&flow);
+                if reply.is_closed() {
+                    // The client went away: no subscription, and a flow
+                    // nobody else holds goes back to the brick.
+                    if added {
+                        self.release(&flow);
+                    }
+                    return;
+                }
+                // Under the lock, so ordered with every publication and
+                // every release decision on the flow.
+                let qualified = self.qualify(&flow);
+                let (subscription, last) = ctx.router.subscribe(anchor, qualified.clone());
+                let resolved = Resolved {
+                    subscription,
+                    flow: qualified,
+                    last,
+                };
+                if let Err(Ok(resolved)) = reply.send(Ok(resolved)) {
+                    // Gone since the check: the router's empty-flow signal
+                    // then releases the flow.
+                    let _ = ctx.router.unsubscribe(anchor, &resolved.subscription);
                 }
             }
             Some(Request::Resubscribe(live)) => {
@@ -728,9 +750,9 @@ impl Brick {
             .publish(&self.qualify(flow), data_type, detail)
             .is_err()
         {
-            // Between `resolve` and the client's subscription the router
-            // does not know the flow yet.
-            debug!(brick = %self.name, %flow, "no subscriber yet, value dropped");
+            // A live flow always has a router entry, made with its first
+            // subscription and kept until the supervisor ends it.
+            debug!(brick = %self.name, %flow, "the router does not know the flow");
         }
         Ok(())
     }
@@ -807,13 +829,10 @@ mod tests {
             self.state.phase(&probe::name())
         }
 
-        fn resolve(
-            &mut self,
-            id: &str,
-        ) -> oneshot::Receiver<Result<QualifiedFlowId, ResolveError>> {
+        fn resolve(&mut self, id: &str) -> oneshot::Receiver<Result<Resolved, ResolveError>> {
             let params = probe::params(id);
             self.state
-                .resolve(&probe::name(), probe::KIND, &params, &self.router)
+                .resolve(A, &probe::name(), probe::KIND, &params, &self.router)
         }
 
         /// Takes the effects, expecting a launch, and carries it out.
@@ -885,8 +904,7 @@ mod tests {
             let (generation, mut brick) = self.launch();
             self.message(generation, BrickMessage::Ready);
             self.serve(generation, &mut brick, "a");
-            assert_eq!(answer.try_recv(), Ok(Ok(qualified("a"))));
-            self.router.subscribe(A, qualified("a"));
+            assert_eq!(answer.try_recv().unwrap().unwrap().flow, qualified("a"));
             self.state.take_effects();
             (generation, brick)
         }
@@ -902,10 +920,13 @@ mod tests {
         f.message(generation, BrickMessage::Ready);
         assert_eq!(f.phase(), Phase::Running);
         f.serve(generation, &mut brick, "a");
-        assert_eq!(answer.try_recv(), Ok(Ok(qualified("a"))));
+        let resolved = answer.try_recv().unwrap().unwrap();
+        assert_eq!(resolved.flow, qualified("a"));
+        assert_eq!(f.router.subscribers(&qualified("a")), 1);
         f.state.take_effects();
 
-        // The router holds no subscriber: the flow is released.
+        // The anchor leaves: the flow is released.
+        f.router.unsubscribe(A, &resolved.subscription).unwrap();
         f.state.emptied(&qualified("a"), &f.router);
         assert_eq!(
             brick.from_service.try_recv(),

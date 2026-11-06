@@ -112,15 +112,17 @@ impl Harness {
         }
     }
 
+    /// Subscribes anchor `A` to `id`; gives the flow.
     async fn resolve(&self, id: &str) -> Result<QualifiedFlowId, ResolveError> {
         let params = probe::params(id);
         timeout(
             WAIT,
             self.supervisor
-                .resolve(&probe::name(), probe::KIND, &params),
+                .resolve(A, &probe::name(), probe::KIND, &params),
         )
         .await
         .expect("resolve answers")
+        .map(|resolved| resolved.flow)
     }
 
     /// The next brick process to start.
@@ -142,7 +144,6 @@ impl Harness {
     async fn subscribed(&self, id: &str) -> (ControlledBrick, UnboundedReceiver<StreamEvent>) {
         assert_eq!(self.resolve(id).await, Ok(qualified(id)));
         let brick = self.launched().await;
-        self.router.subscribe(A, qualified(id));
         (brick, self.router.stream(A, None))
     }
 }

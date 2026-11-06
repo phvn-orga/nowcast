@@ -4,12 +4,13 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use nowcast_traits::{
-    BrickConnection, BrickLauncher, BrickUnavailable, Discovery, DiscoveryChange, ResolveError,
-    Router, Supervisor, UnknownFlow,
+    AnchorId, BrickConnection, BrickLauncher, BrickUnavailable, Discovery, DiscoveryChange,
+    ResolveError, Resolved, Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{BrickMessage, BrickName, QualifiedFlowId};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::Config;
@@ -56,27 +57,58 @@ impl<D: Discovery, L: BrickLauncher, R: Router> BrickSupervisor<D, L, R> {
 impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D, L, R> {
     fn resolve(
         &self,
+        anchor: AnchorId,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
-    ) -> impl Future<Output = Result<QualifiedFlowId, ResolveError>> + Send {
+    ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send {
         let answer = match self.inner.discovery.brick(brick) {
-            Some(_) => Ok(self
-                .inner
-                .update(|state, router| state.resolve(brick, kind, params, router))),
+            Some(_) => Ok(Answer {
+                reply: self
+                    .inner
+                    .update(|state, router| state.resolve(anchor, brick, kind, params, router)),
+                anchor,
+                router: self.inner.router.clone(),
+                taken: false,
+            }),
             None => Err(ResolveError::UnknownBrick(brick.clone())),
         };
         let brick = brick.clone();
         async move {
+            let mut answer = answer?;
+            let resolved = (&mut answer.reply).await;
+            answer.taken = true;
             // A dropped reply means the supervisor itself went away.
-            answer?
-                .await
-                .unwrap_or(Err(ResolveError::Unavailable(BrickUnavailable(brick))))
+            resolved.unwrap_or(Err(ResolveError::Unavailable(BrickUnavailable(brick))))
         }
     }
 
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
         self.inner.update(|state, _| state.refresh(flow))
+    }
+}
+
+/// The reply to a `resolve` in progress. Dropped before its value is taken,
+/// it closes the reply and undoes a subscription already made, so that a
+/// `resolve` dropped at any point leaves no subscription behind.
+struct Answer<R: Router> {
+    reply: oneshot::Receiver<Result<Resolved, ResolveError>>,
+    anchor: AnchorId,
+    router: Arc<R>,
+    taken: bool,
+}
+
+impl<R: Router> Drop for Answer<R> {
+    fn drop(&mut self) {
+        if self.taken {
+            return;
+        }
+        // Once closed, the supervisor sees the client gone and subscribes no
+        // more: only a value already sent remains to undo.
+        self.reply.close();
+        if let Ok(Ok(resolved)) = self.reply.try_recv() {
+            let _ = self.router.unsubscribe(self.anchor, &resolved.subscription);
+        }
     }
 }
 

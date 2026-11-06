@@ -72,13 +72,23 @@ fn unavailable() -> ResolveError {
 }
 
 impl World {
+    /// Subscribes anchor `A` to the probe's flow `id`; gives the flow.
     fn resolve(&self, id: &str) -> JoinHandle<Result<QualifiedFlowId, ResolveError>> {
+        self.resolve_as(A, id)
+    }
+
+    fn resolve_as(
+        &self,
+        anchor: AnchorId,
+        id: &str,
+    ) -> JoinHandle<Result<QualifiedFlowId, ResolveError>> {
         let supervisor = self.supervisor.clone();
         let params = probe::params(id);
         tokio::spawn(async move {
-            supervisor
-                .resolve(&probe::name(), probe::KIND, &params)
-                .await
+            let resolved = supervisor
+                .resolve(anchor, &probe::name(), probe::KIND, &params)
+                .await;
+            resolved.map(|r| r.flow)
         })
     }
 
@@ -99,13 +109,12 @@ impl World {
         brick
     }
 
-    /// Resolves `id` on a fresh brick and subscribes anchor `A` to it.
+    /// Subscribes anchor `A` to `id` on a fresh brick.
     async fn subscribed(&self, id: &str) -> FakeBrick {
         let pending = self.resolve(id);
         let mut brick = self.ready().await;
         serve(&mut brick, id).await;
         assert_eq!(pending.await.unwrap(), Ok(qualified(id)));
-        self.router.subscribe(A, qualified(id));
         brick
     }
 
@@ -248,10 +257,9 @@ async fn a_subscription_during_the_grace_period_cancels_the_stop() {
         ServiceMessage::Release { flow: flow("a") }
     );
     sleep(world.config.grace / 2).await;
-    let b = world.resolve("b");
+    let b = world.resolve_as(B, "b");
     serve(&mut brick, "b").await;
     assert_eq!(b.await.unwrap(), Ok(qualified("b")));
-    world.router.subscribe(B, qualified("b"));
     sleep(world.config.grace * 3).await;
     assert_quiet(&mut brick);
     assert_eq!(brick.signals.try_recv(), Err(TryRecvError::Empty));
@@ -296,7 +304,7 @@ async fn a_subscription_during_the_backoff_fails_at_once() {
     assert_eq!(
         world
             .supervisor
-            .resolve(&probe::name(), probe::KIND, &probe::params("b"))
+            .resolve(A, &probe::name(), probe::KIND, &probe::params("b"))
             .await,
         Err(unavailable())
     );
@@ -330,7 +338,6 @@ async fn every_live_flow_gets_flow_error_and_is_subscribed_again_after_a_crash()
     let b = world.resolve("b");
     serve(&mut brick, "b").await;
     b.await.unwrap().unwrap();
-    world.router.subscribe(A, qualified("b"));
     let mut stream = world.router.stream(A, None);
     drop(brick);
     let mut errors = [next_event(&mut stream).await, next_event(&mut stream).await];
@@ -500,17 +507,34 @@ async fn a_subscription_given_up_by_its_client_releases_its_flow() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_resolution_dropped_before_its_answer_is_read_undoes_the_subscription() {
+    let world = world();
+    let (name, params) = (probe::name(), probe::params("a"));
+    // Never polled: the subscription is made, then dropped unread.
+    let resolution = world.supervisor.resolve(A, &name, probe::KIND, &params);
+    let mut brick = world.ready().await;
+    serve(&mut brick, "a").await;
+    settle().await;
+    assert_eq!(world.router.subscribers(&qualified("a")), 1);
+    drop(resolution);
+    assert_eq!(world.router.subscribers(&qualified("a")), 0);
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::Release { flow: flow("a") }
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_flow_emptied_while_a_subscription_hands_it_out_again_is_kept() {
     let world = world();
     let mut brick = world.subscribed("a").await;
-    let again = world.resolve("a");
+    let again = world.resolve_as(B, "a");
     let req = subscribe_req(&mut brick, "a").await;
     world.router.remove_anchor(A);
     settle().await;
     assert_quiet(&mut brick);
     answer(&brick, req, "a");
     assert_eq!(again.await.unwrap(), Ok(qualified("a")));
-    world.router.subscribe(B, qualified("a"));
     sleep(world.config.grace * 3).await;
     assert_quiet(&mut brick);
     publish_acked(&mut brick, 1, "a").await;
