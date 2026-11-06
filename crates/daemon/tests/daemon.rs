@@ -322,6 +322,22 @@ fn sigterm_stops_the_daemon_and_removes_its_socket() {
 }
 
 #[test]
+fn a_socket_replaced_meanwhile_is_left_on_exit() {
+    let dirs = Dirs::new();
+    let mut daemon = Running(dirs.command(DAEMON).spawn().unwrap());
+    wait_until("the socket is bound", || dirs.socket().exists());
+    // What `nowcast.socket` does when it starts: unlink, bind again.
+    fs::remove_file(dirs.socket()).unwrap();
+    let systemd = UnixListener::bind(dirs.socket()).unwrap();
+
+    daemon.terminate();
+    assert!(daemon.wait().success());
+    systemd.set_nonblocking(true).unwrap();
+    UnixStream::connect(dirs.socket()).unwrap();
+    assert!(systemd.accept().is_ok(), "the replacing socket is gone");
+}
+
+#[test]
 fn the_socket_unit_matches_the_daemon() {
     let unit = include_str!("../systemd/nowcast.socket");
     for line in [

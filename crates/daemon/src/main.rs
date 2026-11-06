@@ -130,10 +130,8 @@ async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
         _ = interrupt.recv() => tracing::info!("SIGINT received, stopping"),
     }
     // The server is dropped by now, and every connection closed with it.
-    if let Some(path) = socket.bound
-        && let Err(e) = std::fs::remove_file(&path)
-    {
-        tracing::warn!("cannot remove {}: {e}", path.display());
+    if let Some(bound) = socket.bound {
+        bound.remove();
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,41 @@ pub struct Socket {
     pub listener: UnixListener,
     /// The socket file to remove on exit: set only when the daemon bound it
     /// itself, since a socket passed by systemd belongs to systemd.
-    pub bound: Option<PathBuf>,
+    pub bound: Option<BoundFile>,
+}
+
+/// The socket file the daemon bound, identified by its device and inode.
+pub struct BoundFile {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl BoundFile {
+    fn new(path: PathBuf) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(&path)?;
+        Ok(Self {
+            path,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    /// Removes the file if it is still the one the daemon bound. Another
+    /// process may have replaced it since, `nowcast.socket` for one: its
+    /// socket is then left alone.
+    pub fn remove(self) {
+        match fs::symlink_metadata(&self.path) {
+            Ok(m) if (m.dev(), m.ino()) == (self.dev, self.ino) => {
+                if let Err(e) = fs::remove_file(&self.path) {
+                    tracing::warn!("cannot remove {}: {e}", self.path.display());
+                }
+            }
+            Ok(_) => tracing::info!("{} was replaced, leaving it", self.path.display()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("cannot read {}: {e}", self.path.display()),
+        }
+    }
 }
 
 /// Takes the socket systemd passed, or binds the default one.
@@ -52,7 +86,7 @@ pub fn open() -> io::Result<Socket> {
     tracing::info!("listening on {}", path.display());
     Ok(Socket {
         listener,
-        bound: Some(path),
+        bound: Some(BoundFile::new(path)?),
     })
 }
 
