@@ -3,3 +3,22 @@ name = "nowcast-cli"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[[bin]]
+name = "nowcast"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+nowcast-types = { path = "../types" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util", "macros"] }
+
+[dev-dependencies]
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util", "macros", "sync", "process"] }
