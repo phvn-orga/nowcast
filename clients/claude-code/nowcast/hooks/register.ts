@@ -7,7 +7,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
 import { STUB, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
-import { Lines, type StreamEvent, isNewer, nextFlow, parseConnection, parseEvent } from './stream'
+import { Lines, type Status, type StreamEvent, isNewer, nextFlow, parseLine } from './stream'
 
 const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
@@ -23,6 +23,8 @@ const STABLE_MS = 60_000
 /** After a `/clear` or a resume, how often to look for the new session id. */
 const NEW_ID_POLL_MS = 50
 const NEW_ID_ATTEMPTS = 100
+/** What `watch --last-event-id` takes: a value an HTTP header can carry. */
+const HEADER_VALUE = /^[^\x00-\x08\x0a-\x1f\x7f]+$/
 
 type $ = EngineInterface
 
@@ -141,19 +143,26 @@ async function declare($: $, session: string): Promise<void> {
   }
 }
 
-/** Runs `watch` for `session` until stopped, starting it again if it exits. */
+/**
+ * Runs `watch` for `session` until stopped, starting it again if it exits.
+ * The `watch` started again resumes after the last update the previous one
+ * printed, rather than sending every last value again. A new session gets a
+ * new `start`, with no update seen: its state is empty and needs them all.
+ */
 function start($: $, session: string): Watch {
   let child: ReturnType<$['process']['spawn']> | undefined
   let stopped = false
+  let lastEventId: string | undefined
   void (async () => {
     let delay = FIRST_RESTART_MS
     for (let restart = false; ; restart = true) {
       const startedAt = await $.clock.now()
       if (stopped) return
-      child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch'] })
+      const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
+      child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
       // While no `watch` ran, the service may have restarted and forgotten.
       if (restart) void subscribeAgain($)
-      const why = await run($, child, () => stopped)
+      const why = await run($, child, () => stopped, id => (lastEventId = id))
       if (stopped) return
       await setStream($, { status: 'stopped', error: why })
       $.ui.log(`nowcast: ${why}`, { to: 'debug' })
@@ -174,11 +183,16 @@ function start($: $, session: string): Watch {
 }
 
 /**
- * Reads one `watch` until it ends, and says why it ended. Once `stopped`, what
- * the stopped `watch` still prints belongs to the session left behind: it is
- * dropped.
+ * Reads one `watch` until it ends, and says why it ended. Each update's id
+ * goes to `seen`. Once `stopped`, what the stopped `watch` still prints
+ * belongs to the session left behind: it is dropped.
  */
-async function run($: $, child: ReturnType<$['process']['spawn']>, stopped: () => boolean): Promise<string> {
+async function run(
+  $: $,
+  child: ReturnType<$['process']['spawn']>,
+  stopped: () => boolean,
+  seen: (id: string) => void,
+): Promise<string> {
   const stdout = new Lines()
   const stderr = new Lines()
   let lastError = ''
@@ -186,12 +200,24 @@ async function run($: $, child: ReturnType<$['process']['spawn']>, stopped: () =
     for await (const { stream, text } of child) {
       if (stopped()) break
       if (stream === 'stdout') {
-        for (const line of stdout.push(text)) if (!stopped()) await onEvent($, line)
+        for (const line of stdout.push(text)) {
+          if (stopped()) break
+          const parsed = parseLine(line)
+          if (parsed === null) continue
+          if ('status' in parsed) {
+            if (parsed.status === 'connected') lastError = ''
+            await onStatus($, parsed)
+          } else {
+            // `watch` refuses an id it could not send back as a header.
+            if (parsed.event === 'update' && HEADER_VALUE.test(parsed.update.id)) seen(parsed.update.id)
+            await apply($, parsed)
+          }
+        }
       } else {
         for (const line of stderr.push(text)) {
           if (stopped()) break
-          lastError = parseConnection(line)?.status === 'up' ? '' : errorText(line)
-          await onStderr($, line)
+          lastError = errorText(line)
+          $.ui.log(line, { to: 'debug' })
         }
       }
     }
@@ -201,11 +227,6 @@ async function run($: $, child: ReturnType<$['process']['spawn']>, stopped: () =
   } catch (error) {
     return `cannot run ${CLI}: ${message(error)}`
   }
-}
-
-async function onEvent($: $, line: string): Promise<void> {
-  const event = parseEvent(line)
-  if (event !== null) await apply($, event)
 }
 
 /** Subscribes again to what a restarted service forgot. */
@@ -230,17 +251,14 @@ async function apply($: $, event: StreamEvent): Promise<void> {
   await write($, () => $.state.set({ ...FLOWS, id: event.flow }, next), `flow ${event.flow}`)
 }
 
-async function onStderr($: $, line: string): Promise<void> {
-  const connection = parseConnection(line)
-  if (connection === null) {
-    $.ui.log(line, { to: 'debug' })
-  } else if (connection.status === 'up') {
+async function onStatus($: $, status: Status): Promise<void> {
+  if (status.status === 'connected') {
     const reconnections = stream.status === 'down' ? stream.reconnections + 1 : stream.reconnections
     await setStream($, { status: 'up', reconnections, error: null })
     // The service may have restarted and forgotten the subscriptions.
     void subscribeAgain($)
   } else {
-    await setStream($, { status: 'down', error: connection.reason })
+    await setStream($, { status: 'down', error: status.reason })
   }
 }
 

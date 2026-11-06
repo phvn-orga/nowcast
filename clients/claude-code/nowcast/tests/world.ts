@@ -43,6 +43,23 @@ export class Child {
     this.stdout(`${JSON.stringify({ event, data })}\n`)
   }
 
+  /** `watch --json` saying the stream opened. */
+  connected(): void {
+    this.stdout('{"status":"connected"}\n')
+  }
+
+  /** `watch --json` saying the connection is lost, with the same on stderr. */
+  retrying(reason: string): void {
+    this.stdout(`${JSON.stringify({ status: 'retrying', reason })}\n`)
+    this.stderr(`nowcast: ${reason}; retrying\n`)
+  }
+
+  /** The value given after `--last-event-id`, if any. */
+  get lastEventId(): string | undefined {
+    const at = this.argv.indexOf('--last-event-id')
+    return at === -1 ? undefined : this.argv[at + 1]
+  }
+
   exit(code: number | null, signal: string | null = null): void {
     this.push({ code, signal })
   }

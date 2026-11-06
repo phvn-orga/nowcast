@@ -37,17 +37,45 @@ pub enum Command {
     ///
     /// Reconnects when the service goes away or is not there yet, and resumes
     /// from the last event seen.
+    ///
+    /// With --json, each line is one of:
+    ///
+    /// {"event": <name>, "data": <data>}: an event of the stream. An update's
+    /// data.id is its id, the one --last-event-id takes.
+    ///
+    /// {"status": "connected"}: the stream is open. Printed at every
+    /// connection, the first one included.
+    ///
+    /// {"status": "retrying", "reason": <text>}: the connection is lost or
+    /// refused. Printed once per outage.
     Watch {
         /// Subscribe first, and subscribe again if the service lost the
         /// subscription. Repeatable.
         #[arg(long, num_args = 3, value_names = ["BRICK", "KIND", "PARAMS"])]
         subscribe: Vec<String>,
+
+        /// Resume after this update id, the last one a previous watch printed
+        ///
+        /// The first connection then gets only the values newer than ID. One
+        /// counter numbers every flow: a flow the previous watch did not
+        /// follow gets its last value only if it is newer too.
+        #[arg(long, value_name = "ID")]
+        last_event_id: Option<String>,
     },
 
     /// Print the last value of a flow the anchor process is subscribed to
     ///
     /// Prints nothing (`null` with --json) when the flow has no value yet.
     Get {
+        /// Flow id, as `subscribe` prints it: <brick>/<flow>
+        flow: String,
+    },
+
+    /// Ask the brick to refresh a flow the anchor process is subscribed to
+    ///
+    /// Prints nothing. The brick publishes again once it has read its source:
+    /// the new value comes on the stream, or through `get` afterwards.
+    Refresh {
         /// Flow id, as `subscribe` prints it: <brick>/<flow>
         flow: String,
     },
@@ -93,7 +121,7 @@ mod tests {
             r#"{"a":1}"#,
         ])
         .unwrap();
-        let Command::Watch { subscribe } = cli.command else {
+        let Command::Watch { subscribe, .. } = cli.command else {
             panic!("watch");
         };
         assert_eq!(
@@ -105,6 +133,25 @@ mod tests {
     #[test]
     fn a_subscription_needs_three_values() {
         assert!(Cli::try_parse_from(["nowcast", "watch", "--subscribe", "forge", "pr"]).is_err());
+    }
+
+    #[test]
+    fn watch_takes_a_last_event_id() {
+        let cli = Cli::try_parse_from(["nowcast", "watch", "--last-event-id", "42"]).unwrap();
+        let Command::Watch { last_event_id, .. } = cli.command else {
+            panic!("watch");
+        };
+        assert_eq!(last_event_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn refresh_takes_a_flow() {
+        let cli = Cli::try_parse_from(["nowcast", "refresh", "a/b"]).unwrap();
+        let Command::Refresh { flow } = cli.command else {
+            panic!("refresh");
+        };
+        assert_eq!(flow, "a/b");
+        assert!(Cli::try_parse_from(["nowcast", "refresh"]).is_err());
     }
 
     #[test]
