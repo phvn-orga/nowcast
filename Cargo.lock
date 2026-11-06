@@ -179,6 +179,12 @@ version = "0.0.0"
 [[package]]
 name = "nowcast-codec"
 version = "0.0.0"
+dependencies = [
+ "nowcast-conformance",
+ "nowcast-types",
+ "rmpv",
+ "tokio",
+]
 
 [[package]]
 name = "nowcast-conformance"
