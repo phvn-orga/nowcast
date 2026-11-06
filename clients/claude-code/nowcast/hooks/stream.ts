@@ -21,17 +21,28 @@ export type StreamEvent =
   | { event: 'flow-ended'; flow: string }
 
 /**
- * Reads one stdout line: `{"event": <name>, "data": <data>}`. Null for a line
- * that is not one of the three events of the contract, or lacks its flow.
+ * What `watch --json` says on stdout about its connection: `connected` each
+ * time the stream opens, the first one included, and `retrying` once per
+ * outage.
  */
-export function parseEvent(line: string): StreamEvent | null {
+export type Status = { status: 'connected' } | { status: 'retrying'; reason: string }
+
+/**
+ * Reads one stdout line: `{"event": <name>, "data": <data>}` or `{"status":
+ * <status>, ...}`. Null for a line that is none of the three events of the
+ * contract nor a status, or an event that lacks its flow.
+ */
+export function parseLine(line: string): StreamEvent | Status | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(line)
   } catch {
     return null
   }
-  if (!isObject(parsed) || !isObject(parsed.data)) return null
+  if (!isObject(parsed)) return null
+  if (parsed.status === 'connected') return { status: 'connected' }
+  if (parsed.status === 'retrying') return { status: 'retrying', reason: String(parsed.reason ?? '') }
+  if (!isObject(parsed.data)) return null
   const data = parsed.data
   switch (parsed.event) {
     case 'update':
@@ -72,21 +83,6 @@ export function nextFlow(previous: NowcastFlow | undefined, event: StreamEvent):
     case 'flow-ended':
       return { last, error: null, ended: true }
   }
-}
-
-/** What a stderr line of `watch` says about the connection. */
-export type Connection = { status: 'up' } | { status: 'down'; reason: string } | null
-
-/**
- * `nowcast: connected` once the service is back, `nowcast: <reason>;
- * retrying` when it is lost. Anything else says nothing about it.
- */
-export function parseConnection(line: string): Connection {
-  const text = line.replace(/^nowcast: /, '')
-  if (text === line) return null
-  if (text === 'connected') return { status: 'up' }
-  const reason = text.match(/^(.*); retrying$/)?.[1]
-  return reason === undefined ? null : { status: 'down', reason }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
