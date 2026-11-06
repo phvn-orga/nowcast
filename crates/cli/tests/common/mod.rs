@@ -433,12 +433,19 @@ fn route(
         return error(428, "session_required", "Declare the session first.");
     }
     if let Some(flow) = path.strip_prefix("/v1/flows/") {
-        if method != "GET" {
+        let (flow, refresh) = match flow.strip_suffix("/refresh") {
+            Some(flow) => (flow, true),
+            None => (flow, false),
+        };
+        if method != if refresh { "POST" } else { "GET" } {
             return error(405, "method_not_allowed", "");
         }
         let flow = percent_decode(flow);
         if !state.anchor(pid).subscribed(&flow) {
             return error(404, "unknown_flow", "not subscribed to this flow");
+        }
+        if refresh {
+            return empty(202);
         }
         return match state.last.get(&flow) {
             Some(event) => json_reply(200, event.clone()),

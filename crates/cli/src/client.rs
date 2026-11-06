@@ -183,6 +183,14 @@ impl Session<'_> {
         }
     }
 
+    /// `POST /v1/flows/{flow}/refresh`: the service relays it to the brick.
+    pub async fn refresh(&self, flow: &str) -> Result<(), CliError> {
+        let path = format!("/v1/flows/{}/refresh", percent_encode(flow));
+        let reply = self.client.call(Method::POST, &path, None).await?;
+        reply.expect(StatusCode::ACCEPTED)?;
+        Ok(())
+    }
+
     /// `GET /v1/stream`, resuming after `last_event_id` if given.
     pub async fn stream(&self, last_event_id: Option<&str>) -> Result<EventStream, CliError> {
         let mut headers = vec![(ACCEPT.as_str(), "text/event-stream")];
