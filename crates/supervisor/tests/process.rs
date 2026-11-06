@@ -446,6 +446,52 @@ async fn sigkill_ends_a_brick_that_ignores_sigterm() {
     );
 }
 
+#[tokio::test]
+async fn shutdown_stops_the_test_brick_through_its_protocol() {
+    let config = fast();
+    let harness = Harness::new(Mode::Ready, config.clone());
+    let (brick, _stream) = harness.subscribed("a").await;
+    let start = Instant::now();
+    timeout(WAIT, harness.supervisor.shutdown())
+        .await
+        .expect("the brick stops");
+    // It exited on `shutdown`: no signal is sent that early.
+    assert!(start.elapsed() < config.terminate_after);
+    exited(brick).await;
+    harness.no_launch().await;
+}
+
+#[tokio::test]
+async fn shutdown_kills_a_brick_that_ignores_shutdown_and_sigterm() {
+    let config = fast();
+    let dir = tempfile::tempdir().unwrap();
+    let control = Control::bind(dir.path().join("control.sock")).unwrap();
+    let pid_file = dir.path().join("brick.pid");
+    let script =
+        format!(r#"trap '' TERM; echo $$ > "$0"; printf '{READY_FRAME}'; exec sleep 1000"#);
+    let mut declaration = shell(&script, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let harness = Harness::with(declaration, config.clone(), control, dir);
+    // Ready, and never answers the subscription.
+    let stopped = async {
+        written(&pid_file).await;
+        sleep(QUIET).await;
+        let start = Instant::now();
+        timeout(WAIT, harness.supervisor.shutdown())
+            .await
+            .expect("the brick is killed");
+        assert!(start.elapsed() >= config.terminate_after + config.kill_after);
+        assert!(!runs(&pid_file), "the brick still runs");
+    };
+    let (resolved, ()) = tokio::join!(harness.resolve("a"), stopped);
+    assert_eq!(
+        resolved,
+        Err(ResolveError::Unavailable(BrickUnavailable(probe::name())))
+    );
+}
+
 /// Collects what the tracing subscriber writes.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
