@@ -31,7 +31,8 @@
 //!   (`invalid_json`). Only an acknowledged value reaches the router.
 //!   `flow-error` is relayed to the flow's clients, a refresh to the brick.
 //! - **Stop**: when a flow loses its last subscriber (the router's empty
-//!   flows), the brick gets `release`. Once no flow is live and nothing is in
+//!   flows), the brick gets `release` and the router forgets the flow and
+//!   its last value, so that a later subscriber starts afresh. Once no flow is live and nothing is in
 //!   flight, the grace period starts; a subscription within it keeps the
 //!   brick. At its end the brick gets `shutdown`, then `SIGTERM`, then
 //!   `SIGKILL`, each after a delay, until it exits. A subscription arriving

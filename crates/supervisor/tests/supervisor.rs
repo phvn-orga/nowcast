@@ -477,6 +477,28 @@ async fn a_late_answer_does_not_release_a_flow_subscribed_again() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_released_flow_keeps_no_value_for_a_later_subscriber() {
+    let world = world();
+    let mut brick = world.subscribed("a").await;
+    publish_acked(&mut brick, 1, "a").await;
+    world.router.remove_anchor(A);
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::Release { flow: flow("a") }
+    );
+    let supervisor = world.supervisor.clone();
+    let again = tokio::spawn(async move {
+        supervisor
+            .resolve(B, &probe::name(), probe::KIND, &probe::params("a"))
+            .await
+    });
+    serve(&mut brick, "a").await;
+    let resolved = again.await.unwrap().unwrap();
+    assert_eq!(resolved.flow, qualified("a"));
+    assert_eq!(resolved.last, None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_refresh_on_an_unknown_flow_is_refused() {
     let world = world();
     let unknown = |f: QualifiedFlowId| Err(UnknownFlow(f));

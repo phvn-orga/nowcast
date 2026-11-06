@@ -427,12 +427,15 @@ impl Brick {
 
     /// Stops sending a flow to anyone. The brick hears of it only if it is
     /// ready: a relaunched brick that is not yet will simply not get it back.
-    fn release(&mut self, flow: &FlowId) {
+    /// The router forgets the flow and its last value, so that a later
+    /// subscriber starts afresh; a subscriber still there gets `flow-ended`.
+    fn release(&mut self, flow: &FlowId, ctx: &mut Ctx<'_>) {
         self.flows.remove(flow);
         self.deferred.remove(flow);
         if self.is_ready() {
             self.send(ServiceMessage::Release { flow: flow.clone() });
         }
+        ctx.router.end_flow(&self.qualify(flow));
     }
 
     /// Ends a flow the brick can no longer serve: its clients get
@@ -447,11 +450,11 @@ impl Brick {
 
     /// Releases a flow nobody holds, or defers it while a client `subscribe`
     /// is in flight. Every release decision goes through here.
-    fn let_go(&mut self, flow: &FlowId) {
+    fn let_go(&mut self, flow: &FlowId, ctx: &mut Ctx<'_>) {
         if self.has_client_requests() {
             self.deferred.insert(flow.clone());
         } else {
-            self.release(flow);
+            self.release(flow, ctx);
         }
     }
 
@@ -463,7 +466,7 @@ impl Brick {
         }
         for flow in mem::take(&mut self.deferred) {
             if ctx.router.subscribers(&self.qualify(&flow)) == 0 {
-                self.release(&flow);
+                self.release(&flow, ctx);
             }
         }
     }
@@ -667,7 +670,7 @@ impl Brick {
                 warn!(brick = %self.name, req = req.0, %flow, "subscribed answers no subscribe in flight");
                 // The brick now serves the flow: tell it nobody wants it.
                 if !self.flows.contains_key(&flow) {
-                    self.let_go(&flow);
+                    self.let_go(&flow, ctx);
                 }
             }
             Some(Request::Client(Waiter {
@@ -680,7 +683,7 @@ impl Brick {
                     // The client went away: no subscription, and a flow
                     // nobody else holds goes back to the brick.
                     if !self.flows.contains_key(&flow) {
-                        self.let_go(&flow);
+                        self.let_go(&flow, ctx);
                     }
                     return;
                 }
@@ -709,7 +712,7 @@ impl Brick {
                         self.lose(&live, "the relaunched brick changed the flow's id", ctx);
                     }
                     if !self.flows.contains_key(&flow) {
-                        self.let_go(&flow);
+                        self.let_go(&flow, ctx);
                     }
                 }
             }
@@ -772,7 +775,7 @@ impl Brick {
         if !self.flows.contains_key(id) || ctx.router.subscribers(flow) > 0 {
             return;
         }
-        self.let_go(id);
+        self.let_go(id, ctx);
         self.settle(ctx);
     }
 
@@ -791,8 +794,8 @@ impl Brick {
         }
         let flows: Vec<FlowId> = self.flows.keys().cloned().collect();
         for flow in flows {
-            self.release(&flow);
-            ctx.router.end_flow(&self.qualify(&flow));
+            // Its clients get `flow-ended`.
+            self.release(&flow, ctx);
         }
         self.settle(ctx);
     }
