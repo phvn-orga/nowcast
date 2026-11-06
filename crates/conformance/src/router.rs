@@ -313,6 +313,31 @@ pub async fn removing_an_anchor_drops_its_subscriptions<S: RouterSubject>() {
     );
 }
 
+/// Whether any subscription exists follows every way one is made or
+/// dropped, and a receiver sees each change.
+pub async fn the_router_tells_whether_any_subscription_exists<S: RouterSubject>() {
+    let router = S::new();
+    let mut any = router.has_subscriptions();
+    assert!(!*any.borrow_and_update());
+
+    let (a, _) = router.subscribe(A, flow("x"));
+    assert!(any.has_changed().unwrap());
+    assert!(*any.borrow_and_update());
+    router.unsubscribe(A, &a).unwrap();
+    assert!(!*any.borrow_and_update(), "unsubscribed");
+
+    router.subscribe(A, flow("x"));
+    router.subscribe(B, flow("y"));
+    router.remove_anchor(A);
+    assert!(*any.borrow_and_update(), "B is still subscribed");
+    router.end_flow(&flow("y"));
+    assert!(!*any.borrow_and_update(), "the flow ended");
+
+    // A stream and a flow kept with no subscriber are not subscriptions.
+    let _stream = router.stream(A, None);
+    assert!(!*router.has_subscriptions().borrow());
+}
+
 /// Runs the router rules of contract section 3.
 #[macro_export]
 macro_rules! router_suite {
@@ -342,6 +367,7 @@ macro_rules! router_suite {
                     ending_a_flow_reaches_every_subscriber,
                     an_empty_flow_is_signalled_and_kept,
                     removing_an_anchor_drops_its_subscriptions,
+                    the_router_tells_whether_any_subscription_exists,
                 ]
             );
         }

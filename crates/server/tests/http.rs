@@ -769,6 +769,10 @@ impl Router for DyingOnStream {
         self.inner.empty_flows()
     }
 
+    fn has_subscriptions(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.has_subscriptions()
+    }
+
     fn remove_anchor(&self, anchor: AnchorId) {
         self.inner.remove_anchor(anchor);
     }

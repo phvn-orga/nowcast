@@ -2,6 +2,7 @@ use std::fmt;
 
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::watch;
 
 use crate::AnchorId;
 
@@ -85,6 +86,13 @@ pub trait Router: Send + Sync + 'static {
 
     /// Receives each flow whose last subscription goes away, at that moment.
     fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId>;
+
+    /// Whether any subscription exists, from any anchor, on any flow. The
+    /// receiver sees every change, made in the same step as the operation
+    /// that causes it: an `end_flow` or a `remove_anchor` as much as an
+    /// `unsubscribe`. The server keeps the service running while it is
+    /// `true`.
+    fn has_subscriptions(&self) -> watch::Receiver<bool>;
 
     /// Drops every subscription and stream of a dead anchor, signalling the
     /// flows this leaves empty. No `flow-ended` is sent: nobody is listening.

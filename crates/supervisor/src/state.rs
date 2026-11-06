@@ -160,6 +160,8 @@ pub(crate) struct State {
     bricks: HashMap<BrickName, Brick>,
     stamps: u64,
     effects: Vec<Effect>,
+    /// Set by [`State::shutdown`], never cleared: no brick launches again.
+    closing: bool,
 }
 
 impl State {
@@ -169,6 +171,7 @@ impl State {
             bricks: HashMap::new(),
             stamps: 0,
             effects: Vec::new(),
+            closing: false,
         }
     }
 
@@ -222,6 +225,11 @@ impl State {
         router: &dyn Router,
     ) -> oneshot::Receiver<Result<Resolved, ResolveError>> {
         let (reply, answer) = oneshot::channel();
+        if self.closing {
+            let unavailable = BrickUnavailable(brick.clone());
+            let _ = reply.send(Err(ResolveError::Unavailable(unavailable)));
+            return answer;
+        }
         let waiter = Waiter {
             anchor,
             kind: kind.to_owned(),
@@ -279,6 +287,24 @@ impl State {
     /// Discovery no longer holds the brick.
     pub(crate) fn removed(&mut self, brick: &BrickName, router: &dyn Router) {
         self.with(brick, router, |b, ctx| b.removed(ctx));
+    }
+
+    /// The service is stopping: every brick stops for good. Subscriptions
+    /// waiting fail as unavailable and the flows end. A brick with a process
+    /// gets `shutdown`, then the signals, as at the end of a grace period; one
+    /// already stopping goes on from its current step; one waiting to be
+    /// relaunched is forgotten. Later subscriptions fail as unavailable.
+    pub(crate) fn shutdown(&mut self, router: &dyn Router) {
+        self.closing = true;
+        for brick in self.names() {
+            self.with(&brick, router, |b, ctx| b.shutdown(ctx));
+        }
+    }
+
+    /// Whether [`State::shutdown`] was called and every process has exited
+    /// since.
+    pub(crate) fn is_drained(&self) -> bool {
+        self.closing && self.bricks.is_empty()
     }
 
     pub(crate) fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
@@ -777,6 +803,32 @@ impl Brick {
         }
         self.let_go(id, ctx);
         self.settle(ctx);
+    }
+
+    /// The service stops: see [`State::shutdown`]. Clearing the flows and the
+    /// queue is what keeps the exit from relaunching the brick.
+    fn shutdown(&mut self, ctx: &mut Ctx<'_>) {
+        let unavailable = self.unavailable();
+        for waiter in self.queue.drain(..) {
+            waiter.fail(unavailable.clone());
+        }
+        for request in mem::take(&mut self.requests).into_values() {
+            if let Request::Client(waiter) = request {
+                waiter.fail(unavailable.clone());
+            }
+        }
+        let flows = mem::take(&mut self.flows).into_keys();
+        for flow in flows.chain(mem::take(&mut self.deferred)) {
+            ctx.router.end_flow(&self.qualify(&flow));
+        }
+        match self.phase {
+            Phase::Starting | Phase::Running | Phase::Grace => {
+                info!(brick = %self.name, "the service stops, stopping the brick");
+                self.stop(ctx);
+            }
+            Phase::Backoff => self.enter(Phase::Idle, ctx),
+            Phase::Idle | Phase::Stopping(_) => {}
+        }
     }
 
     /// The brick left discovery: as if each flow lost its last subscriber,
