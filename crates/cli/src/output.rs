@@ -1,6 +1,7 @@
 //! What the commands print on stdout: readable lines by default, one JSON
 //! value per line with `--json`.
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use serde_json::{Value, json};
@@ -74,9 +75,22 @@ pub fn stream_event(out: &mut impl Write, json: bool, name: &str, data: &Value) 
     out.flush()
 }
 
-/// A string field, `-` when absent.
-fn text<'a>(value: &'a Value, field: &str) -> &'a str {
-    value.get(field).and_then(Value::as_str).unwrap_or("-")
+/// A string field, `-` when absent. Control characters are escaped, so that
+/// a message holding a newline still prints as one line.
+fn text<'a>(value: &'a Value, field: &str) -> Cow<'a, str> {
+    let text = value.get(field).and_then(Value::as_str).unwrap_or("-");
+    if !text.chars().any(char::is_control) {
+        return Cow::Borrowed(text);
+    }
+    let mut escaped = String::with_capacity(text.len() + 4);
+    for c in text.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    Cow::Owned(escaped)
 }
 
 #[cfg(test)]
@@ -164,6 +178,20 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&text).unwrap(),
             json!({ "event": "flow-ended", "data": { "flow": "forge/x" } })
+        );
+    }
+
+    #[test]
+    fn a_readable_event_stays_on_one_line() {
+        let error = json!({ "flow": "forge/x\ty", "message": "line 1\nline 2\r" });
+        assert_eq!(
+            printed(|out| stream_event(out, false, "flow-error", &error)),
+            "flow-error forge/x\\ty line 1\\nline 2\\r\n"
+        );
+        let ended = json!({ "flow": "forge/é" });
+        assert_eq!(
+            printed(|out| stream_event(out, false, "flow-ended", &ended)),
+            "flow-ended forge/é\n"
         );
     }
 
