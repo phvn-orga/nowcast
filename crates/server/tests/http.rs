@@ -447,6 +447,53 @@ fn a_malformed_escape_answers_400() {
     });
 }
 
+/// The acceptance rule of the issue: after a reconnection with
+/// `Last-Event-ID`, only the flows with a newer value come again.
+#[test]
+fn reconnecting_skips_flows_with_no_newer_value() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        let a = subscribe(&harness, "a").await;
+        let b = subscribe(&harness, "b").await;
+        harness.publish(&qualified(&a), b"{}").await;
+        let seen = harness
+            .router
+            .last(AnchorId(1), &qualified(&a))
+            .unwrap()
+            .unwrap()
+            .id;
+        harness.publish(&qualified(&b), b"{}").await;
+        let response = send(
+            &harness.socket,
+            "GET",
+            "/v1/stream",
+            &[("last-event-id", &seen.to_string())],
+            "",
+        )
+        .await;
+        let replayed = updates(response, 2).await;
+        let subjects: Vec<_> = replayed.iter().map(|e| e["subject"].clone()).collect();
+        assert_eq!(subjects, vec![b["flow"].clone()]);
+    });
+}
+
+#[test]
+fn a_missing_session_wins_over_a_malformed_body() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        for (method, path, body) in [
+            ("POST", "/v1/subscriptions", "not json"),
+            ("DELETE", "/v1/subscriptions/%FF", ""),
+            ("GET", "/v1/flows/probe%2", ""),
+        ] {
+            request(&harness, method, path, body)
+                .await
+                .error(428, "session_required");
+        }
+    });
+}
+
 #[test]
 fn a_last_event_id_past_every_value_replays_nothing() {
     run(async {
@@ -577,5 +624,18 @@ fn an_undecodable_last_value_reads_as_500_and_subscribes_with_null() {
             .error(500, "internal_error");
         let again = subscribe(&harness, "a").await;
         assert_eq!(again["last"], Value::Null);
+    });
+}
+
+#[test]
+fn dropping_the_server_closes_open_streams() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        let response = send(&harness.socket, "GET", "/v1/stream", &[], "").await;
+        assert_eq!(response.status(), 200);
+        harness.task.abort();
+        let ended = timeout(Duration::from_secs(5), response.into_body().collect()).await;
+        assert!(ended.is_ok(), "the stream ends with the server");
     });
 }

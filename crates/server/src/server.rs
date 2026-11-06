@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
 
 use crate::error::HttpError;
 use crate::event::{CloudEvent, to_line};
@@ -79,18 +80,29 @@ where
     I: Identity,
     Se: Sessions,
 {
-    /// Serves `listener` until the returned future is dropped. A failed
+    /// Serves `listener` until the returned future is dropped, which closes
+    /// every open connection with it, event streams included. A failed
     /// `accept` is logged and retried; a failed connection only ends itself.
     pub async fn serve(self, listener: UnixListener) {
         let server = Arc::new(self);
+        // Owned here, so that dropping this future aborts every connection.
+        let mut connections = JoinSet::new();
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    tokio::spawn(Arc::clone(&server).connection(stream));
-                }
-                Err(e) => {
-                    tracing::warn!("accepting a connection failed: {e}");
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+            tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        connections.spawn(Arc::clone(&server).connection(stream));
+                    }
+                    Err(e) => {
+                        tracing::warn!("accepting a connection failed: {e}");
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    }
+                },
+                // Reaps finished connections, so the set does not grow.
+                Some(ended) = connections.join_next() => {
+                    if let Err(e) = ended {
+                        tracing::warn!("a connection task failed: {e}");
+                    }
                 }
             }
         }

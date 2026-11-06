@@ -12,10 +12,11 @@ const MAX_REPORTED: usize = 5;
 ///
 /// The schema comes from a declaration discovery already validated; one that
 /// still does not compile is a fault of the service, answered with `500`.
-/// Remote references are never fetched: the crate is built without its HTTP
-/// resolver.
+/// External references are never fetched, whatever features Cargo enables on
+/// `jsonschema` across the workspace: a request never waits on the network or
+/// the disk.
 pub(crate) fn validate(schema: &Value, params: &Value, kind: &str) -> Result<(), HttpError> {
-    let validator = jsonschema::validator_for(schema).map_err(|e| {
+    let validator = jsonschema::options().offline().build(schema).map_err(|e| {
         tracing::warn!("the params schema of kind {kind:?} does not compile: {e}");
         HttpError::internal(format!("the params schema of kind {kind:?} is invalid"))
     })?;
