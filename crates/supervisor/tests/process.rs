@@ -299,13 +299,91 @@ fn kill_pid_in(file: &Path) {
     }
 }
 
+/// Whether the process whose pid is in `file` still runs: a zombie does not.
+fn runs(file: &Path) -> bool {
+    let pid = std::fs::read_to_string(file).expect("the pid is written");
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+/// Waits for the process whose pid is in `file` to end.
+async fn ends(file: &Path) {
+    let ended = timeout(WAIT, async {
+        while runs(file) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    kill_pid_in(file);
+    assert!(ended.is_ok(), "the process still runs");
+}
+
+/// Waits for `file` to hold something.
+async fn written(file: &Path) {
+    timeout(WAIT, async {
+        while std::fs::metadata(file).map_or(true, |m| m.len() == 0) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the file is written");
+}
+
+/// A `ready` frame: length 12, then the map {"v": 1, "t": "ready"}, for
+/// `printf`.
+const READY_FRAME: &str = r"\014\000\000\000\202\241v\001\241t\245ready";
+
+#[tokio::test]
+async fn a_kill_reaches_the_processes_the_brick_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let mut declaration = shell(r#"sleep 1000 & echo $! > "$0"; wait"#, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    written(&pid_file).await;
+    connection.process.kill();
+    assert_eq!(
+        timeout(WAIT, connection.from_brick.recv()).await.unwrap(),
+        None
+    );
+    ends(&pid_file).await;
+}
+
+#[tokio::test]
+async fn a_process_writing_after_the_brick_exited_does_not_hold_its_output_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("writer.pid");
+    // The writer leaves the brick's process group, so it outlives the brick.
+    let script = format!(
+        r#"setsid sh -c 'echo $$ > "$0"; while :; do printf "{READY_FRAME}"; done' "$0" &
+        while [ ! -s "$0" ]; do sleep 0.01; done; exit 3"#
+    );
+    let mut declaration = shell(&script, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    let ended = timeout(WAIT, async {
+        while connection.from_brick.recv().await.is_some() {}
+    })
+    .await;
+    kill_pid_in(&pid_file);
+    assert!(ended.is_ok(), "the output stays open");
+}
+
 #[tokio::test]
 async fn a_brick_ends_when_it_exits_even_if_its_child_holds_its_output() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("child.pid");
-    // A `ready` frame: length 12, then the map {"v": 1, "t": "ready"}.
-    let ready = r"\014\000\000\000\202\241v\001\241t\245ready";
-    let script = format!(r#"sleep 1000 & echo $! > "$0"; printf '{ready}'; exit 3"#);
+    let script = format!(r#"sleep 1000 & echo $! > "$0"; printf '{READY_FRAME}'; exit 3"#);
     let mut declaration = shell(&script, dir.path());
     declaration
         .command
@@ -318,12 +396,13 @@ async fn a_brick_ends_when_it_exits_even_if_its_child_holds_its_output() {
         )
     })
     .await;
-    kill_pid_in(&pid_file);
     // What the brick wrote before exiting still arrives, then the end.
     assert_eq!(
         received.expect("the exit ends the output"),
         (Some(BrickMessage::Ready), None)
     );
+    // What the brick left behind is killed with it.
+    ends(&pid_file).await;
 }
 
 #[tokio::test]
