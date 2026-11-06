@@ -5,8 +5,9 @@
 // all mods run in this process, so the service ties them to the same session.
 
 import type { EngineInterface, Register } from 'claude-code'
-import type { NowcastFlow, NowcastStream } from '../types'
-import { Lines, nextFlow, parseConnection, parseEvent } from './stream'
+import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
+import { STUB, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import { Lines, type StreamEvent, isNewer, nextFlow, parseConnection, parseEvent } from './stream'
 
 const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
@@ -40,6 +41,23 @@ const flows = new Map<string, NowcastFlow>()
 let stream: NowcastStream = { session: null, status: 'starting', reconnections: 0, error: null }
 
 export const register: Register = on => {
+  // The library other mods use: `$.nowcast`, answered below.
+  on('engine.create', async (_, e, next) => ({ ...(await next(e)), nowcast: STUB }))
+  // A flow's last value in an answer is written to the state as well: the
+  // stream does not send it.
+  on('nowcast.subscribe', async ($, e) => {
+    const value = await subscribeKept($, e)
+    if (value.ok && value.last !== null) await offer($, value.last)
+    return { value }
+  })
+  on('nowcast.unsubscribe', async ($, e) => ({ value: await unsubscribe($, e.subscription) }))
+  on('nowcast.refresh', async ($, e) => ({ value: await refresh($, e.flow) }))
+  on('nowcast.last', async ($, e) => {
+    const value = await last($, e.flow)
+    if (value.ok && value.last !== null) await offer($, value.last)
+    return { value }
+  })
+
   // Once per load of the mod: the session's start, or a reload. The start
   // does not wait for the service: `stream` says when the session is declared.
   on('session.start', async ($, e, next) => {
@@ -92,14 +110,6 @@ function follow($: $, session: string): Promise<void> {
   return queue
 }
 
-/** Where the service listens, as the `nowcast` command finds it. */
-async function socketPath($: $): Promise<string | undefined> {
-  const explicit = await $.env.get('NOWCAST_SOCKET')
-  if (explicit) return explicit
-  const runtime = await $.env.get('XDG_RUNTIME_DIR')
-  return runtime?.startsWith('/') ? `${runtime}/nowcast/nowcast.sock` : undefined
-}
-
 /**
  * `PUT /v1/session`. A service that does not answer is not an error here:
  * `watch` declares the session again each time it connects.
@@ -137,10 +147,12 @@ function start($: $, session: string): Watch {
   let stopped = false
   void (async () => {
     let delay = FIRST_RESTART_MS
-    for (;;) {
+    for (let restart = false; ; restart = true) {
       const startedAt = await $.clock.now()
       if (stopped) return
       child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch'] })
+      // While no `watch` ran, the service may have restarted and forgotten.
+      if (restart) void subscribeAgain($)
       const why = await run($, child, () => stopped)
       if (stopped) return
       await setStream($, { status: 'stopped', error: why })
@@ -193,7 +205,25 @@ async function run($: $, child: ReturnType<$['process']['spawn']>, stopped: () =
 
 async function onEvent($: $, line: string): Promise<void> {
   const event = parseEvent(line)
-  if (event === null) return
+  if (event !== null) await apply($, event)
+}
+
+/** Subscribes again to what a restarted service forgot. */
+async function subscribeAgain($: $): Promise<void> {
+  for (const last of await resubscribe($)) await offer($, last)
+}
+
+/**
+ * A flow's last value from a request's answer: the stream does not send it,
+ * so it is written here, unless the state holds it or a newer one.
+ */
+async function offer($: $, last: NowcastEvent): Promise<void> {
+  const previous = flows.get(last.subject)
+  if (previous?.last && !previous.ended && !isNewer(last, previous.last)) return
+  await apply($, { event: 'update', flow: last.subject, update: last })
+}
+
+async function apply($: $, event: StreamEvent): Promise<void> {
   const next = nextFlow(flows.get(event.flow), event)
   if (next === null) return
   flows.set(event.flow, next)
@@ -207,6 +237,8 @@ async function onStderr($: $, line: string): Promise<void> {
   } else if (connection.status === 'up') {
     const reconnections = stream.status === 'down' ? stream.reconnections + 1 : stream.reconnections
     await setStream($, { status: 'up', reconnections, error: null })
+    // The service may have restarted and forgotten the subscriptions.
+    void subscribeAgain($)
   } else {
     await setStream($, { status: 'down', error: connection.reason })
   }

@@ -4,7 +4,7 @@
 
 import type { HttpResponse, On, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { mock } from 'claude-code/testing'
-import type { MockClock, Plugin } from 'claude-code/testing'
+import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { NowcastFlow, NowcastStream } from '../types'
 
 export const SOCKET = '/run/user/1000/nowcast/nowcast.sock'
@@ -110,6 +110,8 @@ export type World = {
   stream: () => NowcastStream | undefined
   /** What the observer mod logged. */
   observed: string[]
+  /** What mods put in the status line, in order. */
+  statuses: string[]
 }
 
 export type Write = { key: string; id: string | undefined; value: unknown }
@@ -127,6 +129,12 @@ export function world(on: On, options: WorldOptions = {}): World {
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   const writes: Write[] = []
   const observed: string[] = []
+  const statuses: string[] = []
+  on('ui.status', (_, e) => {
+    statuses.push(e.text ?? '')
+    return { value: undefined }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.log', (_, e) => {
     if (e.text.startsWith('observer ')) observed.push(e.text.slice('observer '.length))
     return { value: undefined }
@@ -169,6 +177,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     session,
     writes,
     observed,
+    statuses,
     flowWrites,
     flow: id => flowWrites(id).at(-1),
     stream: () => writes.filter(w => w.key === 'stream').at(-1)?.value as NowcastStream | undefined,
@@ -217,3 +226,35 @@ export const observer: Plugin = {
     })
   },
 }
+
+/**
+ * Another mod calling `$.nowcast`, as any mod would. The test runs its
+ * `call` command (see `call`), and gets the answer back as the command's text.
+ */
+export const caller: Plugin = {
+  name: 'caller',
+  register: on => {
+    on('command.run', { command: 'call' }, async ($, e) => {
+      const { method, request } = JSON.parse(e.args) as { method: string; request: never }
+      const answer =
+        method === 'subscribe'
+          ? await $.nowcast.subscribe(request)
+          : method === 'unsubscribe'
+            ? await $.nowcast.unsubscribe(request)
+            : method === 'refresh'
+              ? await $.nowcast.refresh(request)
+              : await $.nowcast.last(request)
+      return { text: JSON.stringify(answer) }
+    })
+  },
+}
+
+/** What `$.nowcast.<method>(request)` answers, called by the `caller` mod. */
+export async function call($: Engine, method: 'subscribe' | 'unsubscribe' | 'refresh' | 'last', request: unknown) {
+  const args = JSON.stringify({ method, request })
+  const { text } = await $.command.run({ command: 'call', args, ...COMPOSER })
+  return JSON.parse(text ?? 'null') as unknown
+}
+
+/** A command typed at the prompt of a headless session. */
+export const COMPOSER = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const

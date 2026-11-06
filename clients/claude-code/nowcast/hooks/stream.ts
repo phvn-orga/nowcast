@@ -74,6 +74,17 @@ export function nextFlow(previous: NowcastFlow | undefined, event: StreamEvent):
   }
 }
 
+/**
+ * Whether `update` is more recent than `than`. Event ids come from one
+ * counter for every flow (contract section 3); an id that is not a decimal
+ * number is newer whenever it differs.
+ */
+export function isNewer(update: NowcastEvent, than: NowcastEvent): boolean {
+  const decimal = /^[0-9]+$/
+  if (decimal.test(update.id) && decimal.test(than.id)) return BigInt(update.id) > BigInt(than.id)
+  return update.id !== than.id
+}
+
 /** What a stderr line of `watch` says about the connection. */
 export type Connection = { status: 'up' } | { status: 'down'; reason: string } | null
 
