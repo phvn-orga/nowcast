@@ -49,6 +49,9 @@
 //!   flows had lost its last subscriber, except that the flows end for their
 //!   clients (`flow-ended`) and the subscriptions waiting fail as for an
 //!   unknown brick. A changed declaration applies from the next launch.
+//! - **Service stop**: [`BrickSupervisor::shutdown`] stops every brick at once
+//!   as at the end of a grace period, fails what waits, ends the flows, and
+//!   returns once every process has exited. Nothing launches afterwards.
 //!
 //! # Delays
 //!
