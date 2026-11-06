@@ -13,7 +13,10 @@ use nowcast_conformance::api::{ApiHarness, ApiSubject, ProbeMode, REFUSAL_CODE, 
 use nowcast_conformance::{block_on, probe};
 use nowcast_server::{MAX_BODY, Server};
 use nowcast_traits::fake::{FakeDiscovery, FakeIdentity, FakeRouter, FakeSessions, FakeSupervisor};
-use nowcast_traits::{Anchor, AnchorId, Identity, Router};
+use nowcast_traits::{
+    Anchor, AnchorId, Identity, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+};
+use nowcast_types::BrickName;
 use nowcast_types::QualifiedFlowId;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -637,5 +640,69 @@ fn dropping_the_server_closes_open_streams() {
         harness.task.abort();
         let ended = timeout(Duration::from_secs(5), response.into_body().collect()).await;
         assert!(ended.is_ok(), "the stream ends with the server");
+    });
+}
+
+/// Lets the anchor die while its brick resolves: forgets its session and
+/// removes it from the router, in the registry's order, then subscribes it
+/// as the supervisor would, recreating it in the router.
+struct DyingAnchor {
+    inner: FakeSupervisor,
+    router: Arc<FakeRouter>,
+    sessions: Arc<FakeSessions>,
+}
+
+impl Supervisor for DyingAnchor {
+    fn resolve(
+        &self,
+        anchor: AnchorId,
+        brick: &BrickName,
+        kind: &str,
+        params: &[u8],
+    ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send {
+        self.sessions.forget(anchor);
+        self.router.remove_anchor(anchor);
+        self.inner.resolve(anchor, brick, kind, params)
+    }
+
+    fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
+        self.inner.refresh(flow)
+    }
+}
+
+#[test]
+fn an_anchor_dying_while_its_brick_resolves_keeps_no_subscription() {
+    run(async {
+        let router = Arc::new(FakeRouter::new());
+        let sessions = Arc::new(FakeSessions::new());
+        let discovery = Arc::new(FakeDiscovery::new());
+        discovery.insert(probe::declaration(vec!["probe".into()], PathBuf::from("/")));
+        let supervisor = DyingAnchor {
+            inner: FakeSupervisor::new(router.clone()),
+            router: router.clone(),
+            sessions: sessions.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nowcast.sock");
+        let server = Server {
+            router: router.clone(),
+            supervisor: Arc::new(supervisor),
+            discovery,
+            identity: Arc::new(FakeIdentity::new()),
+            sessions,
+        };
+        let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
+        let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;
+        assert_eq!(declared.status(), 204);
+        let body = json!({ "brick": probe::NAME, "kind": probe::KIND, "params": { "id": "a" } });
+        let response = send(&socket, "POST", "/v1/subscriptions", &[], body.to_string()).await;
+        let response = Response {
+            status: response.status().as_u16(),
+            headers: response.headers().clone(),
+            body: response.into_body().collect().await.unwrap().to_bytes(),
+        };
+        response.error(428, "session_required");
+        assert_eq!(router.subscribers(&probe_flow("a")), 0);
+        task.abort();
     });
 }

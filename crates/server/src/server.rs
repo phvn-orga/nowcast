@@ -221,6 +221,14 @@ where
             .resolve(anchor, &brick, &request.kind, &params)
             .await
             .map_err(ApiError::from)?;
+        // The anchor may have died while its brick was resolving. Its session
+        // is forgotten before the router drops the anchor, so a subscription
+        // made after that drop is seen here and undone; one made before it is
+        // already gone with the anchor.
+        if self.sessions.current(anchor).is_none() {
+            let _ = self.router.unsubscribe(anchor, &resolved.subscription);
+            return Err(HttpError::session_required());
+        }
         let last = resolved.last.as_ref().and_then(|event| {
             CloudEvent::new(event)
                 .inspect_err(|e| tracing::warn!("answering `last: null`: {e}"))
