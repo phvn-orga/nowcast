@@ -1,0 +1,12 @@
+# Holds the service's socket and starts nowcast.service on the first
+# connection. The daemon looks for the same path when started by hand.
+[Unit]
+Description=nowcast socket
+
+[Socket]
+ListenStream=%t/nowcast/nowcast.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
