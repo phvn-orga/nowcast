@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nowcast_traits::{AnchorId, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 
 /// A flow that has had at least one subscriber and has not been ended.
 #[derive(Default)]
@@ -63,6 +64,9 @@ pub(crate) struct State {
     flows: HashMap<QualifiedFlowId, Flow>,
     anchors: HashMap<AnchorId, Anchor>,
     empty_watchers: Vec<UnboundedSender<QualifiedFlowId>>,
+    /// Whether any subscription exists, updated by every operation that adds
+    /// or drops one.
+    has_subscriptions: watch::Sender<bool>,
 }
 
 impl State {
@@ -231,6 +235,22 @@ impl State {
         let (tx, rx) = unbounded_channel();
         self.empty_watchers.push(tx);
         rx
+    }
+
+    pub(crate) fn has_subscriptions(&self) -> watch::Receiver<bool> {
+        self.has_subscriptions.subscribe()
+    }
+
+    /// Publishes whether any subscription is left. Every operation that adds
+    /// or drops a subscription calls it before returning, under the router's
+    /// lock, so that the value never lags behind an operation.
+    pub(crate) fn sync_has_subscriptions(&self) {
+        let any = self.anchors.values().any(|a| !a.subscriptions.is_empty());
+        self.has_subscriptions.send_if_modified(|was| {
+            let changed = *was != any;
+            *was = any;
+            changed
+        });
     }
 
     pub(crate) fn remove_anchor(&mut self, anchor: AnchorId) {
