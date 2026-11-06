@@ -14,14 +14,21 @@ use crate::state::State;
 /// reaches every stream in the order of event ids, and a subscription made
 /// while publications go on misses none of them, since it either returns a
 /// value as `last` or receives it on the anchor's streams.
-#[derive(Default)]
 pub struct FlowRouter {
     state: Mutex<State>,
 }
 
+impl Default for FlowRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlowRouter {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: Mutex::new(State::new()),
+        }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {

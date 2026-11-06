@@ -8,7 +8,8 @@
 //!
 //! Subscription ids read `s-<n>`, with `n` a hexadecimal counter, so an id is
 //! never issued twice while the service runs. Event ids come from one counter
-//! shared by every flow, starting at 1.
+//! shared by every flow, started from the clock (microseconds since 1970) so
+//! that they keep increasing across a restart of the service.
 
 mod router;
 mod state;

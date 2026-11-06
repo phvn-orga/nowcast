@@ -7,7 +7,7 @@
 //! without scanning every flow. Every method keeps the two indexes in step.
 
 use std::collections::{HashMap, HashSet};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nowcast_traits::{AnchorId, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
@@ -53,7 +53,10 @@ impl Anchor {
 
 #[derive(Default)]
 pub(crate) struct State {
-    /// The id of the last event issued, shared by every flow.
+    /// The id of the last event issued, shared by every flow. Starts at the
+    /// clock, in microseconds since 1970, so that ids keep increasing across
+    /// a restart of the service: a client's `Last-Event-ID` from before the
+    /// restart stays below every new id.
     last_event: u64,
     /// The number of subscriptions issued so far.
     issued_subscriptions: u64,
@@ -63,6 +66,19 @@ pub(crate) struct State {
 }
 
 impl State {
+    pub(crate) fn new() -> Self {
+        // A clock set before 1970 only loses the guarantee across restarts.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_micros()).unwrap_or(u64::MAX / 2)
+            });
+        Self {
+            last_event: now,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn subscribe(
         &mut self,
         anchor: AnchorId,

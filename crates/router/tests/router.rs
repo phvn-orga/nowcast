@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use nowcast_router::FlowRouter;
 use nowcast_traits::{AnchorId, Router, UnknownFlow, UnknownSubscription};
@@ -98,7 +99,25 @@ fn event_ids_come_from_one_counter_for_every_flow() {
         .iter()
         .map(|f| publish(&router, f, "1").id.0)
         .collect();
-    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    let first = ids[0];
+    assert_eq!(ids, (first..first + 5).collect::<Vec<_>>());
+}
+
+#[test]
+fn event_ids_keep_increasing_across_a_restart() {
+    let before = FlowRouter::new();
+    before.subscribe(A, flow("x"));
+    let last_before = (0..3).map(|_| publish(&before, "x", "1").id).last();
+    // A restart takes far longer than this; the gap only has to exceed the
+    // three events published above, counted in microseconds.
+    thread::sleep(Duration::from_millis(5));
+    let after = FlowRouter::new();
+    after.subscribe(A, flow("x"));
+    let first_after = publish(&after, "x", "1").id;
+    assert!(
+        Some(first_after) > last_before,
+        "{first_after:?} after {last_before:?}"
+    );
 }
 
 #[test]
@@ -213,9 +232,10 @@ fn replayed_values_come_in_id_order() {
     for f in ["a", "b", "c", "d"] {
         router.subscribe(A, flow(f));
     }
-    for f in ["c", "a", "d", "b", "a"] {
-        publish(&router, f, "1");
-    }
+    let sent: Vec<u64> = ["c", "a", "d", "b", "a"]
+        .iter()
+        .map(|f| publish(&router, f, "1").id.0)
+        .collect();
     let ids: Vec<u64> = drain(&mut router.stream(A, None))
         .into_iter()
         .map(|e| match e {
@@ -223,7 +243,8 @@ fn replayed_values_come_in_id_order() {
             other => panic!("expected an update, got {other:?}"),
         })
         .collect();
-    assert_eq!(ids, vec![1, 3, 4, 5]);
+    // The last value of c, d, b and a, in the order they were published.
+    assert_eq!(ids, vec![sent[0], sent[2], sent[3], sent[4]]);
 }
 
 #[test]
