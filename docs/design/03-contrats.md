@@ -1,6 +1,6 @@
 # Les contrats
 
-État au 2026-11-05 : contrats décidés ; restent les valeurs de quelques délais.
+État au 2026-11-06 : contrats décidés ; restent les valeurs de quelques délais.
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -18,13 +18,17 @@ Un fichier TOML par brique, nommé `<nom>.toml`, qui vit dans le dépôt de la b
 | `version` | chaîne semver | Version de la brique elle-même. |
 | `description` | chaîne | Une phrase. |
 | `protocol` | entier | Version majeure du protocole brique qu'elle parle (section 4). |
-| `[run] command` | tableau de chaînes | Commande à lancer. Un chemin relatif se résout depuis le répertoire réel du fichier de déclaration ; un chemin absolu est pris tel quel. |
+| `[run] command` | tableau de chaînes | Commande à lancer. Le premier élément est un chemin s'il contient un `/` : relatif, il se résout depuis le répertoire réel du fichier de déclaration ; absolu, il est pris tel quel. Sans `/`, c'est un nom de programme cherché dans le `PATH` du service, comme dans un shell (`python3`). Les arguments passent tels quels. |
 | `[run] env` | table, facultatif | Variables d'environnement ajoutées au lancement. |
 | `[subscriptions.<sorte>]` | table, une par sorte d'abonnement | `description` ; `schema`, chemin du JSON Schema du contenu de l'abonnement (c'est la documentation de la clé) ; `publishes`, le type de donnée publié par ce flux. |
 | `[types."<type>"]` | table, une par type publié | `schema`, chemin du JSON Schema du détail. Il devient le `dataschema` des événements. |
 
-Chaque `publishes` doit nommer un type déclaré dans `[types]`, sinon le fichier est
-refusé.
+Chaque `publishes` doit nommer un type déclaré dans `[types]`, et chaque `schema` doit
+mener à un fichier JSON lisible, sinon le fichier est refusé au chargement.
+
+La brique est lancée avec pour répertoire de travail le répertoire réel de son fichier
+de déclaration : `command = ["python3", "brick.py"]` lance le `brick.py` posé à côté du
+fichier.
 
 Exemple, une brique forge :
 
@@ -116,6 +120,8 @@ répond `201` :
   d'abonnement : `400` `invalid_params` sinon. `404` `unknown_brick` ou
   `unknown_kind` si la brique ou la sorte n'existe pas.
 - `503` `brick_unavailable` si la brique ne répond pas `ready` à temps (section 4).
+- `422` `subscription_refused` si la brique répond `error` au `subscribe` (section 4).
+  Le `message` reprend le code et le message de la brique : `"no_such_repo: …"`.
 - `last` porte la dernière valeur du flux (un événement, voir plus bas), ou `null`.
 - L'identifiant d'abonnement est propre à chaque abonné. Deux mods d'une même session
   abonnés au même flux ont deux abonnements : le désabonnement de l'un ne coupe pas
@@ -139,12 +145,19 @@ les flux auxquels le processus d'ancrage est abonné, abonnements à venir compr
 Trois sortes d'événements SSE (`event:`) :
 
 - `update` : `data` est un événement CloudEvents en JSON ;
-- `flow-error` : la brique ne peut pas servir un flux, avec un message ;
-- `flow-ended` : le flux n'existe plus (brique retirée, abonnement supprimé).
+- `flow-error` : la brique ne peut pas servir un flux. `data` vaut
+  `{"flow": "<identifiant de flux>", "message": "…"}` ;
+- `flow-ended` : le flux n'existe plus (brique retirée, abonnement supprimé). `data`
+  vaut `{"flow": "<identifiant de flux>"}`.
 
-Le champ SSE `id` reprend l'`id` de l'événement. À la reconnexion, le service lit
-`Last-Event-ID` et renvoie la dernière valeur de chaque flux plus récente que cet
-identifiant : la dernière valeur suffit, il n'y a pas d'historique à rejouer.
+Seul `update` porte le champ SSE `id`, qui reprend l'`id` de l'événement. `flow-error`
+et `flow-ended` sont des signaux : ils ne sont pas rejoués à la reconnexion.
+
+À l'ouverture, le service envoie d'abord la dernière valeur de chaque flux abonné :
+toutes sans `Last-Event-ID`, seulement celles plus récentes que cet identifiant avec
+lui. La dernière valeur suffit, il n'y a pas d'historique à rejouer. Un client peut
+donc s'abonner avant ou après avoir ouvert le flux sans perdre de valeur ; il reçoit
+parfois en double une valeur déjà lue dans `last`, reconnaissable à son `id`.
 
 ```
 event: update
@@ -157,7 +170,7 @@ Attributs de l'événement :
 | Attribut | Valeur |
 |---|---|
 | `specversion` | `"1.0"` |
-| `id` | Attribué par le service, croissant pour un flux donné. |
+| `id` | Attribué par le service, à partir d'un seul compteur pour tous les flux : un `Last-Event-ID` se compare donc à tous les flux à la fois. |
 | `source` | `nowcast://bricks/<nom>` |
 | `type` | Le type publié, par exemple `forge.pr/v1`. |
 | `subject` | L'identifiant de flux. |
@@ -271,10 +284,11 @@ description = "Sessions Claude Code"
 exe = ["*/claude/versions/*"]
 ```
 
-Règle de rattachement : à la connexion, le service remonte les parents du processus
-qui se connecte et retient **l'ancêtre le plus proche** dont l'exécutable correspond à
-un motif d'un type déclaré, quel que soit ce type. Ce processus devient l'ancrage de la
-connexion. Si aucun ancêtre ne correspond, l'ancrage est le processus connecté
+Règle de rattachement : à la connexion, le service examine le processus qui se
+connecte, puis ses parents, et retient **le plus proche** dont l'exécutable correspond
+à un motif d'un type déclaré, quel que soit ce type. Un agent qui se connecte depuis
+son propre processus est donc son propre ancrage. Ce processus devient l'ancrage de la
+connexion. Si aucun ne correspond, l'ancrage est le processus connecté
 lui-même : ses abonnements meurent avec lui, et il déclare sa propre session comme
 n'importe quel client. C'est le cas de `nowcast watch` lancé depuis un terminal. Un
 refus ne protégerait rien, puisque tout se passe sous le même UID.
