@@ -1,7 +1,8 @@
 # Les clients
 
 État au 2026-11-06 : architecture des clients, format du flux et déclaration de
-session posés ; mod central validé par un spike.
+session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
+et le rafraîchissement aussi en session interactive.
 
 ## Décisions prises
 
@@ -17,7 +18,9 @@ session posés ; mod central validé par un spike.
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
   (`PUT /v1/session`, voir `03-contrats.md`), avant toute autre requête, puis à chaque
-  changement (`/clear`, reprise). La mort du processus d'ancrage termine tout.
+  changement (`/clear`, reprise). Un `428` en cours de session signale un service
+  relancé, après un arrêt à vide par exemple : le client déclare à nouveau sa session
+  et renvoie sa requête. La mort du processus d'ancrage termine tout.
 - **Les abonnements suivent le processus d'ancrage, pas l'identifiant de session.** Un
   `/clear` ne coupe donc rien : le client se désabonne de ce qu'il ne veut plus. Le
   service n'a pas à deviner ce que signifie un changement de session.
@@ -35,8 +38,16 @@ session posés ; mod central validé par un spike.
   lisent à un instant donné plutôt qu'en continu.
 - **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
-  valeur, en un appel), `nowcast subscribe`. La reconnexion et la conduite à tenir quand
-  le service est absent sont écrites une fois, là.
+  valeur, en un appel), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
+  immédiat, rien d'affiché en cas de succès). La reconnexion et la conduite à tenir
+  quand le service est absent sont écrites une fois, là.
+- **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
+  après cet identifiant, sans recevoir à nouveau toutes les dernières valeurs.
+  L'identifiant à lui passer est l'`id` de l'événement CloudEvents, dans `data`, égal
+  à l'`id` SSE. Sous `--json`, des lignes d'état disent aussi où en est la connexion :
+  `{"status":"connected"}` à chaque connexion, la première comprise, et
+  `{"status":"retrying","reason":"..."}`. Un client suit ainsi l'état du flux et
+  reprend après une coupure sans analyser de messages destinés à un humain.
 - **Un seul binaire, `nowcast`** : l'outil en ligne de commande, et le service sous la
   sous-commande `nowcast daemon`, que lance l'unité systemd. L'outil et le service
   sortent toujours à la même version : une seule chose à installer. Il s'installe dans
@@ -52,12 +63,33 @@ session posés ; mod central validé par un spike.
   centralisé.** Le mod central lance `nowcast watch`, tient l'unique flux SSE de la
   session, déclare la session et ses changements (début, `/clear`, reprise), et écrit
   chaque flux reçu dans son état de plugin (`$.state`). Les requêtes (s'abonner, se
-  désabonner, demander un rafraîchissement) partent directement de chaque mod vers le service en HTTP : tous
-  les mods tournent dans le même processus d'ancrage, donc le service les rattache à la
-  même session que le flux. Un mod qui s'abonne reçoit l'identifiant du flux en
-  réponse et le lit ensuite dans l'état du mod central. Une petite bibliothèque cliente
-  sert aux mods pour ces requêtes. Pas d'API de requêtes entre mods à concevoir.
-  Validé par un spike (voir « Ce que peuvent les clients »).
+  désabonner, demander un rafraîchissement) partent directement du processus de
+  l'agent vers le service en HTTP : tous les mods tournent dans le même processus
+  d'ancrage, donc le service les rattache à la même session que le flux. Un mod qui
+  s'abonne reçoit l'identifiant du flux en réponse et le lit ensuite dans l'état du
+  mod central. Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
+  par l'implémentation (voir « Ce que peuvent les clients »).
+- **Un `watch` par identifiant de session.** Comme `/clear` vide l'état du plugin, le
+  mod central arrête alors `watch` et le relance sous le nouvel identifiant, sans
+  `Last-Event-ID` : le service envoie à nouveau chaque dernière valeur, qui remplit
+  l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
+- **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
+  mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
+  `subscribe`, `unsubscribe`, `refresh` et `last`, typés par le contrat du mod central. Chaque appel rend un
+  résultat (succès, ou statut et code d'erreur), jamais une exception. Les requêtes
+  partent toujours du processus de l'agent, directement vers le service. Écartés :
+  - un fichier que chaque mod copie : un mod n'importe que des fichiers de son propre
+    dossier, et le moteur refuse un module qui passe `$` à une fonction qu'il ne peut
+    pas suivre ;
+  - un plugin séparé qui ajouterait le nom : à côté du flux, la bibliothèque écrit la
+    dernière valeur rendue par un abonnement dans l'état partagé, visible de tous les
+    lecteurs, et sait quand le flux revient pour vérifier ses abonnements et se
+    réabonner à ceux que le service a perdus. Un mod qui lit des flux dépend déjà du
+    mod central.
+
+  En contrepartie, le code de la bibliothèque évolue avec le mod central, un mod
+  chargé sans lui n'a pas `$.nowcast`, et tout plugin peut observer ou réécrire les
+  appels, qui sont des événements du moteur.
 - **Aucun mécanisme interne non documenté d'un agent** (variable d'environnement,
   fichier de session) n'entre dans le modèle : seules les API publiques des agents
   comptent.
@@ -77,12 +109,18 @@ session posés ; mod central validé par un spike.
     ce client directement.
   - `$.session.id()` donne l'identifiant de session ; l'événement de fin de session
     porte sa raison, dont `clear`. Après un `/clear`, aucun événement de début n'est
-    émis.
+    émis. Observé sur 2.1.319 : un `/clear` se présente comme une fin de session de
+    raison `clear`, et le nouvel identifiant apparaît dans `$.session.id()` peu après.
   - Le contexte, le cache, le modèle et l'effort d'une session n'existent que dans le
     moteur, qui les donne aux plugins par ses événements : le service ne peut pas les
     lire lui-même, le client les lui transmet.
   - Tout plugin lit l'état (`$.state`) de n'importe quel autre ; seul le propriétaire
     l'écrit, et une écriture est un événement qu'on peut intercepter.
+  - L'état d'un plugin appartient à la session : `/clear` le vide. Observé sur
+    2.1.319 : une valeur posée avant un `/clear` se relit en version 0 après.
+  - Les `$.state.get` d'un même traitement d'événement lisent tous le même instant
+    (documentation de l'API) : une boucle longue qui relit l'état voit des valeurs
+    figées.
 
   Spike du 2026-11-05 (Claude Code 2.1.318, session sans interface `claude -p`, deux
   mods de test), les trois points sont validés :
@@ -105,8 +143,15 @@ session posés ; mod central validé par un spike.
   - Hors rendu d'interface, ce hook est le seul moyen de suivre l'état d'un autre mod.
   - Une référence à l'état d'un autre mod (`{plugin, key}`) doit être un littéral.
 
-  Non vérifié : une session interactive (comportement attendu identique) et plusieurs
-  observateurs sur la même clé.
+  Revérifié avec l'implémentation (Claude Code 2.1.319, `claude -p`, vrai service,
+  brique de test, mod central, mod d'exemple et mod observateur) : un mod
+  s'abonne par `$.nowcast` et demande un rafraîchissement, la mise à jour lui arrive
+  par le flux du mod central, ce qui n'est possible que si requête et flux partagent
+  un ancrage ; après un `/clear`, le nouvel identifiant est déclaré et la dernière
+  valeur réécrite dans l'état vidé, sans nouvel abonnement.
+
+  Non vérifié : une session interactive (comportement attendu identique), plusieurs
+  observateurs sur la même clé, et le rechargement à chaud du mod central.
 - **Codex et Droid.** Leurs hooks sont des commandes ponctuelles, lancées sur des
   événements de session ; ils lisent à un instant donné, pas en continu. Les hooks
   descendent du processus de l'agent, donc l'identité du noyau les rattache à leur
@@ -136,8 +181,9 @@ protocole.
 
 ## À trancher
 
-- **Revérifier le spike en session interactive**, et avec plusieurs observateurs sur
-  la même clé, avant l'implémentation du mod central.
+- **Vérifier en session interactive `/clear` et plusieurs observateurs sur la même
+  clé.** Le rechargement à chaud et le rafraîchissement y ont été vérifiés (Claude Code
+  2.1.319) ; `/clear` seulement en session sans interface (`claude -p`).
 
 ## Hors périmètre pour l'instant
 

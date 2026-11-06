@@ -61,9 +61,8 @@ utilisateur ; l'identité du pair les reçoit déjà chargées et les compare à
 chaîne d'ancêtres.
 
 Le routeur compte les abonnés de chaque flux et signale quand un flux n'en a plus ; le
-superviseur décide de lancer ou d'arrêter une brique. Les délais encore ouverts dans
-`03-contrats.md` (arrêt, backoff) reviennent au superviseur, avec des valeurs par
-défaut documentées.
+superviseur décide de lancer ou d'arrêter une brique. Les délais d'arrêt et de backoff
+reviennent au superviseur ; ses valeurs par défaut sont fixées dans `03-contrats.md`.
 
 ## Risque
 
