@@ -459,6 +459,24 @@ async fn answers_to_a_req_never_sent_are_ignored() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_late_answer_does_not_release_a_flow_subscribed_again() {
+    let world = world();
+    let first = world.resolve("a");
+    let mut brick = world.ready().await;
+    let req1 = subscribe_req(&mut brick, "a").await;
+    // The brick answers too late: the subscription fails, and is retried.
+    assert_eq!(first.await.unwrap(), Err(unavailable()));
+    let second = world.resolve_as(B, "a");
+    let req2 = subscribe_req(&mut brick, "a").await;
+    answer(&brick, req1, "a");
+    answer(&brick, req2, "a");
+    assert_eq!(second.await.unwrap(), Ok(qualified("a")));
+    // Anything sent since the retry, `release` included, comes first.
+    publish_acked(&mut brick, 1, "a").await;
+    assert_eq!(world.router.subscribers(&qualified("a")), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_refresh_on_an_unknown_flow_is_refused() {
     let world = world();
     let unknown = |f: QualifiedFlowId| Err(UnknownFlow(f));
