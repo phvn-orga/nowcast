@@ -9,7 +9,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use rustix::fs::Mode;
 use rustix::io::{FdFlags, fcntl_setfd};
+use rustix::process::{geteuid, umask};
 
 /// The socket's directory under `$XDG_RUNTIME_DIR`, and its file name. The
 /// command line tool looks for the same path.
@@ -163,18 +165,65 @@ fn activated_fds(
 
 /// Binds `path` in a directory only the user can enter, as a socket only the
 /// user can open.
+///
+/// Sets the process's umask for the time of the bind: call it before any
+/// other thread starts.
 fn bind(path: &Path) -> io::Result<UnixListener> {
     let dir = path.parent().expect("the socket path has a directory");
+    let runtime_dir = dir.parent().expect("the socket directory has a parent");
+    check_runtime_dir(runtime_dir)?;
     match DirBuilder::new().mode(0o700).create(dir) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
         _ => {}
     }
+    check_socket_dir(dir)?;
     // A directory that already existed keeps its mode unless set again.
     fs::set_permissions(dir, Permissions::from_mode(0o700))?;
     remove_stale(path)?;
-    let listener = UnixListener::bind(path)?;
+    // Created under this mask, the socket is never open to others, not even
+    // before the chmod. The mask is restored at once, and no other thread
+    // exists yet to create a file under it meanwhile.
+    let previous = umask(Mode::from_raw_mode(0o077));
+    let bound = UnixListener::bind(path);
+    umask(previous);
+    let listener = bound?;
     fs::set_permissions(path, Permissions::from_mode(0o600))?;
     Ok(listener)
+}
+
+/// Refuses a runtime directory another user owns or may write in: whoever
+/// can write there can swap the socket directory.
+fn check_runtime_dir(dir: &Path) -> io::Result<()> {
+    let metadata = fs::metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(unsafe_path(dir, "is not a directory"));
+    }
+    if metadata.uid() != geteuid().as_raw() {
+        return Err(unsafe_path(dir, "is owned by another user"));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(unsafe_path(dir, "is writable by other users"));
+    }
+    Ok(())
+}
+
+/// Refuses a socket directory that is a link, or not a directory of the user.
+fn check_socket_dir(dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.file_type().is_dir() {
+        return Err(unsafe_path(dir, "is not a directory"));
+    }
+    if metadata.uid() != geteuid().as_raw() {
+        return Err(unsafe_path(dir, "is owned by another user"));
+    }
+    Ok(())
+}
+
+fn unsafe_path(path: &Path, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("{} {why}", path.display()),
+    )
 }
 
 /// Removes a socket file left by a daemon that did not exit cleanly. Refuses

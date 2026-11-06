@@ -12,7 +12,7 @@ nowcast-server = { path = "../server" }
 nowcast-sessions = { path = "../sessions" }
 nowcast-supervisor = { path = "../supervisor" }
 nowcast-traits = { path = "../traits" }
-rustix = "1.1.6"
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "signal", "macros"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

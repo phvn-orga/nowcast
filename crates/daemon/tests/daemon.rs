@@ -86,6 +86,8 @@ impl Dirs {
 
     fn command(&self, program: &str) -> Command {
         fs::create_dir_all(self.runtime()).unwrap();
+        // As private as a real runtime directory, whatever the umask.
+        fs::set_permissions(self.runtime(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut command = Command::new(program);
         command
             .env("XDG_RUNTIME_DIR", self.runtime())
@@ -280,6 +282,40 @@ fn an_existing_directory_is_made_private() {
 
     assert_eq!(mode(&dirs.socket_dir()), 0o700);
     assert_eq!(mode(&dirs.socket()), 0o600);
+}
+
+#[test]
+fn a_linked_socket_directory_is_refused() {
+    let dirs = Dirs::new();
+    let elsewhere = dirs.root.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let mut command = dirs.command(DAEMON);
+    std::os::unix::fs::symlink(&elsewhere, dirs.socket_dir()).unwrap();
+    let mut daemon = Running(command.spawn().unwrap());
+
+    assert!(!daemon.wait().success());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+#[test]
+fn a_socket_directory_that_is_a_file_is_refused() {
+    let dirs = Dirs::new();
+    let mut command = dirs.command(DAEMON);
+    fs::write(dirs.socket_dir(), "").unwrap();
+    let mut daemon = Running(command.spawn().unwrap());
+
+    assert!(!daemon.wait().success());
+}
+
+#[test]
+fn a_runtime_directory_others_can_write_is_refused() {
+    let dirs = Dirs::new();
+    let mut command = dirs.command(DAEMON);
+    fs::set_permissions(dirs.runtime(), fs::Permissions::from_mode(0o777)).unwrap();
+    let mut daemon = Running(command.spawn().unwrap());
+
+    assert!(!daemon.wait().success());
+    assert!(!dirs.socket_dir().exists());
 }
 
 #[test]
