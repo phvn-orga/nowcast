@@ -45,7 +45,7 @@ pub(crate) struct Layout {
     root: PathBuf,
 }
 
-fn copy_files(from: &Path, to: &Path) {
+pub(crate) fn copy_files(from: &Path, to: &Path) {
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
@@ -185,19 +185,18 @@ pub async fn removing_the_link_deactivates<S: DiscoverySubject>() {
 /// An invalid file is left out; the valid ones still load.
 pub async fn an_invalid_file_is_ignored<S: DiscoverySubject>() {
     let layout = Layout::new();
-    layout.activate("forge.toml", "forge.toml");
-    layout.activate("invalid-undeclared-type.toml", "broken.toml");
+    // The broken file declares `forge`, so its link is named after it: the
+    // file is refused for being invalid, not for its link name.
+    layout.activate("minimal.toml", "minimal.toml");
+    layout.activate("invalid-undeclared-type.toml", "forge.toml");
     let discovery = S::start(layout.dirs(vec![])).await;
-    assert_eq!(names(&discovery), vec!["forge"]);
+    assert_eq!(names(&discovery), vec!["minimal"]);
 }
 
-/// Two files declaring the same `name` are both refused: neither wins.
-pub async fn a_shared_name_refuses_both<S: DiscoverySubject>() {
+/// A link not named `<name>.toml` is refused; the others still load.
+pub async fn a_link_named_otherwise_is_refused<S: DiscoverySubject>() {
     let layout = Layout::new();
-    let copy = layout.path("repo/forge-copy.toml");
-    std::fs::copy(layout.path("repo/forge.toml"), &copy).unwrap();
-    layout.activate("forge.toml", "forge.toml");
-    layout.activate("forge-copy.toml", "forge-copy.toml");
+    layout.activate("forge.toml", "other.toml");
     layout.activate("minimal.toml", "minimal.toml");
     let discovery = S::start(layout.dirs(vec![])).await;
     assert_eq!(names(&discovery), vec!["minimal"]);
@@ -221,7 +220,7 @@ macro_rules! discovery_suite {
                     a_new_link_is_followed,
                     removing_the_link_deactivates,
                     an_invalid_file_is_ignored,
-                    a_shared_name_refuses_both,
+                    a_link_named_otherwise_is_refused,
                 ]
             );
         }

@@ -13,7 +13,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 pub fn frame(value: &Value) -> Vec<u8> {
     let mut body = Vec::new();
     rmpv::encode::write_value(&mut body, value).expect("writing to a Vec");
-    let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+    let len = u32::try_from(body.len()).expect("a frame body fits a u32 length");
+    let mut frame = len.to_le_bytes().to_vec();
     frame.extend(body);
     frame
 }
@@ -39,21 +40,33 @@ pub fn unframe(frame: &[u8]) -> Result<Value, String> {
     Ok(value)
 }
 
-/// Reads one frame from a stream, `None` at a clean end of stream.
+/// Reads one frame from a stream, `None` at a clean end of stream. The stream
+/// ending inside a frame, its length included, is an error.
 pub async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Option<Vec<u8>>, String> {
     let mut len = [0u8; 4];
-    match reader.read_exact(&mut len).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+    let mut filled = 0;
+    while filled < len.len() {
+        match reader.read(&mut len[filled..]).await {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(format!("truncated length: {filled} of 4 bytes")),
+            Ok(n) => filled += n,
+            Err(e) => return Err(e.to_string()),
+        }
     }
-    let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| format!("truncated frame: {e}"))?;
+    let body_len = u32::from_le_bytes(len) as usize;
     let mut frame = len.to_vec();
-    frame.extend(body);
+    // Grows with the bytes actually read, so a bogus length allocates nothing.
+    (&mut *reader)
+        .take(body_len as u64)
+        .read_to_end(&mut frame)
+        .await
+        .map_err(|e| e.to_string())?;
+    if frame.len() != len.len() + body_len {
+        return Err(format!(
+            "truncated frame: the length says {body_len} bytes, {} follow",
+            frame.len() - len.len()
+        ));
+    }
     Ok(Some(frame))
 }
 

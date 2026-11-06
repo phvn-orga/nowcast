@@ -218,7 +218,7 @@ impl Client {
         );
         Sse {
             body: response.into_body(),
-            buffer: String::new(),
+            buffer: Vec::new(),
         }
     }
 }
@@ -247,7 +247,19 @@ struct SseEvent {
 
 struct Sse {
     body: Incoming,
-    buffer: String,
+    /// Raw bytes, so that a character split across two chunks stays whole.
+    buffer: Vec<u8>,
+}
+
+/// Drops the `\r` of every `\r\n`.
+fn crlf_to_lf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
+            out.push(b);
+        }
+    }
+    out
 }
 
 impl Sse {
@@ -255,10 +267,12 @@ impl Sse {
     async fn next_within(&mut self, within: Duration) -> Option<SseEvent> {
         timeout(within, async {
             loop {
-                let normalized = self.buffer.replace("\r\n", "\n");
-                if let Some(end) = normalized.find("\n\n") {
-                    self.buffer = normalized[end + 2..].to_owned();
-                    if let Some(event) = parse_event(&normalized[..end]) {
+                let normalized = crlf_to_lf(&self.buffer);
+                if let Some(end) = normalized.windows(2).position(|w| w == b"\n\n") {
+                    let block = std::str::from_utf8(&normalized[..end]).expect("SSE is UTF-8");
+                    let event = parse_event(block);
+                    self.buffer = normalized[end + 2..].to_vec();
+                    if let Some(event) = event {
                         return event;
                     }
                     continue;
@@ -270,7 +284,7 @@ impl Sse {
                     .expect("the stream stays open")
                     .expect("a readable stream");
                 if let Ok(data) = frame.into_data() {
-                    self.buffer.push_str(std::str::from_utf8(&data).unwrap());
+                    self.buffer.extend_from_slice(&data);
                 }
             }
         })
