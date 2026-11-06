@@ -248,14 +248,22 @@ service → {"v":1,"t":"ack","req":7}
 
 1. **Lancement** à la première souscription : le service envoie `hello` et attend
    `ready` dans un délai de 5 s. Sans réponse, la brique est arrêtée et
-   la souscription échoue (`503` `brick_unavailable` côté client).
+   la souscription échoue (`503` `brick_unavailable` côté client). Une brique prête
+   répond ensuite à chaque `subscribe` en 10 s au plus, sinon la souscription échoue
+   de la même façon.
 2. **Arrêt** quand plus aucun flux n'a d'abonné, après un délai de grâce
    de 30 s qui évite de relancer une brique à chaque abonnement
-   éphémère. Le service envoie `shutdown`, puis `SIGTERM`, puis `SIGKILL`, chacun après
-   un délai.
+   éphémère. Le service envoie `shutdown`, puis `SIGTERM` 5 s plus tard si la brique
+   tourne encore, puis `SIGKILL` 5 s après. Les signaux visent le groupe de processus
+   de la brique, ses enfants compris.
 3. **Plantage** : chaque flux de la brique reçoit `flow-error`. Tant qu'il reste des
-   abonnés, le service relance la brique avec une attente croissante entre les
-   tentatives, puis renvoie un `subscribe` pour chaque flux vivant.
+   abonnés, le service relance la brique après une attente de 1 s, doublée à chaque
+   plantage d'affilée jusqu'à 30 s, puis renvoie un `subscribe` pour chaque flux
+   vivant. Le compte des plantages d'affilée repart de zéro quand la brique a tenu
+   60 s après `ready`. Après 8 relances d'affilée, le service abandonne : le
+   plantage suivant termine tous les flux de la brique, chacun avec un `flow-error`.
+   Un abonnement ultérieur relance la brique à neuf, avec ses 8 relances.
+   Pendant l'attente, une nouvelle souscription échoue en `503` `brick_unavailable`.
 
 ## 5. La déclaration d'un type de client
 
@@ -296,9 +304,3 @@ connexion. Si aucun ne correspond, l'ancrage est le processus connecté
 lui-même : ses abonnements meurent avec lui, et il déclare sa propre session comme
 n'importe quel client. C'est le cas de `nowcast watch` lancé depuis un terminal. Un
 refus ne protégerait rien, puisque tout se passe sous le même UID.
-
-## À trancher
-
-- Les délais entre `shutdown`, `SIGTERM` et `SIGKILL` à l'arrêt d'une brique.
-- Les paramètres de l'attente croissante entre deux relances d'une brique plantée
-  (première attente, plafond, abandon éventuel).
