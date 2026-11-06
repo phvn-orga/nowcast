@@ -810,6 +810,15 @@ dependencies = [
 [[package]]
 name = "nowcast-sessions"
 version = "0.0.0"
+dependencies = [
+ "nowcast-conformance",
+ "nowcast-identity",
+ "nowcast-router",
+ "nowcast-traits",
+ "nowcast-types",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "nowcast-supervisor"
