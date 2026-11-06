@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     /// Sends `publish` with these fields as is, whatever the flow, the type
     /// or the detail. Answered with [`Reply::Acked`] or [`Reply::Refused`]
-    /// once the service answers.
+    /// once the service answers, or with [`Reply::Invalid`] when the message
+    /// would not fit in a frame.
     Publish {
         flow: String,
         #[serde(rename = "type")]

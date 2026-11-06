@@ -24,3 +24,11 @@ impl BrickSubject for TestBrick {
 }
 
 nowcast_conformance::brick_suite!(TestBrick);
+
+/// Tests of other packages find the binary where Cargo built it for this one.
+#[test]
+fn binary_is_where_cargo_builds_it() {
+    let built = std::path::Path::new(env!("CARGO_BIN_EXE_nowcast-test-brick"));
+    let found = nowcast_test_brick::binary().expect("a path");
+    assert_eq!(found.canonicalize().unwrap(), built.canonicalize().unwrap());
+}

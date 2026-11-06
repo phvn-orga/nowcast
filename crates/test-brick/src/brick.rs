@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use nowcast_codec::encode_brick;
 use nowcast_test_brick::wire::{Command, Received, Reply};
 use nowcast_test_brick::{CRASH_STATUS, KIND, Mode, REFUSAL_CODE, TYPE};
 use nowcast_types::{BrickMessage, FlowId, RequestId, ServiceMessage};
@@ -112,21 +113,28 @@ impl Brick {
             } => match FlowId::new(flow) {
                 Ok(flow) => {
                     let req = self.next_req();
-                    self.awaiting = Some(req);
-                    vec![Effect::Send(BrickMessage::Publish {
+                    let msg = BrickMessage::Publish {
                         req,
                         flow,
                         data_type,
                         detail,
-                    })]
+                    };
+                    if let Err(e) = encode_brick(&msg) {
+                        return invalid(e.to_string());
+                    }
+                    self.awaiting = Some(req);
+                    vec![Effect::Send(msg)]
                 }
                 Err(e) => invalid(e.to_string()),
             },
             Command::FlowError { flow, message } => match FlowId::new(flow) {
-                Ok(flow) => vec![
-                    Effect::Send(BrickMessage::FlowError { flow, message }),
-                    Effect::Reply(Reply::Done),
-                ],
+                Ok(flow) => {
+                    let msg = BrickMessage::FlowError { flow, message };
+                    if let Err(e) = encode_brick(&msg) {
+                        return invalid(e.to_string());
+                    }
+                    vec![Effect::Send(msg), Effect::Reply(Reply::Done)]
+                }
                 Err(e) => invalid(e.to_string()),
             },
             Command::Received => vec![Effect::Reply(Reply::Received {
@@ -179,6 +187,7 @@ fn invalid(message: String) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
+    use nowcast_codec::MAX_FRAME_LEN;
     use nowcast_types::{BrickName, PublishErrorCode};
 
     use super::*;
@@ -330,6 +339,30 @@ mod tests {
                 ),
                 "{line}"
             );
+        }
+        assert!(!brick.is_awaiting());
+    }
+
+    #[test]
+    fn a_message_too_large_for_a_frame_gets_invalid() {
+        let mut brick = Brick::new(Mode::Ready);
+        let too_long = "x".repeat(MAX_FRAME_LEN);
+        for command in [
+            Command::FlowError {
+                flow: "a".into(),
+                message: too_long.clone(),
+            },
+            Command::Publish {
+                flow: "a".into(),
+                data_type: too_long,
+                detail: vec![],
+            },
+        ] {
+            let line = serde_json::to_string(&command).unwrap();
+            assert!(matches!(
+                brick.on_control(&line)[..],
+                [Effect::Reply(Reply::Invalid { .. })]
+            ));
         }
         assert!(!brick.is_awaiting());
     }

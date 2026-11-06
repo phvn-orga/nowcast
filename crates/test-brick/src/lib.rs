@@ -39,7 +39,7 @@
 //!
 //! [`manifest`] is the declaration file shipped with the crate. Its command
 //! is the bare program name `nowcast-test-brick`, looked up in the service's
-//! `PATH`.
+//! `PATH`. [`binary`] gives the path of the built program.
 //!
 //! # From a test
 //!
@@ -83,6 +83,24 @@ pub const CONFIG_STATUS: i32 = 2;
 /// The declaration file of the test brick, with its schemas next to it.
 pub fn manifest() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/brick/probe.toml"))
+}
+
+/// Where Cargo puts the `nowcast-test-brick` binary for the running test: the
+/// profile directory, parent of the `deps` directory holding the test
+/// executable. It is the directory to put on the service's `PATH` for
+/// [`manifest`], or the command of a declaration.
+///
+/// Cargo builds the binary only when it builds this package's own tests
+/// (`cargo test --workspace` does) or on `cargo build -p nowcast-test-brick`:
+/// a test of another package must make sure it exists and is up to date.
+/// `None` when the running executable has no such parent.
+pub fn binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let profile = exe.parent()?.parent()?;
+    Some(profile.join(format!(
+        "nowcast-test-brick{}",
+        std::env::consts::EXE_SUFFIX
+    )))
 }
 
 /// How the brick answers the service, fixed for the life of the process.
