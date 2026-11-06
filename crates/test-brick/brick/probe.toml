@@ -1,0 +1,21 @@
+# The test brick declared as the probe of the conformance suites
+# (nowcast-conformance, module probe). Activate it by linking this file as
+# `probe.toml` in the bricks directory. The command is a bare program name,
+# looked up in the service's PATH: put the directory of the built
+# `nowcast-test-brick` binary on it.
+manifest_version = 1
+name = "probe"
+version = "0.1.0"
+description = "Publishes on demand, for conformance tests."
+protocol = 1
+
+[run]
+command = ["nowcast-test-brick"]
+
+[subscriptions.item]
+description = "One item, named by its id."
+schema = "schemas/item.json"
+publishes = "probe.item/v1"
+
+[types."probe.item/v1"]
+schema = "schemas/probe-item-v1.json"
