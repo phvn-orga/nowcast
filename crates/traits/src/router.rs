@@ -41,7 +41,8 @@ impl std::error::Error for UnknownSubscription {}
 pub trait Router: Send + Sync + 'static {
     /// Subscribes `anchor` to `flow`, creating the flow if needed. Every call
     /// issues a new subscription, even for the same anchor and flow.
-    /// Returns the flow's last value along with it.
+    /// Returns the flow's last value along with it. The supervisor makes
+    /// these calls, from [`crate::Supervisor::resolve`].
     fn subscribe(&self, anchor: AnchorId, flow: QualifiedFlowId)
     -> (SubscriptionId, Option<Event>);
 

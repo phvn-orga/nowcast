@@ -214,20 +214,29 @@ where
             })?;
         params::validate(&kind.schema, &request.params, &request.kind)?;
         let params = serde_json::to_vec(&request.params).expect("a JSON value always serializes");
-        let flow = self
+        // The supervisor makes the router subscription itself, in order with
+        // what the brick publishes.
+        let resolved = self
             .supervisor
-            .resolve(&brick, &request.kind, &params)
+            .resolve(anchor, &brick, &request.kind, &params)
             .await
             .map_err(ApiError::from)?;
-        let (subscription, last) = self.router.subscribe(anchor, flow.clone());
-        let last = last.as_ref().and_then(|event| {
+        // The anchor may have died while its brick was resolving. Its session
+        // is forgotten before the router drops the anchor, so a subscription
+        // made after that drop is seen here and undone; one made before it is
+        // already gone with the anchor.
+        if self.sessions.current(anchor).is_none() {
+            let _ = self.router.unsubscribe(anchor, &resolved.subscription);
+            return Err(HttpError::session_required());
+        }
+        let last = resolved.last.as_ref().and_then(|event| {
             CloudEvent::new(event)
                 .inspect_err(|e| tracing::warn!("answering `last: null`: {e}"))
                 .ok()
         });
         let body = to_line(&Subscribed {
-            subscription: subscription.as_str(),
-            flow: flow.to_string(),
+            subscription: resolved.subscription.as_str(),
+            flow: resolved.flow.to_string(),
             last,
         });
         Ok(json(StatusCode::CREATED, body))
