@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
 ///
 /// Exit status: 0 on success, 1 when the service answers with an error (its
 /// code is printed on stderr), 2 on invalid usage, 3 when the service cannot
-/// be reached, 4 when the service answers outside the contract.
+/// be reached or gives no answer within 10 s, 4 when the service answers
+/// outside the contract.
 #[derive(Debug, Parser)]
 #[command(name = "nowcast", version)]
 pub struct Cli {

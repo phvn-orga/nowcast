@@ -4,7 +4,9 @@
 //! session by their anchor process, not by their connection.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -19,14 +21,37 @@ use tokio::net::UnixStream;
 use crate::error::CliError;
 use crate::sse::{SseEvent, SseParser};
 
+/// How long a request may wait for its whole answer, or a stream for its
+/// headers. A healthy service answers well within it: the slowest call,
+/// a subscription, waits at most 5 s for its brick (contract section 4).
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Client {
     socket: PathBuf,
     session: SessionId,
+    timeout: Duration,
 }
 
 impl Client {
     pub fn new(socket: PathBuf, session: SessionId) -> Self {
-        Self { socket, session }
+        Self {
+            socket,
+            session,
+            timeout: ANSWER_TIMEOUT,
+        }
+    }
+
+    /// Fails with [`CliError::Unreachable`] when `future` takes longer than
+    /// the answer timeout: a stuck service must not hold a hook forever.
+    async fn within<T>(
+        &self,
+        future: impl Future<Output = Result<T, CliError>>,
+    ) -> Result<T, CliError> {
+        tokio::time::timeout(self.timeout, future)
+            .await
+            .unwrap_or_else(|_| {
+                Err(self.unreachable(format!("no answer within {} s", self.timeout.as_secs_f32())))
+            })
     }
 
     /// Declares the session. Every other call goes through the returned
@@ -85,15 +110,18 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<Reply, CliError> {
-        let response = self.send(method, path, body, &[]).await?;
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| self.unreachable(e))?
-            .to_bytes();
-        Ok(Reply { status, body })
+        self.within(async {
+            let response = self.send(method, path, body, &[]).await?;
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| self.unreachable(e))?
+                .to_bytes();
+            Ok(Reply { status, body })
+        })
+        .await
     }
 
     fn unreachable(&self, reason: impl ToString) -> CliError {
@@ -161,20 +189,28 @@ impl Session<'_> {
         if let Some(id) = last_event_id {
             headers.push(("last-event-id", id));
         }
+        // Only the headers and an error body are bounded: an open stream
+        // may stay quiet for as long as no flow publishes.
         let response = self
             .client
-            .send(Method::GET, "/v1/stream", None, &headers)
+            .within(async {
+                let response = self
+                    .client
+                    .send(Method::GET, "/v1/stream", None, &headers)
+                    .await?;
+                if response.status() == StatusCode::OK {
+                    return Ok(response);
+                }
+                let status = response.status();
+                let body = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|e| self.client.unreachable(e))?
+                    .to_bytes();
+                Err(Reply { status, body }.into_error())
+            })
             .await?;
-        if response.status() != StatusCode::OK {
-            let status = response.status();
-            let body = response
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| self.client.unreachable(e))?
-                .to_bytes();
-            return Err(Reply { status, body }.into_error());
-        }
         let content_type = response
             .headers()
             .get(CONTENT_TYPE)
@@ -297,6 +333,48 @@ mod tests {
             status: StatusCode::from_u16(status).unwrap(),
             body: Bytes::from(body.to_owned()),
         }
+    }
+
+    /// A service that accepts connections and never answers.
+    fn stuck_service() -> (tempfile::TempDir, Client) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("nowcast.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let mut client = Client::new(socket, SessionId::new("s"));
+        client.timeout = Duration::from_millis(100);
+        (dir, client)
+    }
+
+    #[tokio::test]
+    async fn a_stuck_service_times_out() {
+        let (_dir, client) = stuck_service();
+        let error = tokio::time::timeout(Duration::from_secs(5), client.declare())
+            .await
+            .expect("the call gives up by itself")
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, CliError::Unreachable { ref reason, .. } if reason.contains("no answer")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_never_opens_times_out() {
+        let (_dir, client) = stuck_service();
+        let session = Session { client: &client };
+        let error = tokio::time::timeout(Duration::from_secs(5), session.stream(None))
+            .await
+            .expect("the stream gives up by itself")
+            .err()
+            .unwrap();
+        assert!(matches!(error, CliError::Unreachable { .. }), "{error:?}");
     }
 
     #[test]

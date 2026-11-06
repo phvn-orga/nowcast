@@ -21,7 +21,8 @@ pub enum CliError {
     Api { code: String, message: String },
     /// An argument the tool checks itself is invalid. No call was made.
     Usage(String),
-    /// The service cannot be reached, or the connection broke.
+    /// The service cannot be reached, the connection broke, or no answer came
+    /// in time.
     Unreachable { socket: PathBuf, reason: String },
     /// The service answered outside the contract.
     Protocol(String),
