@@ -1,0 +1,6 @@
+# Refused: the name differs from the file name.
+name = "other"
+description = "Mismatched"
+
+[anchor]
+exe = ["*/other"]

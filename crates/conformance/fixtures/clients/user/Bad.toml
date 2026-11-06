@@ -1,0 +1,6 @@
+# Refused: a name only allows [a-z0-9-].
+name = "Bad"
+description = "Bad name"
+
+[anchor]
+exe = ["*/bad"]

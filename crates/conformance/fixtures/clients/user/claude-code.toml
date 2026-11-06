@@ -1,0 +1,6 @@
+# Replaces the embedded declaration of the same name.
+name = "claude-code"
+description = "Claude Code sessions, user patterns"
+
+[anchor]
+exe = ["*/claude/versions/*", "*/claude-nightly/*"]

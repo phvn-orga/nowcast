@@ -123,7 +123,8 @@ fn api_error_codes() {
             "unknown_brick",
             "unknown_kind",
             "unknown_flow",
-            "brick_unavailable"
+            "brick_unavailable",
+            "subscription_refused"
         ]
     );
     for code in ApiErrorCode::ALL {

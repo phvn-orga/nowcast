@@ -1,0 +1,6 @@
+# A kind no declaration embeds.
+name = "codex"
+description = "Codex sessions"
+
+[anchor]
+exe = ["*/bin/codex"]
