@@ -155,13 +155,11 @@ function start($: $, session: string): Watch {
   let lastEventId: string | undefined
   void (async () => {
     let delay = FIRST_RESTART_MS
-    for (let restart = false; ; restart = true) {
+    for (;;) {
       const startedAt = await $.clock.now()
       if (stopped) return
       const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
       child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
-      // While no `watch` ran, the service may have restarted and forgotten.
-      if (restart) void subscribeAgain($)
       const why = await run($, child, () => stopped, id => (lastEventId = id))
       if (stopped) return
       await setStream($, { status: 'stopped', error: why })
@@ -255,7 +253,8 @@ async function onStatus($: $, status: Status): Promise<void> {
   if (status.status === 'connected') {
     const reconnections = stream.status === 'down' ? stream.reconnections + 1 : stream.reconnections
     await setStream($, { status: 'up', reconnections, error: null })
-    // The service may have restarted and forgotten the subscriptions.
+    // Each time the stream opens, after an outage or in a `watch` started
+    // again: the service may have restarted and forgotten the subscriptions.
     void subscribeAgain($)
   } else {
     await setStream($, { status: 'down', error: status.reason })

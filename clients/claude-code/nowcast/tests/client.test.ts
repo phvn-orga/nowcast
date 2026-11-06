@@ -214,8 +214,8 @@ test('after the stream comes back, a subscription the service forgot is made aga
   await call($, 'subscribe', PR)
 
   svc.restart()
-  w.child().stderr('nowcast: the service closed the stream; retrying\n')
-  w.child().stderr('nowcast: connected\n')
+  w.child().retrying('the service closed the stream')
+  w.child().connected()
   await w.clock.settle()
 
   expect(svc.known()).toEqual(['s-2'])
@@ -234,8 +234,8 @@ test('after the stream comes back, a subscription still known is left alone', pl
   await w.clock.settle()
   await call($, 'subscribe', PR)
 
-  w.child().stderr('nowcast: the service closed the stream; retrying\n')
-  w.child().stderr('nowcast: connected\n')
+  w.child().retrying('the service closed the stream')
+  w.child().connected()
   await w.clock.settle()
 
   expect(svc.known()).toEqual(['s-1'])
@@ -248,13 +248,20 @@ test('once `watch` is started again, forgotten subscriptions are made again', pl
   await $.session.start(START)
   await w.clock.settle()
   await call($, 'subscribe', PR)
+  // The value the subscription answered, which the stream also sends.
+  w.child().event('update', update(FLOW, '1', { number: 1 }))
+  await w.clock.settle()
 
   svc.restart()
   w.child().exit(1)
   await w.clock.advance(1_000)
-
   expect(w.children.length).toBe(2)
+  expect(w.child().lastEventId).toBe('1')
+  w.child().connected()
+  await w.clock.settle()
+
   expect(svc.known()).toEqual(['s-2'])
+  expect(w.flowWrites(FLOW).map(f => f.last?.id)).toEqual(['1', '2'])
 })
 
 test('a subscription ended is not made again', plugins, async ($, on) => {
@@ -266,8 +273,8 @@ test('a subscription ended is not made again', plugins, async ($, on) => {
   await call($, 'unsubscribe', { subscription: 's-1' })
 
   svc.restart()
-  w.child().stderr('nowcast: lost; retrying\n')
-  w.child().stderr('nowcast: connected\n')
+  w.child().retrying('lost')
+  w.child().connected()
   await w.clock.settle()
 
   expect(svc.known()).toEqual([])
