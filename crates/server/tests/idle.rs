@@ -190,6 +190,35 @@ async fn a_subscription_keeps_the_server_running_until_its_anchor_dies() {
 }
 
 #[tokio::test]
+async fn a_subscription_keeps_the_server_running_until_it_is_deleted() {
+    let mut harness = start(IDLE);
+    let (status, _) = request(&harness.socket, "PUT", "/v1/session", r#"{"id":"s"}"#).await;
+    assert_eq!(status, 204);
+    let body = json!({ "brick": probe::NAME, "kind": probe::KIND, "params": { "id": "a" } });
+    let (status, body) = request(
+        &harness.socket,
+        "POST",
+        "/v1/subscriptions",
+        &body.to_string(),
+    )
+    .await;
+    assert_eq!(status, 201, "{body:?}");
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    harness.keeps_serving().await;
+
+    let id = body["subscription"].as_str().unwrap();
+    let path = format!("/v1/subscriptions/{id}");
+    let (status, _) = request(&harness.socket, "DELETE", &path, "").await;
+    assert_eq!(status, 204);
+    let deleted = Instant::now();
+    let returned = harness.returned().await;
+    assert!(
+        returned - deleted >= IDLE,
+        "the delay starts at the deletion"
+    );
+}
+
+#[tokio::test]
 async fn a_flow_ended_with_its_subscribers_lets_the_server_return() {
     let mut harness = start(IDLE);
     let flow = subscribe(&harness.socket, "a").await;

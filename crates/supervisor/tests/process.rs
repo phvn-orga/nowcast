@@ -448,15 +448,17 @@ async fn sigkill_ends_a_brick_that_ignores_sigterm() {
 
 #[tokio::test]
 async fn shutdown_stops_the_test_brick_through_its_protocol() {
-    let config = fast();
-    let harness = Harness::new(Mode::Ready, config.clone());
+    // `SIGTERM` would come after the test's wait: the brick must exit on
+    // `shutdown` alone, whatever the machine's load.
+    let config = Config {
+        terminate_after: WAIT * 2,
+        ..fast()
+    };
+    let harness = Harness::new(Mode::Ready, config);
     let (brick, _stream) = harness.subscribed("a").await;
-    let start = Instant::now();
     timeout(WAIT, harness.supervisor.shutdown())
         .await
-        .expect("the brick stops");
-    // It exited on `shutdown`: no signal is sent that early.
-    assert!(start.elapsed() < config.terminate_after);
+        .expect("the brick stops on shutdown");
     exited(brick).await;
     harness.no_launch().await;
 }
