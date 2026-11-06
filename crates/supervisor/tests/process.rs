@@ -299,13 +299,91 @@ fn kill_pid_in(file: &Path) {
     }
 }
 
+/// Whether the process whose pid is in `file` still runs: a zombie does not.
+fn runs(file: &Path) -> bool {
+    let pid = std::fs::read_to_string(file).expect("the pid is written");
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+/// Waits for the process whose pid is in `file` to end.
+async fn ends(file: &Path) {
+    let ended = timeout(WAIT, async {
+        while runs(file) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    kill_pid_in(file);
+    assert!(ended.is_ok(), "the process still runs");
+}
+
+/// Waits for `file` to hold something.
+async fn written(file: &Path) {
+    timeout(WAIT, async {
+        while std::fs::metadata(file).map_or(true, |m| m.len() == 0) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the file is written");
+}
+
+/// A `ready` frame: length 12, then the map {"v": 1, "t": "ready"}, for
+/// `printf`.
+const READY_FRAME: &str = r"\014\000\000\000\202\241v\001\241t\245ready";
+
+#[tokio::test]
+async fn a_kill_reaches_the_processes_the_brick_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let mut declaration = shell(r#"sleep 1000 & echo $! > "$0"; wait"#, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    written(&pid_file).await;
+    connection.process.kill();
+    assert_eq!(
+        timeout(WAIT, connection.from_brick.recv()).await.unwrap(),
+        None
+    );
+    ends(&pid_file).await;
+}
+
+#[tokio::test]
+async fn a_process_writing_after_the_brick_exited_does_not_hold_its_output_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("writer.pid");
+    // The writer leaves the brick's process group, so it outlives the brick.
+    let script = format!(
+        r#"setsid sh -c 'echo $$ > "$0"; while :; do printf "{READY_FRAME}"; done' "$0" &
+        while [ ! -s "$0" ]; do sleep 0.01; done; exit 3"#
+    );
+    let mut declaration = shell(&script, dir.path());
+    declaration
+        .command
+        .push(pid_file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    let ended = timeout(WAIT, async {
+        while connection.from_brick.recv().await.is_some() {}
+    })
+    .await;
+    kill_pid_in(&pid_file);
+    assert!(ended.is_ok(), "the output stays open");
+}
+
 #[tokio::test]
 async fn a_brick_ends_when_it_exits_even_if_its_child_holds_its_output() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("child.pid");
-    // A `ready` frame: length 12, then the map {"v": 1, "t": "ready"}.
-    let ready = r"\014\000\000\000\202\241v\001\241t\245ready";
-    let script = format!(r#"sleep 1000 & echo $! > "$0"; printf '{ready}'; exit 3"#);
+    let script = format!(r#"sleep 1000 & echo $! > "$0"; printf '{READY_FRAME}'; exit 3"#);
     let mut declaration = shell(&script, dir.path());
     declaration
         .command
@@ -318,12 +396,13 @@ async fn a_brick_ends_when_it_exits_even_if_its_child_holds_its_output() {
         )
     })
     .await;
-    kill_pid_in(&pid_file);
     // What the brick wrote before exiting still arrives, then the end.
     assert_eq!(
         received.expect("the exit ends the output"),
         (Some(BrickMessage::Ready), None)
     );
+    // What the brick left behind is killed with it.
+    ends(&pid_file).await;
 }
 
 #[tokio::test]
@@ -382,8 +461,9 @@ impl Write for Captured {
     }
 }
 
-#[tokio::test]
-async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_logged() {
+/// Captures the logs of this thread until the guard drops. The test runtime
+/// runs every task on this thread.
+fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
     let captured = Captured::default();
     let writer = captured.clone();
     // Another crate of the workspace may enable the `ansi` feature, which
@@ -392,8 +472,48 @@ async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
-    // The test runtime runs every task on this thread.
-    let _guard = tracing::subscriber::set_default(subscriber);
+    (captured, tracing::subscriber::set_default(subscriber))
+}
+
+#[tokio::test]
+async fn a_long_stderr_line_is_logged_in_bounded_chunks() {
+    let (captured, _guard) = capture_logs();
+    let dir = tempfile::tempdir().unwrap();
+    let script = "head -c 20000 /dev/zero | tr '\\0' x >&2";
+    let mut connection = ProcessLauncher.launch(&shell(script, dir.path())).unwrap();
+    assert_eq!(
+        timeout(WAIT, connection.from_brick.recv()).await.unwrap(),
+        None
+    );
+    // Each chunk is one event: the run of `x` it carries.
+    let chunks = || -> Vec<usize> {
+        let text = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        text.lines()
+            .filter_map(|l| {
+                l.split_whitespace()
+                    .find(|word| word.bytes().all(|b| b == b'x'))
+            })
+            .map(str::len)
+            .collect()
+    };
+    let logged = async {
+        while chunks().iter().sum::<usize>() < 20000 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+    timeout(WAIT, logged)
+        .await
+        .expect("the whole line is logged");
+    assert!(
+        chunks().iter().all(|&len| len <= 8 * 1024),
+        "{:?}",
+        chunks()
+    );
+}
+
+#[tokio::test]
+async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_logged() {
+    let (captured, _guard) = capture_logs();
 
     let dir = tempfile::tempdir().unwrap();
     let mut declaration = shell(r#"echo "in $(pwd) with $PROBE_VAR" >&2"#, dir.path());

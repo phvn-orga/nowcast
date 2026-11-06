@@ -1,23 +1,34 @@
 use std::io;
 use std::process::Stdio;
+use std::time::Duration;
 
 use nowcast_codec::{CodecError, read_brick, write_service};
 use nowcast_traits::{BrickConnection, BrickDeclaration, BrickLauncher, BrickProcess};
 use nowcast_types::{BrickMessage, BrickName, ServiceMessage};
-use rustix::process::{Pid, Signal as RawSignal, kill_process};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal as RawSignal, kill_process_group};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::TryRecvError;
+use tokio::time::{Instant, timeout_at};
 use tracing::{debug, info, warn};
 
 /// Launches bricks as child processes speaking the brick protocol over their
 /// standard input and output. Each line of their standard error becomes an
-/// `info` event of the brick, for the journal.
+/// `info` event of the brick, for the journal; a line over 8 KiB is logged
+/// in pieces of 8 KiB.
+///
+/// Each brick runs in its own process group, which receives the signals: a
+/// brick launched through a wrapper (`sh -c`, `npx`, `uv run`) stops with
+/// everything it started. Once the brick's process has exited, what is left
+/// in its group is killed, so that a relaunch never meets an earlier
+/// instance.
 ///
 /// The connection's `from_brick` closes once the process has exited, so that
-/// its end means the process is gone. The exit ends the output even if a
-/// process the brick spawned still holds the pipe. A brick
+/// its end means the process is gone. The exit ends the output even if
+/// another process still holds the pipe. A brick
 /// whose output cannot be read any more (a cut frame, an oversized one) is
 /// killed. A frame that reads whole but does not decode is logged and
 /// skipped.
@@ -60,6 +71,7 @@ impl BrickLauncher for ProcessLauncher {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()?;
         let piped = "the standard streams are piped";
@@ -67,6 +79,11 @@ impl BrickLauncher for ProcessLauncher {
         let stdout = child.stdout.take().expect(piped);
         let stderr = child.stderr.take().expect(piped);
         info!(brick = %brick.name, pid = child.id(), "brick launched");
+        // The brick leads its own group: the group id is its pid.
+        let group = child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(Pid::from_raw);
 
         let (to_brick, outgoing) = unbounded_channel();
         let (incoming, from_brick) = unbounded_channel();
@@ -82,7 +99,7 @@ impl BrickLauncher for ProcessLauncher {
             signals.clone(),
             exited,
         ));
-        tokio::spawn(wait(name.clone(), child, signal_rx, exited_tx));
+        tokio::spawn(wait(name.clone(), child, group, signal_rx, exited_tx));
         Ok(BrickConnection {
             to_brick,
             from_brick,
@@ -106,13 +123,16 @@ async fn write(
     }
 }
 
-/// Reads the brick's messages until its output ends or the process exits,
-/// whichever comes first, then holds the channel open until the process has
-/// exited.
+/// How long the output is still read once the process has exited, for what
+/// it wrote before exiting.
+const DRAIN: Duration = Duration::from_millis(100);
+
+/// Reads the brick's messages until its output ends, then holds the channel
+/// open until the process has exited.
 ///
-/// The exit ends the output even if a process the brick spawned still holds
-/// the pipe. What the brick wrote before exiting is still read: the read
-/// goes first while the pipe holds whole frames.
+/// The exit ends the output even if another process still holds the pipe,
+/// and even if it keeps writing: from the exit on, the output is read for
+/// [`DRAIN`] at most, which lets through what the brick wrote before exiting.
 async fn read(
     brick: BrickName,
     stdout: ChildStdout,
@@ -121,12 +141,28 @@ async fn read(
     mut exited: oneshot::Receiver<()>,
 ) {
     let mut stdout = BufReader::new(stdout);
+    let mut drain_until = None;
     loop {
-        let read = tokio::select! {
-            biased;
-            read = read_brick(&mut stdout) => read,
-            // Cuts at most a frame the brick never finished writing.
-            _ = &mut exited => return,
+        // Checked on every message, so that a writer that never pauses does
+        // not hide the exit.
+        if drain_until.is_none() && !matches!(exited.try_recv(), Err(TryRecvError::Empty)) {
+            drain_until = Some(Instant::now() + DRAIN);
+        }
+        let read = match drain_until {
+            // A read always ready would never time out.
+            Some(deadline) if Instant::now() >= deadline => return,
+            Some(deadline) => match timeout_at(deadline, read_brick(&mut stdout)).await {
+                Ok(read) => read,
+                // Cuts at most a frame the brick never finished writing.
+                Err(_) => return,
+            },
+            None => tokio::select! {
+                read = read_brick(&mut stdout) => read,
+                _ = &mut exited => {
+                    drain_until = Some(Instant::now() + DRAIN);
+                    continue;
+                }
+            },
         };
         match read {
             Ok(Some(msg)) => {
@@ -144,8 +180,15 @@ async fn read(
             Err(e) => warn!(brick = %brick, "invalid message skipped: {e}"),
         }
     }
-    let _ = exited.await;
+    if drain_until.is_none() {
+        let _ = exited.await;
+    }
 }
+
+/// The longest piece of a stderr line logged as one event. A longer line is
+/// logged in pieces, so that a brick cannot make the service hold an
+/// unbounded line.
+const MAX_LOG_LINE: u64 = 8 * 1024;
 
 /// Forwards each line of the brick's standard error to the journal.
 async fn log(brick: BrickName, stderr: ChildStderr) {
@@ -153,7 +196,8 @@ async fn log(brick: BrickName, stderr: ChildStderr) {
     let mut line = Vec::new();
     loop {
         line.clear();
-        match stderr.read_until(b'\n', &mut line).await {
+        let mut piece = (&mut stderr).take(MAX_LOG_LINE);
+        match piece.read_until(b'\n', &mut line).await {
             Ok(0) | Err(_) => return,
             Ok(_) => {
                 let text = String::from_utf8_lossy(&line);
@@ -163,10 +207,12 @@ async fn log(brick: BrickName, stderr: ChildStderr) {
     }
 }
 
-/// Waits for the process to exit, sending it the signals asked for meanwhile.
+/// Waits for the process to exit, sending its group the signals asked for
+/// meanwhile, then kills what is left in the group.
 async fn wait(
     brick: BrickName,
     mut child: Child,
+    group: Option<Pid>,
     mut signals: UnboundedReceiver<Signal>,
     exited: oneshot::Sender<()>,
 ) {
@@ -175,12 +221,8 @@ async fn wait(
         tokio::select! {
             status = child.wait() => break status,
             signal = signals.recv(), if listening => match signal {
-                Some(Signal::Term) => terminate(&brick, &child),
-                Some(Signal::Kill) => {
-                    if let Err(e) = child.start_kill() {
-                        warn!(brick = %brick, "cannot kill the brick: {e}");
-                    }
-                }
+                Some(Signal::Term) => signal_group(&brick, group, RawSignal::TERM),
+                Some(Signal::Kill) => signal_group(&brick, group, RawSignal::KILL),
                 None => listening = false,
             },
         }
@@ -189,19 +231,19 @@ async fn wait(
         Ok(status) => info!(brick = %brick, %status, "brick exited"),
         Err(e) => warn!(brick = %brick, "cannot wait for the brick: {e}"),
     }
+    // A group id stays taken while any process is in the group, so the
+    // brick's leftovers are still the ones reached.
+    signal_group(&brick, group, RawSignal::KILL);
     let _ = exited.send(());
 }
 
-fn terminate(brick: &BrickName, child: &Child) {
-    // Not reaped yet, as `wait` has not returned: the pid is still the brick's.
-    let Some(pid) = child
-        .id()
-        .and_then(|id| i32::try_from(id).ok())
-        .and_then(Pid::from_raw)
-    else {
+fn signal_group(brick: &BrickName, group: Option<Pid>, signal: RawSignal) {
+    let Some(group) = group else {
         return;
     };
-    if let Err(e) = kill_process(pid, RawSignal::TERM) {
-        warn!(brick = %brick, "cannot terminate the brick: {e}");
+    match kill_process_group(group, signal) {
+        // Nobody is left in the group.
+        Ok(()) | Err(Errno::SRCH) => {}
+        Err(e) => warn!(brick = %brick, "cannot signal the brick's group: {e}"),
     }
 }

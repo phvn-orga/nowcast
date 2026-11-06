@@ -585,6 +585,50 @@ pub async fn a_flow_left_while_subscribed_again_stays_served<S: SupervisorSubjec
     assert_eq!(world.router.subscribers(&qualified("a")), 1);
 }
 
+/// Of two subscriptions to the same flow in flight together, the first one
+/// abandoned does not release the flow under the second: the brick never
+/// receives `release` after the second `subscribe`, and the second subscriber
+/// gets the flow's values.
+pub async fn an_abandoned_subscription_does_not_release_a_flow_subscribed_again<
+    S: SupervisorSubject,
+>() {
+    let world = world::<S>();
+    let first = world.resolve_as(A, "a");
+    let mut brick = world.ready_brick().await;
+    let ServiceMessage::Subscribe { req: req1, .. } = recv(&mut brick).await else {
+        panic!("expected subscribe");
+    };
+    let second = world.resolve_as(AnchorId(2), "a");
+    let ServiceMessage::Subscribe { req: req2, .. } = recv(&mut brick).await else {
+        panic!("expected subscribe");
+    };
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    for req in [req1, req2] {
+        brick
+            .to_service
+            .send(BrickMessage::Subscribed {
+                req,
+                flow: flow("a"),
+            })
+            .unwrap();
+    }
+    assert_eq!(flow_of(second).await, Ok(qualified("a")));
+    let mut stream = world.router.stream(AnchorId(2), None);
+    publish(&mut brick, 1, "a", probe::TYPE, b"{}").await;
+    // Anything sent since the second `subscribe`, `release` included, comes
+    // before the answer to this publish.
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::Ack { req: RequestId(1) }
+    );
+    assert!(matches!(
+        timeout(LONG, stream.recv()).await,
+        Ok(Some(StreamEvent::Update(_)))
+    ));
+    assert_eq!(world.router.subscribers(&qualified("a")), 1);
+}
+
 /// A brick discovery does not hold cannot be subscribed to.
 pub async fn an_unknown_brick_is_refused<S: SupervisorSubject>() {
     let world = world::<S>();
@@ -629,6 +673,7 @@ macro_rules! supervisor_suite {
                     a_value_published_right_after_subscribed_is_not_lost,
                     an_abandoned_subscription_leaves_no_subscriber,
                     a_flow_left_while_subscribed_again_stays_served,
+                    an_abandoned_subscription_does_not_release_a_flow_subscribed_again,
                     an_unknown_brick_is_refused,
                 ]
             );

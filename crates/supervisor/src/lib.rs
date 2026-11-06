@@ -20,17 +20,19 @@
 //!   streams. A client gone by then gets no subscription, and one made but
 //!   never read is undone. A brick that does not answer in time makes the
 //!   subscription fail as unavailable.
-//! - **A flow left while subscribed again**: a flow that loses its last
-//!   subscriber while a `subscribe` is in flight is released only once no
-//!   `subscribe` is, and only if still without a subscriber, so that the
-//!   brick never gets `release` after a `subscribe` it took for that flow.
+//! - **A flow left while subscribed again**: every release (a flow that loses
+//!   its last subscriber, an answer for a client gone or for a request no
+//!   longer in flight) waits while a `subscribe` is in flight, and happens
+//!   only if the flow is still without a subscriber, so that the brick never
+//!   gets `release` after a `subscribe` it took for that flow.
 //! - **Publications**: each `publish` is answered with `ack`, or with `error`
 //!   for an unknown or released flow (`unknown_flow`), a type missing from the
 //!   declaration (`undeclared_type`) or a detail that is not JSON
 //!   (`invalid_json`). Only an acknowledged value reaches the router.
 //!   `flow-error` is relayed to the flow's clients, a refresh to the brick.
 //! - **Stop**: when a flow loses its last subscriber (the router's empty
-//!   flows), the brick gets `release`. Once no flow is live and nothing is in
+//!   flows), the brick gets `release` and the router forgets the flow and
+//!   its last value, so that a later subscriber starts afresh. Once no flow is live and nothing is in
 //!   flight, the grace period starts; a subscription within it keeps the
 //!   brick. At its end the brick gets `shutdown`, then `SIGTERM`, then
 //!   `SIGKILL`, each after a delay, until it exits. A subscription arriving

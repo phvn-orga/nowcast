@@ -185,7 +185,7 @@ where
                     .map_err(|_| HttpError::unknown_flow(&flow.to_string()))?;
                 Ok(empty(StatusCode::ACCEPTED))
             }
-            Route::Stream => Ok(self.stream(anchor, &parts.headers)),
+            Route::Stream => self.stream(anchor, &parts.headers),
         }
     }
 
@@ -257,14 +257,22 @@ where
         Ok(json(StatusCode::OK, to_line(&event)))
     }
 
-    fn stream(&self, anchor: AnchorId, headers: &HeaderMap) -> Response<Body> {
+    fn stream(&self, anchor: AnchorId, headers: &HeaderMap) -> Result<Response<Body>, HttpError> {
         let since = sse::last_event_id(headers.get("last-event-id").map(HeaderValue::as_bytes));
         let events = self.router.stream(anchor, since);
+        // Opening a stream recreates the anchor in the router. A session gone
+        // since the first check means the anchor died meanwhile (nothing else
+        // forgets a session), maybe already removed from the router: remove
+        // it again, which closes this stream.
+        if self.sessions.current(anchor).is_none() {
+            self.router.remove_anchor(anchor);
+            return Err(HttpError::session_required());
+        }
         let mut response = Response::new(SseBody::new(events).boxed());
         let headers = response.headers_mut();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-        response
+        Ok(response)
     }
 }
 

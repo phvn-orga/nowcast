@@ -140,10 +140,11 @@ struct Brick {
     /// The flows the brick serves for someone: assigned by `subscribed` and
     /// not released since. They survive a crash.
     flows: BTreeMap<FlowId, Subscription>,
-    /// Flows that lost their last subscriber while a client `subscribe` was
-    /// in flight. Releasing one then could reach the brick after a
-    /// `subscribe` it already took for that flow, so it waits until none is
-    /// in flight, and is released only if still without a subscriber.
+    /// Flows to release, held while a client `subscribe` is in flight: a
+    /// `release` sent then could reach the brick after a `subscribe` it
+    /// already took for that flow. Released once none is, and only if still
+    /// without a subscriber. They may be flows the brick serves without the
+    /// supervisor counting them live, from an answer nobody waits for.
     deferred: BTreeSet<FlowId>,
     /// Subscriptions waiting for the brick to be ready.
     queue: Vec<Waiter>,
@@ -426,12 +427,15 @@ impl Brick {
 
     /// Stops sending a flow to anyone. The brick hears of it only if it is
     /// ready: a relaunched brick that is not yet will simply not get it back.
-    fn release(&mut self, flow: &FlowId) {
+    /// The router forgets the flow and its last value, so that a later
+    /// subscriber starts afresh; a subscriber still there gets `flow-ended`.
+    fn release(&mut self, flow: &FlowId, ctx: &mut Ctx<'_>) {
         self.flows.remove(flow);
         self.deferred.remove(flow);
         if self.is_ready() {
             self.send(ServiceMessage::Release { flow: flow.clone() });
         }
+        ctx.router.end_flow(&self.qualify(flow));
     }
 
     /// Ends a flow the brick can no longer serve: its clients get
@@ -444,6 +448,16 @@ impl Brick {
         ctx.router.end_flow(&qualified);
     }
 
+    /// Releases a flow nobody holds, or defers it while a client `subscribe`
+    /// is in flight. Every release decision goes through here.
+    fn let_go(&mut self, flow: &FlowId, ctx: &mut Ctx<'_>) {
+        if self.has_client_requests() {
+            self.deferred.insert(flow.clone());
+        } else {
+            self.release(flow, ctx);
+        }
+    }
+
     /// Releases the deferred flows still without a subscriber, once no client
     /// `subscribe` can hand them out any more.
     fn flush_deferred(&mut self, ctx: &mut Ctx<'_>) {
@@ -451,8 +465,8 @@ impl Brick {
             return;
         }
         for flow in mem::take(&mut self.deferred) {
-            if self.flows.contains_key(&flow) && ctx.router.subscribers(&self.qualify(&flow)) == 0 {
-                self.release(&flow);
+            if ctx.router.subscribers(&self.qualify(&flow)) == 0 {
+                self.release(&flow, ctx);
             }
         }
     }
@@ -656,7 +670,7 @@ impl Brick {
                 warn!(brick = %self.name, req = req.0, %flow, "subscribed answers no subscribe in flight");
                 // The brick now serves the flow: tell it nobody wants it.
                 if !self.flows.contains_key(&flow) {
-                    self.send(ServiceMessage::Release { flow });
+                    self.let_go(&flow, ctx);
                 }
             }
             Some(Request::Client(Waiter {
@@ -665,19 +679,17 @@ impl Brick {
                 params,
                 reply,
             })) => {
-                let added = !self.flows.contains_key(&flow);
-                if added {
-                    self.flows
-                        .insert(flow.clone(), Subscription { kind, params });
-                }
                 if reply.is_closed() {
                     // The client went away: no subscription, and a flow
                     // nobody else holds goes back to the brick.
-                    if added {
-                        self.release(&flow);
+                    if !self.flows.contains_key(&flow) {
+                        self.let_go(&flow, ctx);
                     }
                     return;
                 }
+                self.flows
+                    .entry(flow.clone())
+                    .or_insert(Subscription { kind, params });
                 // Under the lock, so ordered with every publication and
                 // every release decision on the flow.
                 let qualified = self.qualify(&flow);
@@ -700,7 +712,7 @@ impl Brick {
                         self.lose(&live, "the relaunched brick changed the flow's id", ctx);
                     }
                     if !self.flows.contains_key(&flow) {
-                        self.send(ServiceMessage::Release { flow });
+                        self.let_go(&flow, ctx);
                     }
                 }
             }
@@ -763,11 +775,7 @@ impl Brick {
         if !self.flows.contains_key(id) || ctx.router.subscribers(flow) > 0 {
             return;
         }
-        if self.has_client_requests() {
-            self.deferred.insert(id.clone());
-        } else {
-            self.release(id);
-        }
+        self.let_go(id, ctx);
         self.settle(ctx);
     }
 
@@ -786,8 +794,8 @@ impl Brick {
         }
         let flows: Vec<FlowId> = self.flows.keys().cloned().collect();
         for flow in flows {
-            self.release(&flow);
-            ctx.router.end_flow(&self.qualify(&flow));
+            // Its clients get `flow-ended`.
+            self.release(&flow, ctx);
         }
         self.settle(ctx);
     }
