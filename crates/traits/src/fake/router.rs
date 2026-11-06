@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 
 use crate::{AnchorId, Router, UnknownFlow, UnknownSubscription};
 
@@ -35,6 +36,7 @@ struct State {
     subscriptions: HashMap<SubscriptionId, (AnchorId, QualifiedFlowId)>,
     streams: HashMap<AnchorId, Vec<UnboundedSender<StreamEvent>>>,
     empty: Vec<UnboundedSender<QualifiedFlowId>>,
+    has_subscriptions: watch::Sender<bool>,
 }
 
 impl State {
@@ -42,6 +44,16 @@ impl State {
         if let Some(streams) = self.streams.get_mut(&anchor) {
             streams.retain(|s| s.send(event.clone()).is_ok());
         }
+    }
+
+    /// Publishes whether any subscription is left, after an operation.
+    fn sync_has_subscriptions(&self) {
+        let any = !self.subscriptions.is_empty();
+        self.has_subscriptions.send_if_modified(|was| {
+            let changed = *was != any;
+            *was = any;
+            changed
+        });
     }
 
     fn signal_empty(&mut self, flow: &QualifiedFlowId) {
@@ -88,7 +100,9 @@ impl Router for FakeRouter {
             .insert(id.clone(), (anchor, flow.clone()));
         let flow = state.flows.entry(flow).or_default();
         flow.subscriptions.insert(id.clone(), anchor);
-        (id, flow.last.clone())
+        let last = flow.last.clone();
+        state.sync_has_subscriptions();
+        (id, last)
     }
 
     fn unsubscribe(
@@ -104,6 +118,7 @@ impl Router for FakeRouter {
         if state.remove_subscription(subscription) == Some(false) {
             state.deliver(anchor, &StreamEvent::FlowEnded { flow });
         }
+        state.sync_has_subscriptions();
         Ok(())
     }
 
@@ -164,6 +179,7 @@ impl Router for FakeRouter {
         for id in removed.subscriptions.keys() {
             state.subscriptions.remove(id);
         }
+        state.sync_has_subscriptions();
         let event = StreamEvent::FlowEnded { flow: flow.clone() };
         for anchor in removed.anchors() {
             state.deliver(anchor, &event);
@@ -211,5 +227,10 @@ impl Router for FakeRouter {
         for id in owned {
             state.remove_subscription(&id);
         }
+        state.sync_has_subscriptions();
+    }
+
+    fn has_subscriptions(&self) -> watch::Receiver<bool> {
+        self.state.lock().unwrap().has_subscriptions.subscribe()
     }
 }
