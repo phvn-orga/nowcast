@@ -1,0 +1,19 @@
+{
+  "name": "nowcast",
+  "owner": {
+    "name": "phvn-orga"
+  },
+  "description": "Claude Code client of nowcast, a local service of ready-to-use live data.",
+  "plugins": [
+    {
+      "name": "nowcast",
+      "source": "./clients/claude-code/nowcast",
+      "description": "Holds the session's nowcast stream and shares each flow with other mods through its state. Needs the nowcast command on PATH."
+    },
+    {
+      "name": "nowcast-example",
+      "source": "./clients/claude-code/nowcast/example",
+      "description": "Sample mod on nowcast: follows the test brick's flow in the status line and refreshes it with /nowcast-refresh."
+    }
+  ]
+}
