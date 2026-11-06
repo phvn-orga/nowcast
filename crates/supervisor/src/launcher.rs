@@ -5,7 +5,7 @@ use nowcast_codec::{CodecError, read_brick, write_service};
 use nowcast_traits::{BrickConnection, BrickDeclaration, BrickLauncher, BrickProcess};
 use nowcast_types::{BrickMessage, BrickName, ServiceMessage};
 use rustix::process::{Pid, Signal as RawSignal, kill_process};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
@@ -13,7 +13,8 @@ use tracing::{debug, info, warn};
 
 /// Launches bricks as child processes speaking the brick protocol over their
 /// standard input and output. Each line of their standard error becomes an
-/// `info` event of the brick, for the journal.
+/// `info` event of the brick, for the journal; a line over 8 KiB is logged
+/// in pieces of 8 KiB.
 ///
 /// The connection's `from_brick` closes once the process has exited, so that
 /// its end means the process is gone. The exit ends the output even if a
@@ -147,13 +148,19 @@ async fn read(
     let _ = exited.await;
 }
 
+/// The longest piece of a stderr line logged as one event. A longer line is
+/// logged in pieces, so that a brick cannot make the service hold an
+/// unbounded line.
+const MAX_LOG_LINE: u64 = 8 * 1024;
+
 /// Forwards each line of the brick's standard error to the journal.
 async fn log(brick: BrickName, stderr: ChildStderr) {
     let mut stderr = BufReader::new(stderr);
     let mut line = Vec::new();
     loop {
         line.clear();
-        match stderr.read_until(b'\n', &mut line).await {
+        let mut piece = (&mut stderr).take(MAX_LOG_LINE);
+        match piece.read_until(b'\n', &mut line).await {
             Ok(0) | Err(_) => return,
             Ok(_) => {
                 let text = String::from_utf8_lossy(&line);

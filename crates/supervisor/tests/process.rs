@@ -382,8 +382,9 @@ impl Write for Captured {
     }
 }
 
-#[tokio::test]
-async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_logged() {
+/// Captures the logs of this thread until the guard drops. The test runtime
+/// runs every task on this thread.
+fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
     let captured = Captured::default();
     let writer = captured.clone();
     // Another crate of the workspace may enable the `ansi` feature, which
@@ -392,8 +393,48 @@ async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
-    // The test runtime runs every task on this thread.
-    let _guard = tracing::subscriber::set_default(subscriber);
+    (captured, tracing::subscriber::set_default(subscriber))
+}
+
+#[tokio::test]
+async fn a_long_stderr_line_is_logged_in_bounded_chunks() {
+    let (captured, _guard) = capture_logs();
+    let dir = tempfile::tempdir().unwrap();
+    let script = "head -c 20000 /dev/zero | tr '\\0' x >&2";
+    let mut connection = ProcessLauncher.launch(&shell(script, dir.path())).unwrap();
+    assert_eq!(
+        timeout(WAIT, connection.from_brick.recv()).await.unwrap(),
+        None
+    );
+    // Each chunk is one event: the run of `x` it carries.
+    let chunks = || -> Vec<usize> {
+        let text = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        text.lines()
+            .filter_map(|l| {
+                l.split_whitespace()
+                    .find(|word| word.bytes().all(|b| b == b'x'))
+            })
+            .map(str::len)
+            .collect()
+    };
+    let logged = async {
+        while chunks().iter().sum::<usize>() < 20000 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+    timeout(WAIT, logged)
+        .await
+        .expect("the whole line is logged");
+    assert!(
+        chunks().iter().all(|&len| len <= 8 * 1024),
+        "{:?}",
+        chunks()
+    );
+}
+
+#[tokio::test]
+async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_logged() {
+    let (captured, _guard) = capture_logs();
 
     let dir = tempfile::tempdir().unwrap();
     let mut declaration = shell(r#"echo "in $(pwd) with $PROBE_VAR" >&2"#, dir.path());
