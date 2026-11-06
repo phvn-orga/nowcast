@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "types": "CLAUDE_CODE_PLUGIN_DIR_WATCH=1 claude -p --input-format stream-json --output-format stream-json --verbose --plugin-dir nowcast < /dev/null > /dev/null",
-    "typecheck": "tsc -p nowcast",
-    "validate": "claude plugin validate nowcast",
+    "types": "CLAUDE_CODE_PLUGIN_DIR_WATCH=1 claude -p --input-format stream-json --output-format stream-json --verbose --plugin-dir nowcast --plugin-dir nowcast/example < /dev/null > /dev/null",
+    "typecheck": "tsc -p nowcast && tsc -p nowcast/example",
+    "validate": "claude plugin validate nowcast && claude plugin validate nowcast/example",
     "test": "claude plugin test nowcast"
   },
   "devDependencies": {

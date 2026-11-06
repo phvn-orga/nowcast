@@ -778,6 +778,7 @@ dependencies = [
  "jsonschema",
  "notify",
  "nowcast-conformance",
+ "nowcast-identity",
  "nowcast-traits",
  "nowcast-types",
  "semver",
