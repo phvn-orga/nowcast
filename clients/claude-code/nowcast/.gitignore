@@ -1,0 +1,2 @@
+# Sources are TypeScript, loaded as is: a compiled .js is a stray tsc output.
+*.js
