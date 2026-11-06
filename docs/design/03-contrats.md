@@ -262,6 +262,7 @@ service → {"v":1,"t":"ack","req":7}
    vivant. Le compte des plantages d'affilée repart de zéro quand la brique a tenu
    60 s après `ready`. Après 8 relances d'affilée, le service abandonne : le
    plantage suivant termine tous les flux de la brique, chacun avec un `flow-error`.
+   Un abonnement ultérieur relance la brique à neuf, avec ses 8 relances.
    Pendant l'attente, une nouvelle souscription échoue en `503` `brick_unavailable`.
 
 ## 5. La déclaration d'un type de client
