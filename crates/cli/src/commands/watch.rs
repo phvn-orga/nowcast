@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::time::Duration;
 
+use hyper::header::HeaderValue;
 use nowcast_types::ApiErrorCode;
 use serde_json::Value;
 
@@ -142,7 +143,13 @@ impl<O: Write, E: Write> Watcher<'_, O, E> {
         if name == "update"
             && let Some(id) = &event.id
         {
-            self.last_event_id = Some(id.clone());
+            // The id goes back as a header on reconnection: one that cannot
+            // be a header value would make every reconnection fail.
+            if HeaderValue::from_str(id).is_ok() {
+                self.last_event_id = Some(id.clone());
+            } else {
+                let _ = writeln!(self.err, "nowcast: ignored an update id {id:?}");
+            }
         }
         let data: Value = match serde_json::from_str(&event.data) {
             Ok(data) => data,

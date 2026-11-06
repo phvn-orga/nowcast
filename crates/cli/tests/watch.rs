@@ -328,3 +328,32 @@ async fn nothing_more_than_the_events() {
     assert_eq!(watch.line_within(Duration::from_millis(300)).await, None);
     watch.stop().await;
 }
+
+/// An id that cannot go back as `Last-Event-ID` is not kept: the tool still
+/// reconnects, resuming after the last usable id.
+#[tokio::test]
+async fn an_id_unfit_for_a_header_does_not_stop_reconnection() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    let flow = fake.subscribe_shared("a");
+    let mut watch = Watching::spawn(&mut nowcast(&fake), &[]);
+    fake.wait_streams(1).await;
+    let seen = fake.publish(&flow, json!({ "n": 1 }));
+    assert_eq!(watch.next_line().await, r#"update probe/a {"n":1}"#);
+    fake.send_raw(
+        "event: update\nid: \u{e9}\u{7f}\ndata: {\"subject\":\"probe/a\",\"data\":2}\n\n",
+    );
+    assert_eq!(watch.next_line().await, "update probe/a 2");
+
+    fake.close_streams();
+    fake.wait_streams(1).await;
+    fake.publish(&flow, json!({ "n": 3 }));
+    assert_eq!(watch.next_line().await, r#"update probe/a {"n":3}"#);
+    let stream = fake
+        .log()
+        .into_iter()
+        .rfind(|r| r.path == "/v1/stream")
+        .unwrap();
+    assert_eq!(stream.last_event_id.as_deref(), seen["id"].as_str());
+    let stderr = watch.stop().await;
+    assert!(stderr.contains("ignored an update id"), "{stderr}");
+}
