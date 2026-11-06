@@ -1,0 +1,6 @@
+{
+  "name": "nowcast-example",
+  "version": "0.1.0",
+  "description": "A sample mod on nowcast: follows one flow in the status line and refreshes it on demand.",
+  "dependencies": ["nowcast"]
+}
