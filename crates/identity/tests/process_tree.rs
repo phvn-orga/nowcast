@@ -11,7 +11,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nowcast_identity::PeerIdentity;
@@ -216,7 +216,7 @@ fn named(name: &str) -> Option<ClientKindName> {
 #[tokio::test]
 async fn a_matching_process_between_launcher_and_child_anchors() {
     let tree = Tree::spawn(&["launcher/sh", "agent/nowcast-near/1.0/sh"]).await;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, named("near"));
     assert_eq!(identity.pid(anchor.id), Some(tree.shell(1)));
@@ -231,7 +231,7 @@ async fn of_two_matching_ancestors_the_nearest_wins() {
         "plain/sh",
     ])
     .await;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, named("near"));
     assert_eq!(identity.pid(anchor.id), Some(tree.shell(1)));
@@ -240,7 +240,7 @@ async fn of_two_matching_ancestors_the_nearest_wins() {
 #[tokio::test]
 async fn the_nearest_wins_whatever_its_kind() {
     let tree = Tree::spawn(&["outer/nowcast-near/1.0/sh", "inner/nowcast-far/1.0/sh"]).await;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, named("far"));
     assert_eq!(identity.pid(anchor.id), Some(tree.shell(1)));
@@ -249,7 +249,7 @@ async fn the_nearest_wins_whatever_its_kind() {
 #[tokio::test]
 async fn with_no_match_the_connected_process_anchors_with_no_kind() {
     let tree = Tree::spawn(&["launcher/sh", "middle/sh"]).await;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, None);
     assert_eq!(identity.pid(anchor.id), Some(tree.connector()));
@@ -258,7 +258,7 @@ async fn with_no_match_the_connected_process_anchors_with_no_kind() {
 #[tokio::test]
 async fn killing_the_anchor_signals_its_death() {
     let tree = Tree::spawn(&["launcher/sh", "agent/nowcast-near/1.0/sh"]).await;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     let pid = tree.shell(1);
     assert_eq!(identity.pid(anchor.id), Some(pid));
@@ -298,7 +298,7 @@ async fn connections_of_one_anchor_share_its_id() {
     .await;
     let second = tree.accept().await;
     let second_pid = rustix::net::sockopt::socket_peercred(second).unwrap().pid;
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let second = identity.identify(second.as_fd()).unwrap();
     let first = identity.identify(tree.stream().as_fd()).unwrap();
     assert_ne!(
@@ -320,7 +320,7 @@ async fn this_process_connecting_twice_gets_one_anchor() {
     let dir = TempDir::new().unwrap();
     let socket = dir.path().join("socket");
     let listener = UnixListener::bind(&socket).unwrap();
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let mut anchors = Vec::new();
     for _ in 0..2 {
         let _client = UnixStream::connect(&socket).await.unwrap();
@@ -333,8 +333,35 @@ async fn this_process_connecting_twice_gets_one_anchor() {
 }
 
 #[tokio::test]
+async fn a_kind_changed_between_two_connections_applies_to_the_second() {
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // Stands for discovery, whose kinds change when a file of the user's
+    // client kinds directory does.
+    let current = Arc::new(Mutex::new(kinds()));
+    let source = Arc::clone(&current);
+    let identity = PeerIdentity::new(move || source.lock().unwrap().clone());
+    let connect = async || {
+        let _client = UnixStream::connect(&socket).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        identity.identify(accepted.as_fd()).unwrap()
+    };
+
+    assert_eq!(connect().await.kind, None);
+    // A pattern that matches this test binary, the connected process.
+    current
+        .lock()
+        .unwrap()
+        .push(kind("self", "*/process_tree-*"));
+    let anchor = connect().await;
+    assert_eq!(anchor.kind, named("self"));
+    assert_eq!(identity.pid(anchor.id), Some(std::process::id()));
+}
+
+#[tokio::test]
 async fn an_unknown_anchor_has_no_pid_and_counts_as_exited() {
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let unknown = nowcast_traits::AnchorId(42);
     assert_eq!(identity.pid(unknown), None);
     timeout(PATIENCE, identity.exited(unknown))
@@ -364,7 +391,7 @@ async fn a_connected_process_already_reaped_is_reported_as_not_found() {
         .expect("the connector connects")
         .unwrap();
     assert!(connector.wait().unwrap().success());
-    let identity = PeerIdentity::new(&kinds());
+    let identity = PeerIdentity::fixed(kinds());
     let error = identity.identify(accepted.as_fd()).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
 }
