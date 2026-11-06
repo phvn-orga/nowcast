@@ -2,16 +2,26 @@
 //! before its first call.
 
 mod get;
+mod refresh;
 mod subscribe;
 mod watch;
 
 pub use get::get;
+pub use refresh::refresh;
 pub use subscribe::subscribe;
 pub use watch::watch;
 
+use nowcast_types::QualifiedFlowId;
 use serde_json::Value;
 
 use crate::error::CliError;
+
+/// A flow id given on the command line, checked before any call.
+fn check_flow(flow: &str) -> Result<(), CliError> {
+    QualifiedFlowId::parse(flow)
+        .map(drop)
+        .map_err(|e| CliError::Usage(format!("invalid flow id {flow:?}: {e}")))
+}
 
 /// The content of a subscription, given as JSON on the command line.
 fn parse_params(params: &str) -> Result<Value, CliError> {

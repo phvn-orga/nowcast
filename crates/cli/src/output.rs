@@ -75,6 +75,22 @@ pub fn stream_event(out: &mut impl Write, json: bool, name: &str, data: &Value) 
     out.flush()
 }
 
+/// `watch --json`: the stream is open. Printed at every connection, the
+/// first one included.
+pub fn connected(out: &mut impl Write) -> io::Result<()> {
+    writeln!(out, r#"{{"status":"connected"}}"#)?;
+    out.flush()
+}
+
+/// `watch --json`: the connection is lost or refused, and the tool will try
+/// again. Printed once per outage. Written by hand: `json!` would sort the
+/// keys, and `status` leads.
+pub fn retrying(out: &mut impl Write, reason: &str) -> io::Result<()> {
+    let reason = Value::from(reason);
+    writeln!(out, r#"{{"status":"retrying","reason":{reason}}}"#)?;
+    out.flush()
+}
+
 /// A string field, `-` when absent. Control characters are escaped, so that
 /// a message holding a newline still prints as one line.
 fn text<'a>(value: &'a Value, field: &str) -> Cow<'a, str> {
@@ -179,6 +195,23 @@ mod tests {
             serde_json::from_str::<Value>(&text).unwrap(),
             json!({ "event": "flow-ended", "data": { "flow": "forge/x" } })
         );
+    }
+
+    /// The status lines are a format consumers parse: pinned byte for byte.
+    #[test]
+    fn status_lines() {
+        assert_eq!(printed(connected), "{\"status\":\"connected\"}\n");
+        assert_eq!(
+            printed(|out| retrying(out, "cannot reach \"x\"\nnow")),
+            "{\"status\":\"retrying\",\"reason\":\"cannot reach \\\"x\\\"\\nnow\"}\n"
+        );
+    }
+
+    #[test]
+    fn a_json_update_line_holds_its_id() {
+        let text = printed(|out| stream_event(out, true, "update", &event()));
+        let line: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(line["data"]["id"], "42");
     }
 
     #[test]
