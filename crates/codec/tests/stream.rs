@@ -194,3 +194,21 @@ fn a_stream_failure_is_reported_as_io() {
         assert!(std::error::Error::source(&error).is_some());
     });
 }
+
+#[test]
+fn a_frame_that_does_not_decode_leaves_the_stream_readable() {
+    block_on(async {
+        // A whole frame holding the MessagePack integer 1, then a valid one.
+        let mut input = vec![1u8, 0, 0, 0, 0x01];
+        input.extend(encode_brick(&BrickMessage::Ready).unwrap());
+        let mut input = &input[..];
+        assert!(matches!(
+            read_brick(&mut input).await,
+            Err(CodecError::Malformed(_))
+        ));
+        assert_eq!(
+            read_brick(&mut input).await.unwrap(),
+            Some(BrickMessage::Ready)
+        );
+    });
+}

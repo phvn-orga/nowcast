@@ -1,6 +1,7 @@
 //! The messages: a MessagePack map with `v`, `t`, `req` when the message has
 //! one, and the fields of contract section 4.
 
+use std::collections::HashMap;
 use std::io;
 
 use nowcast_types::{
@@ -110,10 +111,11 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, CodecError> {
         "ack" => ServiceMessage::Ack { req: fields.req()? },
         "error" => ServiceMessage::Error {
             req: fields.req()?,
-            code: fields
-                .str("code")?
-                .parse::<PublishErrorCode>()
-                .map_err(|e| invalid("code", e.to_string()))?,
+            code: {
+                let code = fields.str("code")?;
+                code.parse::<PublishErrorCode>()
+                    .map_err(|_| invalid("code", format!("is unknown: {:?}", clip(code))))?
+            },
         },
         other => return Err(CodecError::UnknownType(clip(other))),
     })
@@ -200,9 +202,10 @@ fn kind(value: &ValueRef<'_>) -> &'static str {
 }
 
 /// The fields of a decoded message, its version checked and its type read.
+/// Keyed by a hash map so that a map with many keys decodes in linear time.
 struct Fields<'a> {
     t: &'a str,
-    entries: Vec<(&'a str, ValueRef<'a>)>,
+    entries: HashMap<&'a str, ValueRef<'a>>,
 }
 
 impl<'a> Fields<'a> {
@@ -222,7 +225,7 @@ impl<'a> Fields<'a> {
                 kind(&value)
             )));
         };
-        let mut entries: Vec<(&'a str, ValueRef<'a>)> = Vec::with_capacity(map.len());
+        let mut entries = HashMap::with_capacity(map.len());
         for (key, value) in map {
             let ValueRef::String(key) = key else {
                 return Err(CodecError::Malformed(format!(
@@ -233,13 +236,12 @@ impl<'a> Fields<'a> {
             let key = key
                 .into_str()
                 .ok_or_else(|| CodecError::Malformed("a key is not valid UTF-8".into()))?;
-            if entries.iter().any(|(k, _)| *k == key) {
+            if entries.insert(key, value).is_some() {
                 return Err(CodecError::Malformed(format!(
                     "duplicate key {:?}",
                     clip(key)
                 )));
             }
-            entries.push((key, value));
         }
         let mut fields = Self { t: "", entries };
         let v = fields.u64("v")?;
@@ -252,9 +254,7 @@ impl<'a> Fields<'a> {
 
     fn get(&self, key: &str) -> Result<&ValueRef<'a>, CodecError> {
         self.entries
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v)
+            .get(key)
             .ok_or_else(|| CodecError::Malformed(format!("missing key {key:?}")))
     }
 

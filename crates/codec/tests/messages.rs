@@ -602,3 +602,35 @@ fn corrupted_frames_never_panic() {
         let _ = decode_brick(&frame);
     }
 }
+
+#[test]
+fn a_map_with_many_keys_decodes_in_linear_time() {
+    // 200 000 distinct unknown keys: under 2 MB, far below the frame limit. A
+    // duplicate check comparing every key with every other takes minutes here.
+    const KEYS: u32 = 200_000;
+    let mut body = vec![0xdf];
+    body.extend_from_slice(&(KEYS + 2).to_be_bytes());
+    body.extend_from_slice(&[0xa1, b'v', 0x01, 0xa1, b't', 0xa5]);
+    body.extend_from_slice(b"ready");
+    for i in 0..KEYS {
+        body.push(0xa8);
+        body.extend_from_slice(format!("{i:08x}").as_bytes());
+        body.push(0xc0);
+    }
+    let frame = raw(&body);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(decode_brick(&frame).map(|_| ())));
+    let decoded = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("decoding finishes within 20 s");
+    assert!(decoded.is_ok(), "{decoded:?}");
+}
+
+#[test]
+fn an_unknown_error_code_is_clipped_in_the_error() {
+    let error = service_messages().remove(6);
+    let code = "x".repeat(10_000);
+    let frame = service_frame(&error, "code", Some(Value::from(code.as_str())));
+    let reported = decode_service(&frame).unwrap_err().to_string();
+    assert!(reported.len() < 200, "{} bytes", reported.len());
+}
