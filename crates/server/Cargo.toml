@@ -3,3 +3,23 @@ name = "nowcast-server"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+jiff = { version = "0.2.39", default-features = false, features = ["std"] }
+jsonschema = { version = "0.60.2", default-features = false }
+nowcast-traits = { path = "../traits" }
+nowcast-types = { path = "../types" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+tokio = { version = "1.54.1", features = ["net", "rt", "time", "sync", "macros"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+nowcast-conformance = { path = "../conformance" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["test-util", "rt", "macros"] }
