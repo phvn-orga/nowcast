@@ -257,3 +257,24 @@ fn every_embedded_declaration_is_valid() {
             .unwrap_or_else(|e| panic!("embedded {file} is refused: {e}"));
     }
 }
+
+#[tokio::test]
+async fn rewriting_a_plain_file_in_place_announces_nothing() {
+    use std::io::Write as _;
+
+    let layout = Layout::new();
+    let text = "manifest_version = 1\nname = \"bare\"\nversion = \"0.1.0\"\n\
+                description = \"A brick.\"\nprotocol = 1\nrun = { command = [\"b\"] }\n";
+    std::fs::write(layout.path("bricks/bare.toml"), text).unwrap();
+    let discovery = FsDiscovery::start(layout.config(&[])).unwrap();
+    let mut changes = discovery.changes();
+    // An editor saving in place: the file is truncated, then written, then
+    // closed. Only the closed file counts, not what is seen in between.
+    let mut file = std::fs::File::create(layout.path("bricks/bare.toml")).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    file.write_all(text.as_bytes()).unwrap();
+    drop(file);
+    let change = timeout(Duration::from_millis(500), changes.recv()).await;
+    assert!(change.is_err(), "unexpected change: {change:?}");
+    assert!(discovery.brick(&name("bare")).is_some());
+}

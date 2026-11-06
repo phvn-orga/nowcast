@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use notify::event::{AccessKind, AccessMode};
+use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use nowcast_traits::{BrickDeclaration, ClientKind, Discovery, DiscoveryChange};
 use nowcast_types::BrickName;
@@ -191,11 +191,13 @@ impl State {
 
 /// Whether an event may change the entries of a directory. Opening or reading
 /// a file does not, and reading the directory's own files must not trigger a
-/// new read.
+/// new read. Neither does a write into a file: the file is read once closed,
+/// not while half written (a save in place first truncates it, which would
+/// make the brick vanish and come back).
 fn changes_entries(kind: &EventKind) -> bool {
     match kind {
         EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
-        EventKind::Access(_) => false,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Data(_)) => false,
         _ => true,
     }
 }
@@ -256,7 +258,10 @@ fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+        RenameMode,
+    };
 
     use super::*;
 
@@ -272,11 +277,18 @@ mod tests {
     }
 
     #[test]
+    fn writing_into_a_file_does_not_trigger_a_read() {
+        let kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        assert!(!changes_entries(&kind));
+    }
+
+    #[test]
     fn changing_an_entry_triggers_a_read() {
         for kind in [
             EventKind::Create(CreateKind::Any),
             EventKind::Remove(RemoveKind::Any),
             EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
             EventKind::Access(AccessKind::Close(AccessMode::Write)),
             EventKind::Any,
         ] {
