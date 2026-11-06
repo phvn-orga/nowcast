@@ -386,7 +386,10 @@ impl Write for Captured {
 async fn the_brick_runs_in_its_directory_with_its_environment_and_its_stderr_is_logged() {
     let captured = Captured::default();
     let writer = captured.clone();
+    // Another crate of the workspace may enable the `ansi` feature, which
+    // would put escape codes between a field's name and its value.
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
     // The test runtime runs every task on this thread.
