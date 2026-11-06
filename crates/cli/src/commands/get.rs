@@ -2,8 +2,6 @@
 
 use std::io::Write;
 
-use nowcast_types::QualifiedFlowId;
-
 use crate::client::Client;
 use crate::error::CliError;
 use crate::output;
@@ -15,8 +13,7 @@ pub async fn get(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Result<(), CliError> {
-    QualifiedFlowId::parse(flow)
-        .map_err(|e| CliError::Usage(format!("invalid flow id {flow:?}: {e}")))?;
+    super::check_flow(flow)?;
     let session = client.declare().await?;
     let event = session.last(flow).await?;
     if event.is_none() && !json {
