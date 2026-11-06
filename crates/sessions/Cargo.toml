@@ -3,3 +3,15 @@ name = "nowcast-sessions"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+nowcast-traits = { path = "../traits" }
+nowcast-types = { path = "../types" }
+tokio = { version = "1.54.1", features = ["macros", "rt", "sync"] }
+
+[dev-dependencies]
+nowcast-conformance = { path = "../conformance" }
+nowcast-identity = { path = "../identity" }
+nowcast-router = { path = "../router" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "time"] }
