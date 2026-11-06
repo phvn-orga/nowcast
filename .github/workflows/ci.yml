@@ -33,10 +33,12 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: clients/claude-code/package-lock.json
-      - run: npm ci
+      # ni picks the package manager from the lockfile; npm only bootstraps it.
+      - run: npm install --global @antfu/ni@30.6.0
+      - run: nci
       # The plugin API's types come from the Claude Code binary, which lays
       # them beside a mod it loads.
-      - run: npm run types
-      - run: npm run typecheck
-      - run: npm run validate
-      - run: npm test
+      - run: nr types
+      - run: nr typecheck
+      - run: nr validate
+      - run: nr test
