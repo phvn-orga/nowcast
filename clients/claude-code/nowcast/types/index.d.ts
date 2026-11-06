@@ -69,13 +69,6 @@ export type NowcastStream = {
    * command is not running (not installed, or exited), see `error`.
    */
   status: 'starting' | 'up' | 'down' | 'stopped'
-  /**
-   * How many times the stream came back after being down, since this mod
-   * loaded. The service keeps subscriptions while it runs; when this changes
-   * it may have restarted and lost them, so a mod checks its own (for example
-   * `GET /v1/flows/{flow}` answering `404`) and subscribes again.
-   */
-  reconnections: number
   /** Why the stream is down or stopped; null while up. */
   error: string | null
 }

@@ -40,7 +40,7 @@ let queue: Promise<void> = Promise.resolve()
 // through the `$` of a long-lived loop would answer the moment that loop's
 // dispatch began.
 const flows = new Map<string, NowcastFlow>()
-let stream: NowcastStream = { session: null, status: 'starting', reconnections: 0, error: null }
+let stream: NowcastStream = { session: null, status: 'starting', error: null }
 
 export const register: Register = on => {
   // The library other mods use: `$.nowcast`, answered below.
@@ -251,8 +251,7 @@ async function apply($: $, event: StreamEvent): Promise<void> {
 
 async function onStatus($: $, status: Status): Promise<void> {
   if (status.status === 'connected') {
-    const reconnections = stream.status === 'down' ? stream.reconnections + 1 : stream.reconnections
-    await setStream($, { status: 'up', reconnections, error: null })
+    await setStream($, { status: 'up', error: null })
     // Each time the stream opens, after an outage or in a `watch` started
     // again: the service may have restarted and forgotten the subscriptions.
     void subscribeAgain($)

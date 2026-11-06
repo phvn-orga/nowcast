@@ -15,7 +15,7 @@ test('the session is declared before the stream opens', async ($, on) => {
     { method: 'PUT', url: 'http://nowcast/v1/session', body: '{"id":"session-1"}', socketPath: SOCKET },
   ])
   expect(w.children.map(c => c.argv)).toEqual([['nowcast', '--json', '--session', 'session-1', 'watch']])
-  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', reconnections: 0, error: null })
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'up', error: null })
 })
 
 test('NOWCAST_SOCKET names the socket, as for the command', async ($, on) => {
@@ -36,7 +36,6 @@ test('without a socket path, the stream still starts and the state says why', as
   expect(w.stream()).toEqual({
     session: 'session-1',
     status: 'starting',
-    reconnections: 0,
     error: 'neither NOWCAST_SOCKET nor an absolute XDG_RUNTIME_DIR is set',
   })
 })
