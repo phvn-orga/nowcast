@@ -3,3 +3,18 @@ name = "nowcast-e2e"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[[bin]]
+name = "nowcast-e2e-agent"
+path = "src/bin/agent.rs"
+test = false
+
+[dependencies]
+serde_json = "1.0.154"
+
+[dev-dependencies]
+nowcast-discovery = { path = "../discovery" }
+nowcast-test-brick = { path = "../test-brick" }
+nowcast-types = { path = "../types" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util", "macros", "process"] }
