@@ -24,8 +24,9 @@ use nowcast_discovery::{DiscoveryConfig, FsDiscovery};
 use nowcast_identity::PeerIdentity;
 use nowcast_router::FlowRouter;
 use nowcast_server::Server;
-use nowcast_traits::Discovery;
-use nowcast_traits::fake::{FakeSessions, FakeSupervisor};
+use nowcast_sessions::SessionRegistry;
+use nowcast_traits::fake::FakeSupervisor;
+use nowcast_traits::{Discovery, Router};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
@@ -136,23 +137,20 @@ async fn run(socket: Socket) -> Result<(), Box<dyn Error>> {
 }
 
 /// The brick supervisor and the session registry, the one place where they
-/// are built.
+/// are built. It runs inside the runtime, so both can spawn their tasks.
 ///
-/// FIXME: fake. In-memory fakes stand in until the supervisor (#12) and the
-/// session registry (#13) land: a subscription resolves without launching any
-/// brick, and a session outlives its anchor. The real modules replace this
-/// body and its return type. From here they get the router (publications,
-/// `empty_flows`, `remove_anchor`), the discovery (declarations and their
-/// changes) and the identity (`exited`); it runs inside the runtime, so they
-/// can spawn their tasks. The real supervisor also has to stop its bricks
-/// when `run` returns.
+/// FIXME: fake. The in-memory supervisor stands in until the real one (#12)
+/// lands: a subscription resolves and subscribes the anchor in the router
+/// without launching any brick. The real supervisor replaces it here and in
+/// the return type. It gets the router (subscriptions, publications,
+/// `empty_flows`) and the discovery (declarations and their changes), and it
+/// has to stop its bricks when `run` returns.
 fn supervisor_and_sessions(
-    _router: &Arc<FlowRouter>,
+    router: &Arc<FlowRouter>,
     _discovery: &Arc<FsDiscovery>,
-    _identity: &Arc<PeerIdentity>,
-) -> (Arc<FakeSupervisor>, Arc<FakeSessions>) {
-    (
-        Arc::new(FakeSupervisor::new()),
-        Arc::new(FakeSessions::new()),
-    )
+    identity: &Arc<PeerIdentity>,
+) -> (Arc<FakeSupervisor>, Arc<SessionRegistry>) {
+    let supervisor = FakeSupervisor::new(Arc::clone(router) as Arc<dyn Router>);
+    let sessions = SessionRegistry::new(Arc::clone(identity), Arc::clone(router));
+    (Arc::new(supervisor), Arc::new(sessions))
 }
