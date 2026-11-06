@@ -25,6 +25,10 @@ use tokio::time::timeout;
 /// Set on the connecting process: the socket to connect to.
 const CONNECT: &str = "NOWCAST_IDENTITY_TEST_CONNECT";
 
+/// Set on the connecting process: before connecting, start a child that
+/// connects too, so that the anchor has two connected descendants.
+const TWICE: &str = "NOWCAST_IDENTITY_TEST_TWICE";
+
 /// Set on the connecting process: exit right after connecting.
 const LEAVE: &str = "NOWCAST_IDENTITY_TEST_LEAVE";
 
@@ -47,9 +51,21 @@ fn connector() {
     let Some(socket) = std::env::var_os(CONNECT) else {
         return;
     };
+    let child = std::env::var_os(TWICE).map(|_| {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["connector", "--exact", "--test-threads=1"])
+            .env_remove(TWICE)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start the second connector")
+    });
     let mut stream = StdUnixStream::connect(socket).expect("connect to the test");
     if std::env::var_os(LEAVE).is_none() {
         let _ = stream.read(&mut [0]);
+    }
+    if let Some(mut child) = child {
+        let _ = child.wait();
     }
 }
 
@@ -59,11 +75,19 @@ fn connector() {
 static SPAWN: Mutex<()> = Mutex::new(());
 
 struct Tree {
-    _dir: TempDir,
+    /// The shells, their pid files and the connector's errors. Under the
+    /// build directory rather than the system temporary one, which may be
+    /// mounted without the right to execute.
+    _shells: TempDir,
+    /// The socket, kept apart because its path must stay short.
+    _sockets: TempDir,
+    listener: UnixListener,
+    errors: PathBuf,
     launcher: Child,
     pid_files: Vec<PathBuf>,
-    /// The test's end of the connection made by the connector.
-    stream: Option<UnixStream>,
+    /// The test's end of the connections made by the connectors, the first
+    /// one first.
+    streams: Vec<UnixStream>,
 }
 
 impl Tree {
@@ -71,8 +95,14 @@ impl Tree {
     /// becomes a copy of `/bin/sh`, each the parent of the next, the last the
     /// parent of the connector. Returns once the connector has connected.
     async fn spawn(shells: &[&str]) -> Self {
-        let dir = TempDir::new().unwrap();
-        let socket = dir.path().join("socket");
+        Self::spawn_with(shells, &[]).await
+    }
+
+    /// [`Tree::spawn`], with `env` set on the connector.
+    async fn spawn_with(shells: &[&str], env: &[(&str, &str)]) -> Self {
+        let dir = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let sockets = TempDir::new().unwrap();
+        let socket = sockets.path().join("socket");
         let listener = UnixListener::bind(&socket).unwrap();
         let mut command: Option<Command> = None;
         let mut pid_files = Vec::new();
@@ -108,24 +138,34 @@ impl Tree {
             .arg(std::env::current_exe().unwrap())
             .args(["connector", "--exact", "--nocapture", "--test-threads=1"])
             .env(CONNECT, &socket)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&errors).unwrap());
         let launcher = command.spawn().unwrap();
         drop(guard);
         let mut tree = Self {
-            _dir: dir,
+            _shells: dir,
+            _sockets: sockets,
+            listener,
+            errors,
             launcher,
             pid_files,
-            stream: None,
+            streams: Vec::new(),
         };
-        let Ok(accepted) = timeout(PATIENCE, listener.accept()).await else {
-            let errors = std::fs::read_to_string(&errors).unwrap_or_default();
+        tree.accept().await;
+        tree
+    }
+
+    /// Waits for the next connection and returns the test's end of it.
+    async fn accept(&mut self) -> &UnixStream {
+        let Ok(accepted) = timeout(PATIENCE, self.listener.accept()).await else {
+            let errors = std::fs::read_to_string(&self.errors).unwrap_or_default();
             panic!("the connector did not connect in time: {errors}");
         };
         let (stream, _) = accepted.unwrap();
-        tree.stream = Some(stream);
-        tree
+        self.streams.push(stream);
+        self.streams.last().unwrap()
     }
 
     /// The pid of the shell at `index` in the chain, the launcher first.
@@ -141,14 +181,14 @@ impl Tree {
     }
 
     fn stream(&self) -> &UnixStream {
-        self.stream.as_ref().unwrap()
+        &self.streams[0]
     }
 }
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        // Closing the connection ends the connector, then each shell in turn.
-        self.stream.take();
+        // Closing the connections ends the connectors, then each shell in turn.
+        self.streams.clear();
         let _ = self.launcher.wait();
     }
 }
@@ -223,9 +263,15 @@ async fn killing_the_anchor_signals_its_death() {
     let pid = tree.shell(1);
     assert_eq!(identity.pid(anchor.id), Some(pid));
 
+    // One waiter per session or connection: several on one anchor is normal.
     let mut exited = Box::pin(identity.exited(anchor.id));
+    let mut also = Box::pin(identity.exited(anchor.id));
     assert!(
         timeout(GRACE, &mut exited).await.is_err(),
+        "the anchor is still alive"
+    );
+    assert!(
+        timeout(GRACE, &mut also).await.is_err(),
         "the anchor is still alive"
     );
 
@@ -234,6 +280,9 @@ async fn killing_the_anchor_signals_its_death() {
     timeout(PATIENCE, exited)
         .await
         .expect("the death of the anchor is signalled");
+    timeout(PATIENCE, also)
+        .await
+        .expect("every waiter learns of the death");
     assert_eq!(identity.pid(anchor.id), None);
     timeout(PATIENCE, identity.exited(anchor.id))
         .await
@@ -242,13 +291,27 @@ async fn killing_the_anchor_signals_its_death() {
 
 #[tokio::test]
 async fn connections_of_one_anchor_share_its_id() {
-    let tree = Tree::spawn(&["launcher/sh", "agent/nowcast-near/1.0/sh"]).await;
-    let other = Tree::spawn(&["launcher/sh", "agent/nowcast-near/1.0/sh"]).await;
+    let mut tree = Tree::spawn_with(
+        &["launcher/sh", "agent/nowcast-near/1.0/sh"],
+        &[(TWICE, "1")],
+    )
+    .await;
+    let second = tree.accept().await;
+    let second_pid = rustix::net::sockopt::socket_peercred(second).unwrap().pid;
     let identity = PeerIdentity::new(&kinds());
+    let second = identity.identify(second.as_fd()).unwrap();
     let first = identity.identify(tree.stream().as_fd()).unwrap();
-    let again = identity.identify(tree.stream().as_fd()).unwrap();
+    assert_ne!(
+        second_pid.as_raw_nonzero().get() as u32,
+        tree.connector(),
+        "two connected processes"
+    );
+    assert_eq!(first, second);
+    assert_eq!(first.kind, named("near"));
+    assert_eq!(identity.pid(first.id), Some(tree.shell(1)));
+
+    let other = Tree::spawn(&["launcher/sh", "agent/nowcast-near/1.0/sh"]).await;
     let another = identity.identify(other.stream().as_fd()).unwrap();
-    assert_eq!(first, again);
     assert_ne!(first.id, another.id);
 }
 
