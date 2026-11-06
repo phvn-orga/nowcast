@@ -20,3 +20,25 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  claude-code:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/claude-code
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/claude-code/package-lock.json
+      # ni picks the package manager from the lockfile; npm only bootstraps it.
+      - run: npm install --global @antfu/ni@30.6.0
+      - run: nci
+      # The plugin API's types come from the Claude Code binary, which lays
+      # them beside a mod it loads.
+      - run: nr types
+      - run: nr typecheck
+      - run: nr validate
+      - run: nr test
