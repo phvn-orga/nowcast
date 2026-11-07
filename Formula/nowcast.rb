@@ -2,7 +2,7 @@
 class Nowcast < Formula
   desc "Local service streaming ready-to-use data to agents, dashboards and apps"
   homepage "https://github.com/phvn-orga/nowcast"
-  url "https://github.com/phvn-orga/nowcast/releases/download/v0.1.0/nowcast-v0.1.0-x86_64-unknown-linux-musl.tar.gz"
+  url "https://github.com/phvn-orga/nowcast/releases/download/v0.1.0-alpha.1/nowcast-v0.1.0-alpha.1-x86_64-unknown-linux-musl.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
   depends_on arch: :x86_64
@@ -19,7 +19,11 @@ class Nowcast < Formula
   end
 
   def caveats
-    <<~EOS
+    warning = if version.to_s.include?("-")
+      "nowcast #{version} is an experimental pre-release, for testing only: " \
+        "interfaces and behaviour change without notice.\n\n"
+    end
+    warning.to_s + <<~EOS
       To let systemd start the service on the first connection:
         mkdir -p ~/.config/systemd/user
         ln -sf #{opt_pkgshare}/systemd/nowcast.socket #{opt_pkgshare}/systemd/nowcast.service ~/.config/systemd/user/

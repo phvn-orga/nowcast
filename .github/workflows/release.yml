@@ -122,7 +122,13 @@ jobs:
           path: ${{ runner.temp }}/dist
       - name: Publish the release
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "nowcast $VERSION" \
+          # A version with a pre-release part (0.1.0-alpha.1) is published as
+          # a pre-release, with a warning in place of the generated notes.
+          flags=(--generate-notes)
+          if [[ $VERSION == *-* ]]; then
+            flags=(--prerelease --notes "**Experimental pre-release, for testing only.** Interfaces, formats and behaviour change without notice. Do not rely on it.")
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "nowcast $VERSION" "${flags[@]}" \
             "$RUNNER_TEMP/dist/$ARCHIVE" "$RUNNER_TEMP/dist/$ARCHIVE.sha256"
       - name: Open the formula pull request
         run: |
