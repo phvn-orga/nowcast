@@ -1,4 +1,4 @@
-# The release workflow rewrites url and sha256 on every version tag.
+# The release workflow points url and sha256 at each release it publishes.
 class Nowcast < Formula
   desc "Local service streaming ready-to-use data to agents, dashboards and apps"
   homepage "https://github.com/phvn-orga/nowcast"
