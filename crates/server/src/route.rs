@@ -107,10 +107,14 @@ pub(crate) fn after(query: Option<&str>) -> Result<Option<EventId>, HttpError> {
     else {
         return Ok(None);
     };
+    // `u64::from_str` alone would take a leading `+`, which no id has.
     value
-        .parse()
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| value.parse().ok())
+        .flatten()
         .map(|id| Some(EventId(id)))
-        .map_err(|_| HttpError::invalid_request(format!("after={value:?} is not an event id")))
+        .ok_or_else(|| HttpError::invalid_request(format!("after={value:?} is not an event id")))
 }
 
 #[cfg(test)]
@@ -129,6 +133,7 @@ mod tests {
         assert_eq!(parsed(Some("after")), Err((400, "invalid_request")));
         assert_eq!(parsed(Some("after=-1")), Err((400, "invalid_request")));
         assert_eq!(parsed(Some("after=4x")), Err((400, "invalid_request")));
+        assert_eq!(parsed(Some("after=+5")), Err((400, "invalid_request")));
     }
 
     fn parse(method: Method, path: &str) -> Result<Route<'_>, (u16, &'static str)> {
