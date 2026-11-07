@@ -37,10 +37,12 @@ et le rafraîchissement aussi en session interactive.
   de CloudEvents, l'enveloppe en attributs, le détail dans `data`. Les raisons et les
   candidats écartés sont plus bas.
 - **Une requête ponctuelle « dernière valeur d'un flux »**, pour les clients qui
-  lisent à un instant donné plutôt qu'en continu.
+  lisent à un instant donné plutôt qu'en continu. Avec `after`, elle rend l'historique
+  du flux après un identifiant : ce dont a besoin un client à base de hooks, ou un mod
+  qui s'abonne en cours de session à un flux déjà suivi.
 - **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
-  valeur, en un appel), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
+  valeur, en un appel ; avec `--after <id>`, l'historique après cet identifiant), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
   immédiat, rien d'affiché en cas de succès). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
@@ -189,11 +191,6 @@ protocole.
 - **Vérifier en session interactive `/clear` et plusieurs observateurs sur la même
   clé.** Le rechargement à chaud et le rafraîchissement y ont été vérifiés (Claude Code
   2.1.319) ; `/clear` seulement en session sans interface (`claude -p`).
-- **Lire l'historique d'un seul flux.** `GET /v1/flows/{flow}` ne rend que le dernier
-  événement. Un client à base de hooks, ou un abonnement pris après l'ouverture du flux,
-  lit aujourd'hui l'historique en rouvrant le flux avec un `Last-Event-ID` antérieur.
-  Une plage sur cette requête (les événements après un identifiant) reste à décider si
-  le besoin apparaît.
 
 ## Hors périmètre pour l'instant
 
