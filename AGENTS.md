@@ -14,7 +14,10 @@ Locally, run only what the change touches:
 - a Rust crate: `cargo test -p nowcast-<crate>`;
 - the Claude Code client, from `clients/claude-code`: `nr typecheck` and
   `nr test`, after `nr types` once in a fresh worktree (it fetches the plugin
-  API's types).
+  API's types);
+- the static release binary, after a dependency change: `docker build -f
+  build/release.Dockerfile --output dist .`, the container the release workflow
+  runs.
 
 The CI (`.github/workflows/ci.yml`) runs the whole workspace and is the judge.
 

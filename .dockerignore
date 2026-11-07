@@ -1,0 +1,5 @@
+# The release build needs the sources only.
+target
+dist
+.git
+**/node_modules
