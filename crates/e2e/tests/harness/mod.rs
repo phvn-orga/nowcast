@@ -158,6 +158,20 @@ impl Service {
         service
     }
 
+    /// Enables a brick with `nowcast bricks enable`, in the daemon's
+    /// configuration and data directories.
+    pub async fn enable(&self, brick: &str) {
+        let output = Command::new(cli_binary())
+            .args(["bricks", "enable", brick])
+            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("HOME", self.root.path())
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
     fn runtime(&self) -> PathBuf {
         self.root.path().join("run")
     }

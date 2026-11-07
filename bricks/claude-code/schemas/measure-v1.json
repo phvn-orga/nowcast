@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "description": "What a session sends about itself. Every field is optional; one left out keeps its last value.",
+  "properties": {
+    "root": { "type": "string", "description": "The session's directory." },
+    "model": { "type": "string", "description": "The main loop's model." },
+    "effort": { "type": ["string", "number", "null"], "description": "The effort of the main thread's last request." },
+    "context": {
+      "type": "object",
+      "description": "The context window's fill, as the engine measures it.",
+      "properties": {
+        "tokens": { "type": ["integer", "null"] },
+        "window": { "type": "integer" },
+        "percent": { "type": ["number", "null"] }
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "description": "Tokens spent since the session began, main thread and subagents, by category.",
+      "properties": {
+        "input": { "type": "integer" },
+        "output": { "type": "integer" },
+        "cache_creation": { "type": "integer" },
+        "cache_read": { "type": "integer" }
+      }
+    },
+    "last_request_at": { "type": "string", "description": "The main thread's last request, RFC 3339." },
+    "cache_ttl": { "enum": ["5m", "1h", null], "description": "The lifetime of the main thread's prompt cache, when known." },
+    "rate_limits": {
+      "type": "array",
+      "description": "The quota windows the session's last response reported.",
+      "items": {
+        "type": "object",
+        "required": ["name", "percent"],
+        "properties": {
+          "name": { "type": "string" },
+          "percent": { "type": "number" },
+          "resets_at": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "cost_usd": { "type": "number" }
+  }
+}

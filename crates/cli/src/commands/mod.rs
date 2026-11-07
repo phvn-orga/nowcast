@@ -1,6 +1,7 @@
 //! The commands. Each one checks its arguments, then declares the session
 //! before its first call.
 
+pub mod bricks;
 mod get;
 mod input;
 mod refresh;

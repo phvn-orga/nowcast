@@ -14,12 +14,15 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+nowcast-brick-claude-code = { path = "../../bricks/claude-code" }
 nowcast-daemon = { path = "../daemon" }
+nowcast-discovery = { path = "../discovery" }
 nowcast-types = { path = "../types" }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util", "macros"] }
 
 [dev-dependencies]
+nowcast-conformance = { path = "../conformance" }
 hyper = { version = "1.12.0", features = ["server", "http1"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "net", "time", "io-util", "macros", "sync", "process"] }

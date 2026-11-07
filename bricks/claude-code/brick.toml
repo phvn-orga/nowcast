@@ -1,0 +1,39 @@
+# The claude-code brick, native to nowcast: `nowcast bricks enable claude-code`
+# writes this file and its schemas under $XDG_DATA_HOME/nowcast/bricks/ and
+# activates it. The program `nowcast` is the service's own executable.
+manifest_version = 1
+name = "claude-code"
+version = "0.1.0-alpha.1"
+description = "Quotas of the Claude Code account and measures of its running sessions."
+protocol = 1
+
+[run]
+command = ["nowcast", "brick", "claude-code"]
+
+[subscriptions.quotas]
+description = "The account's usage windows, freshest reading of the usage API and of the sessions."
+schema = "schemas/params-quotas.json"
+publishes = "claude-code.quotas/v1"
+
+[subscriptions.session]
+description = "A session's own flow: it sends its measures there and reads back what the brick keeps. Reserved to the session itself; readers use `sessions`."
+schema = "schemas/params-session.json"
+publishes = "claude-code.session/v1"
+accepts = "claude-code.measure/v1"
+
+[subscriptions.sessions]
+description = "The running sessions, or one of them with `id`."
+schema = "schemas/params-sessions.json"
+publishes = "claude-code.sessions/v1"
+
+[types."claude-code.quotas/v1"]
+schema = "schemas/quotas-v1.json"
+
+[types."claude-code.session/v1"]
+schema = "schemas/session-v1.json"
+
+[types."claude-code.sessions/v1"]
+schema = "schemas/sessions-v1.json"
+
+[types."claude-code.measure/v1"]
+schema = "schemas/measure-v1.json"

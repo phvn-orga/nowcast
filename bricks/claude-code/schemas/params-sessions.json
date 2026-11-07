@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "description": "One session's id. Without it, every running session." }
+  },
+  "additionalProperties": false
+}

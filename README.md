@@ -43,3 +43,13 @@ systemctl --user enable --now nowcast.socket
 ```
 
 `nowcast daemon` also runs by hand, in the foreground, for a test. `nowcast daemon --help` lists the variables it reads.
+
+## Bricks
+
+A brick runs only once enabled, and only while something subscribes to it. The bricks this repository ships are built into the binary and enabled by name:
+
+```sh
+nowcast bricks enable claude-code
+```
+
+`claude-code` publishes the quotas of the Claude Code account and the measures of its running sessions. Any other brick is enabled by the path of its declaration file (`nowcast bricks enable path/to/brick.toml`), and `nowcast bricks disable <name>` turns one off.

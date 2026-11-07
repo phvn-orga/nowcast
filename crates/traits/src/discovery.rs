@@ -15,7 +15,8 @@ pub struct BrickDeclaration {
     pub protocol: u32,
     /// The command to launch. A program path (one with a `/`) is already
     /// absolute, a relative one resolved from [`Self::dir`]. A bare program
-    /// name is kept as is, to be looked up in `PATH` at launch.
+    /// name is kept as is, to be looked up in `PATH` at launch, except
+    /// `nowcast`, the service's own executable.
     pub command: Vec<String>,
     /// The real directory of the declaration file, link resolved. The brick
     /// runs there.

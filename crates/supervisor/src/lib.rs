@@ -78,5 +78,5 @@ mod state;
 mod supervisor;
 
 pub use config::Config;
-pub use launcher::ProcessLauncher;
+pub use launcher::{ProcessLauncher, SELF};
 pub use supervisor::BrickSupervisor;
