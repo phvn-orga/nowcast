@@ -23,9 +23,10 @@ The CI (`.github/workflows/ci.yml`) runs the whole workspace and is the judge.
 
 ## Release
 
-A `v<version>` tag publishes a release; it must equal the workspace version in
-`Cargo.toml`. `.github/workflows/release.yml` describes what follows,
-including the Homebrew formula in `Formula/`.
+Release with `gh workflow run release.yml -f version=<version>`, and nothing
+by hand: no version edit, no tag. The run sets the version, tags, publishes and
+updates the Homebrew formula in `Formula/`, merging its own pull requests;
+`.github/workflows/release.yml` describes it.
 
 ## Harness
 
