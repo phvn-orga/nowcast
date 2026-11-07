@@ -89,8 +89,9 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
     `nowcast brick <nom>`, qui parle le protocole des briques sur son entrée et sa
     sortie. Elle reste un processus à part, que le service lance à partir de sa
     déclaration comme n'importe quelle autre. Il n'y a toujours qu'une chose à
-    installer, et une brique native tourne toujours à la version du service. Elle est
-    donc écrite en Rust.
+    installer, et une brique native tourne toujours à la version du service, que sa
+    déclaration porte aussi, reçue du workspace à la compilation. Elle est donc
+    écrite en Rust.
   - **Rangement.** Chacune vit dans `bricks/<nom>/` : sa crate
     (`nowcast-brick-<nom>`), son fichier de déclaration (`brick.toml`) et ses schémas.
     Déclaration et schémas sont embarqués dans le binaire, comme les déclarations de
