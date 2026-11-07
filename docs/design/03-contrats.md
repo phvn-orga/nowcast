@@ -145,6 +145,15 @@ répond `201` :
 - `GET /v1/flows/{flow}` répond `200` avec le dernier événement, ou `204` si le flux
   n'a encore rien publié. Seulement pour un flux auquel le processus d'ancrage est
   abonné (`404` `unknown_flow` sinon).
+- `GET /v1/flows/{flow}?after=<id>` lit l'historique du flux (voir « Le flux
+  d'événements ») : `200` avec chaque événement gardé plus récent que `<id>`, par
+  identifiant croissant, et `gap` à `true` quand il en manque, selon la même règle que
+  `flow-gap`. `after=0` rend tout l'historique gardé. Même condition d'abonnement ;
+  `400` `invalid_request` si `<id>` n'est pas un identifiant d'événement.
+
+```json
+{ "gap": false, "events": [ { "specversion": "1.0", "id": "42", "…": "…" } ] }
+```
 
 ### Le flux d'événements
 
@@ -187,8 +196,7 @@ seulement que sa vue de ce flux a un trou.
 Un client peut s'abonner avant ou après avoir ouvert le flux sans perdre de valeur ; il
 reçoit parfois en double une valeur déjà lue dans `last`, reconnaissable à son `id`. Un
 flux abonné après l'ouverture n'envoie sur le flux ouvert que ses publications à venir :
-pour lire ce qu'il a publié avant, le client rouvre le flux avec un `Last-Event-ID`
-antérieur.
+ce qu'il a publié avant se lit par `GET /v1/flows/{flow}?after=0`.
 
 Les identifiants d'événement croissent aussi d'une exécution du service à l'autre : au
 démarrage, le compteur part de l'horloge, en microsecondes depuis 1970, puis avance de
@@ -220,7 +228,8 @@ Attributs de l'événement :
 Un agent qui n'a que des hooks ponctuels (Codex, Droid) déclare sa session et s'abonne
 dans son hook de début de session. Les abonnements vivent avec le processus d'ancrage,
 pas avec le hook. Ses hooks suivants lisent la dernière valeur par
-`nowcast get <flux>`.
+`nowcast get <flux>`, et ce qui a suivi un identifiant par
+`nowcast get <flux> --after <id>`.
 
 ## 4. Le protocole des briques
 
