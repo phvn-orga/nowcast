@@ -11,7 +11,9 @@ et le rafraîchissement aussi en session interactive.
   l'événement, sans conversion ni base64.
 - **Des clients minces : l'état vit dans le service.** Le service garde, pour chaque
   processus d'ancrage, ses abonnements et l'identifiant de session en cours, et pour
-  chaque flux sa dernière valeur. Une coupure du flux ne fait rien perdre. Un client ne fait que
+  chaque flux ses derniers événements (`03-contrats.md`, section 3). Une coupure du flux
+  ne fait rien perdre dans la limite de cet historique, et au-delà le client en est
+  averti (`flow-gap`). Un client ne fait que
   cinq choses : déclarer sa session, s'abonner, se désabonner, lire son flux et
   demander le rafraîchissement immédiat d'un flux. Le service n'exécute aucune action
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
@@ -42,7 +44,8 @@ et le rafraîchissement aussi en session interactive.
   immédiat, rien d'affiché en cas de succès). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
-  après cet identifiant, sans recevoir à nouveau toutes les dernières valeurs.
+  après cet identifiant : chaque événement gardé depuis, plutôt que toutes les
+  dernières valeurs.
   L'identifiant à lui passer est l'`id` de l'événement CloudEvents, dans `data`, égal
   à l'`id` SSE. Sous `--json`, des lignes d'état disent aussi où en est la connexion :
   `{"status":"connected"}` à chaque connexion, la première comprise, et
@@ -186,6 +189,11 @@ protocole.
 - **Vérifier en session interactive `/clear` et plusieurs observateurs sur la même
   clé.** Le rechargement à chaud et le rafraîchissement y ont été vérifiés (Claude Code
   2.1.319) ; `/clear` seulement en session sans interface (`claude -p`).
+- **Lire l'historique d'un seul flux.** `GET /v1/flows/{flow}` ne rend que le dernier
+  événement. Un client à base de hooks, ou un abonnement pris après l'ouverture du flux,
+  lit aujourd'hui l'historique en rouvrant le flux avec un `Last-Event-ID` antérieur.
+  Une plage sur cette requête (les événements après un identifiant) reste à décider si
+  le besoin apparaît.
 
 ## Hors périmètre pour l'instant
 
