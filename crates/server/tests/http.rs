@@ -63,6 +63,7 @@ fn start_with<I: Identity>(identity: I, mode: ProbeMode) -> Harness<I> {
         discovery: Arc::clone(&discovery),
         identity: Arc::clone(&identity),
         sessions: Arc::new(FakeSessions::new()),
+        validators: Default::default(),
     };
     let task = tokio::spawn(server.serve(listener));
     Harness {
@@ -713,6 +714,7 @@ fn an_anchor_dying_while_its_brick_resolves_keeps_no_subscription() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
         let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;
@@ -825,6 +827,7 @@ fn an_anchor_dying_while_its_stream_opens_gets_no_stream() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
         let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;

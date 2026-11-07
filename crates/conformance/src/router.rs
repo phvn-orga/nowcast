@@ -111,6 +111,19 @@ pub async fn last_value_is_for_subscribers_only<S: RouterSubject>() {
     assert_eq!(router.last(A, &flow("y")), Err(UnknownFlow(flow("y"))));
 }
 
+/// `is_subscribed` answers as `last` does, without the value: for the
+/// subscribed anchor only, until its last subscription goes.
+pub async fn is_subscribed_follows_the_subscriptions<S: RouterSubject>() {
+    let router = S::new();
+    let (subscription, _) = router.subscribe(A, flow("x"));
+    publish(&router, &flow("x"), "1");
+    assert!(router.is_subscribed(A, &flow("x")));
+    assert!(!router.is_subscribed(B, &flow("x")));
+    assert!(!router.is_subscribed(A, &flow("y")));
+    router.unsubscribe(A, &subscription).unwrap();
+    assert!(!router.is_subscribed(A, &flow("x")));
+}
+
 /// Event ids increase within a flow.
 pub async fn event_ids_increase_within_a_flow<S: RouterSubject>() {
     let router = S::new();
@@ -445,6 +458,7 @@ macro_rules! router_suite {
                     a_subscription_belongs_to_its_anchor,
                     subscribing_returns_the_last_value,
                     last_value_is_for_subscribers_only,
+                    is_subscribed_follows_the_subscriptions,
                     event_ids_increase_within_a_flow,
                     events_carry_the_flow_type_and_detail,
                     publishing_needs_a_known_flow,

@@ -30,6 +30,7 @@ use crate::event::{CloudEvent, to_line};
 use crate::params;
 use crate::route::{self, Route, decode};
 use crate::sse::{self, SseBody};
+use crate::validators::Validators;
 
 /// The largest request body read, in bytes. Requests carry a session id or a
 /// subscription, far below it.
@@ -52,6 +53,8 @@ pub struct Server<R, Su, D, I, Se> {
     pub discovery: Arc<D>,
     pub identity: Arc<I>,
     pub sessions: Arc<Se>,
+    /// The compiled schemas of accepted types: [`Validators::default`].
+    pub validators: Validators,
 }
 
 #[derive(Deserialize)]
@@ -230,9 +233,9 @@ where
             Route::Refresh(flow) => {
                 let flow = flow_id(flow)?;
                 // Like reading it, refreshing a flow takes a subscription.
-                self.router
-                    .last(anchor, &flow)
-                    .map_err(|_| HttpError::unknown_flow(&flow.to_string()))?;
+                if !self.router.is_subscribed(anchor, &flow) {
+                    return Err(HttpError::unknown_flow(&flow.to_string()));
+                }
                 self.supervisor
                     .refresh(&flow)
                     .map_err(|_| HttpError::unknown_flow(&flow.to_string()))?;
@@ -253,7 +256,9 @@ where
     ) -> Result<Response<Body>, HttpError> {
         let unknown = || HttpError::unknown_flow(&flow.to_string());
         // Like reading it, sending to a flow takes a subscription.
-        self.router.last(anchor, flow).map_err(|_| unknown())?;
+        if !self.router.is_subscribed(anchor, flow) {
+            return Err(unknown());
+        }
         let kind = self.supervisor.kind(flow).ok_or_else(unknown)?;
         let declaration = self.discovery.brick(flow.brick()).ok_or_else(unknown)?;
         let not_accepted = || {
@@ -273,6 +278,7 @@ where
             .get(&accepts)
             .ok_or_else(not_accepted)?
             .schema;
+        let validator = self.validators.get(&declaration, &accepts, schema)?;
         let bytes = read_body(body).await?;
         let input: Value = serde_json::from_slice(&bytes).map_err(|e| {
             HttpError::api(
@@ -280,7 +286,7 @@ where
                 format!("the input is not JSON: {e}"),
             )
         })?;
-        params::validate_input(schema, &input, &accepts)?;
+        params::validate_input(&validator, &input, &accepts)?;
         self.supervisor
             .input(flow, &accepts, bytes.to_vec())
             .map_err(|e| match e {

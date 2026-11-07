@@ -71,7 +71,13 @@ async fn session_measures_reach_the_list_and_the_quotas() {
     // Another process cannot take the session's own flow.
     let mut other = service.agent();
     let taken = other
-        .run(&["--json", "subscribe", "claude-code", "session", r#"{"id":"s1"}"#])
+        .run(&[
+            "--json",
+            "subscribe",
+            "claude-code",
+            "session",
+            r#"{"id":"s1"}"#,
+        ])
         .await;
     assert_eq!(taken.error_code(), "subscription_refused", "{taken:?}");
     assert!(taken.stderr.contains("taken"), "{taken:?}");

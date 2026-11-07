@@ -204,6 +204,7 @@ async fn serve(
         discovery,
         identity,
         sessions,
+        validators: Default::default(),
     };
     let serving = async move {
         match idle {

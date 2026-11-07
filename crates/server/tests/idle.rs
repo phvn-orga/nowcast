@@ -58,6 +58,7 @@ fn serve(listener: UnixListener, socket: PathBuf, dir: TempDir, idle: Duration) 
         discovery,
         identity: Arc::new(FakeIdentity::new()),
         sessions: Arc::new(FakeSessions::new()),
+        validators: Default::default(),
     };
     let task = tokio::spawn(server.serve_until_idle(listener, idle));
     Harness {
@@ -282,6 +283,7 @@ async fn serve_runs_whatever_the_idle_time() {
         discovery: Arc::new(FakeDiscovery::new()),
         identity: Arc::new(FakeIdentity::new()),
         sessions: Arc::new(FakeSessions::new()),
+        validators: Default::default(),
     };
     let task = tokio::spawn(server.serve(listener));
     sleep(IDLE * 2).await;
