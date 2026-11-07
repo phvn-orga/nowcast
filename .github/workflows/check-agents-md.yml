@@ -15,7 +15,30 @@ permissions:
   contents: read
 
 jobs:
+  # Runs when an instruction file changes, or when a file is deleted or
+  # renamed anywhere: the check verifies that the paths they cite exist. A
+  # job skipped here counts as passed for a required check. (Added to
+  # baudrier's job: keep it through an upgrade.)
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.changes.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          run=$(.github/scripts/changed.sh --or-removed '*AGENTS.md' '*CLAUDE.md' \
+            scripts/check-agents-md.mjs .github/workflows/check-agents-md.yml)
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   check-agents-md:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
