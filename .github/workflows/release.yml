@@ -75,11 +75,14 @@ jobs:
             git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -qam "$title"
-            git push origin "$branch"
+            # The branch is this workflow's: a run again replaces it, and
+            # takes over its pull request.
+            git push --force origin "$branch"
             gh workflow run ci.yml --ref "$branch"
             gh workflow run check-agents-md.yml --ref "$branch"
-            gh pr create --base main --head "$branch" --title "$title" \
-              --body "Opened by the release workflow, which merges it once its checks pass."
+            gh pr view "$branch" --json state -q .state 2>/dev/null | grep -qx OPEN ||
+              gh pr create --base main --head "$branch" --title "$title" \
+                --body "Opened by the release workflow, which merges it once its checks pass."
             .github/scripts/merge-when-green.sh "$branch"
             git fetch -q origin main
           fi
@@ -212,9 +215,11 @@ jobs:
           git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -qam "$title"
-          git push origin "$branch"
+          # As for the version branch: replaced, its pull request taken over.
+          git push --force origin "$branch"
           gh workflow run ci.yml --ref "$branch"
           gh workflow run check-agents-md.yml --ref "$branch"
-          gh pr create --base main --head "$branch" --title "$title" \
-            --body "Points the Homebrew formula at the v$VERSION release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
+          gh pr view "$branch" --json state -q .state 2>/dev/null | grep -qx OPEN ||
+            gh pr create --base main --head "$branch" --title "$title" \
+              --body "Points the Homebrew formula at the v$VERSION release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
           .github/scripts/merge-when-green.sh "$branch"
