@@ -122,6 +122,13 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   rangée dans le dépôt même (`Formula/`), sans dépôt de tap à part. Installer ne
   demande aucune compilation ; `cargo install` reste la voie du développement (voir
   `02-clients.md`).
+- **Une release en une seule action.** Lancer le workflow de release avec une
+  version suffit : il ouvre la PR qui la porte dans `Cargo.toml`, puis, une fois
+  celle-ci mergée par la CI, construit le binaire, pose le tag, publie la release et
+  ouvre la PR de formule, mergée de même. La version n'est écrite qu'à un endroit,
+  `Cargo.toml` : les déclarations des briques natives la reçoivent à la compilation.
+  Plusieurs gestes à la main finissent par en oublier un. Tout passe par des PR,
+  `main` n'acceptant pas de poussée directe.
 
 ## Limite assumée de la sécurité
 
