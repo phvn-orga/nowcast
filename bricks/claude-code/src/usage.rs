@@ -135,8 +135,10 @@ pub fn read_copy(path: &Path, seen: &mut Option<SystemTime>) -> Option<(Value, T
     if *seen == Some(modified) {
         return None;
     }
-    *seen = Some(modified);
+    // Seen only once read whole: a file caught while Claude Code writes it is
+    // read again at the next turn.
     let json: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    *seen = Some(modified);
     cached_copy(&json)
 }
 
@@ -171,6 +173,9 @@ mod tests {
         let path = dir.path().join(".claude.json");
         let mut seen = None;
         assert_eq!(read_copy(&path, &mut seen), None);
+        std::fs::write(&path, "{ half").unwrap();
+        assert_eq!(read_copy(&path, &mut seen), None);
+        assert_eq!(seen, None, "an unreadable version is read again");
         let json = serde_json::json!({
             "cachedUsageUtilization": { "fetchedAtMs": 1_000, "utilization": { "five_hour": { "utilization": 1 } } }
         });

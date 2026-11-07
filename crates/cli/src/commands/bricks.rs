@@ -22,9 +22,7 @@ pub fn enable(brick: &str) -> Result<(), CliError> {
                 "no native brick {brick:?}: give the path of a declaration file instead"
             ))
         })?;
-        let dir = native_dir_from_env().ok_or_else(|| {
-            CliError::Usage("neither XDG_DATA_HOME nor HOME is set to an absolute path".into())
-        })?;
+        let dir = native_dir_from_env().map_err(|e| CliError::Usage(e.to_string()))?;
         write_native(&dir, &native.files).map_err(CliError::Io)?
     };
     nowcast_discovery::enable(&bricks, &declaration)

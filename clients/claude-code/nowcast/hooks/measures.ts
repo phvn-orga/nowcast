@@ -20,6 +20,8 @@ type $ = EngineInterface
 const BRICK = 'claude-code'
 /** Measures closer than this go out as one. */
 const GROUP_MS = 500
+/** The longest wait for the transcripts' count before a request. */
+const SEED_MS = 5_000
 /** How much of the transcript's end holds its last responses. */
 const TAIL_BYTES = 262_144
 
@@ -38,10 +40,18 @@ type Measured = {
   /** The flow and subscription, once subscribed. */
   flow?: string
   subscription?: string
+  /** The subscription being made: one at a time. */
+  subscribing?: Promise<boolean>
   /** The brick is not enabled: nothing is sent for this session. */
   off: boolean
   tokens: Tokens
+  /** The transcripts' count, which requests wait for: see `seed`. */
+  seeding: Promise<void>
   context?: unknown
+  /**
+   * The quota windows of the last `session.measure`, sent once: a reading
+   * sent again later would pass for a newer one.
+   */
   rateLimits?: Array<{ kind: string; percentUsed: number; resetsAt?: string }>
   cost?: number
   effort?: string | number
@@ -54,13 +64,26 @@ let current: Measured | undefined
 
 const zero = (): Tokens => ({ input: 0, output: 0, cache_creation: 0, cache_read: 0 })
 
+/** Runs a measurement; what fails there never reaches the engine's event. */
+async function quietly($: $, work: () => Promise<void>): Promise<void> {
+  try {
+    await work()
+  } catch (error) {
+    $.ui.log(`nowcast: cannot measure the session: ${message(error)}`, { to: 'debug' })
+  }
+}
+
 export function registerMeasures(on: On): void {
   on('session.measure', async ($, e, next) => {
-    const m = await measured($)
-    m.context = e.context
-    m.rateLimits = e.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt }))
-    if (e.cost !== undefined) m.cost = e.cost.usd
-    schedule($, m)
+    await quietly($, async () => {
+      const m = await measured($)
+      m.context = e.context
+      if (e.changed.includes('rateLimits')) {
+        m.rateLimits = e.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt }))
+      }
+      if (e.cost !== undefined) m.cost = e.cost.usd
+      schedule($, m)
+    })
     return next(e)
   })
 
@@ -68,14 +91,20 @@ export function registerMeasures(on: On): void {
   // session's tokens. The main thread's also says its effort, and refreshes
   // its cache.
   on('turn.step', async function* ($, e, next) {
-    const m = await measured($)
-    if (e.agentId === undefined) {
-      if (e.effort !== undefined) m.effort = e.effort
-      m.lastRequestAt = new Date(await $.clock.now()).toISOString()
-    }
+    let m: Measured | undefined
+    await quietly($, async () => {
+      m = await measured($)
+      if (e.agentId === undefined) {
+        if (e.effort !== undefined) m.effort = e.effort
+        m.lastRequestAt = new Date(await $.clock.now()).toISOString()
+      }
+      await m.seeding
+    })
     const result = yield* next(e)
-    add(m.tokens, result.usage)
-    schedule($, m)
+    if (m !== undefined) {
+      add(m.tokens, result.usage)
+      schedule($, m)
+    }
     return result
   })
 
@@ -105,27 +134,27 @@ async function measured($: $): Promise<Measured> {
   const id = await $.session.id()
   if (current?.id === id) return current
   const left = current
-  current = { id, off: false, tokens: zero(), scheduled: false }
+  const m: Measured = { id, off: false, tokens: zero(), seeding: Promise.resolve(), scheduled: false }
+  current = m
   if (left?.subscription !== undefined) void unsubscribe($, left.subscription)
-  seed($, current)
-  return current
+  m.seeding = seed($, m)
+  return m
 }
 
 /**
- * Adds what the transcripts count to the tokens, without waiting: what this
- * mod counts meanwhile is kept on top.
+ * Adds what the transcripts count to the tokens. Requests wait for it
+ * (`turn.step`), so that a response is never both read there and counted
+ * by this mod; a transcript that takes longer than `SEED_MS` to read is
+ * left out.
  */
-function seed($: $, m: Measured): void {
-  const before = { ...m.tokens }
-  void transcriptTokens($, m.id)
-    .then(found => {
-      if (found === undefined) return
-      for (const key of Object.keys(found) as Array<keyof Tokens>) {
-        m.tokens[key] += found[key] - before[key]
-      }
-      schedule($, m)
-    })
-    .catch(() => undefined)
+async function seed($: $, m: Measured): Promise<void> {
+  const found = await Promise.race([
+    transcriptTokens($, m.id).catch(() => undefined),
+    $.clock.sleep(SEED_MS).then(() => undefined),
+  ])
+  if (found === undefined) return
+  for (const key of Object.keys(found) as Array<keyof Tokens>) m.tokens[key] += found[key]
+  schedule($, m)
 }
 
 function add(tokens: Tokens, usage: Usage | null | undefined): void {
@@ -147,22 +176,31 @@ function schedule($: $, m: Measured): void {
   })
 }
 
+/** Subscribes the session to its flow; whether it is subscribed. */
+async function subscribe($: $, m: Measured): Promise<boolean> {
+  const answer = await subscribeKept($, { brick: BRICK, kind: 'session', params: { id: m.id } })
+  if (!answer.ok) {
+    // Not enabled: nothing to send this session. Anything else may pass.
+    if (answer.code === 'unknown_brick') m.off = true
+    return false
+  }
+  if (m !== current) {
+    void unsubscribe($, answer.subscription)
+    return false
+  }
+  m.flow = answer.flow
+  m.subscription = answer.subscription
+  return true
+}
+
 async function send($: $, m: Measured): Promise<void> {
   if (m.flow === undefined) {
-    const answer = await subscribeKept($, { brick: BRICK, kind: 'session', params: { id: m.id } })
-    if (!answer.ok) {
-      // Not enabled: nothing to send this session. Anything else may pass.
-      if (answer.code === 'unknown_brick') m.off = true
-      return
-    }
-    if (m !== current) {
-      void unsubscribe($, answer.subscription)
-      return
-    }
-    m.flow = answer.flow
-    m.subscription = answer.subscription
+    m.subscribing ??= subscribe($, m).finally(() => (m.subscribing = undefined))
+    if (!(await m.subscribing) || m.flow === undefined) return
   }
-  const sent = await input($, m.flow, await detail($, m))
+  const body = await detail($, m)
+  m.rateLimits = undefined
+  const sent = await input($, m.flow, body)
   if (!sent.ok) $.ui.log(`nowcast: the brick refused the measures: ${sent.message}`, { to: 'debug' })
 }
 

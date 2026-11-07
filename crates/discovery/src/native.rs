@@ -21,28 +21,6 @@ pub struct NativeFiles {
     pub files: &'static [(&'static str, &'static str)],
 }
 
-/// Where native bricks are written: `$XDG_DATA_HOME/nowcast/bricks/`, by
-/// default `~/.local/share/nowcast/bricks/`.
-pub fn native_dir(xdg_data_home: Option<&Path>, home: &Path) -> PathBuf {
-    match xdg_data_home {
-        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
-        _ => home.join(".local/share"),
-    }
-    .join("nowcast/bricks")
-}
-
-/// [`native_dir`] from `$XDG_DATA_HOME` and `$HOME`; `None` when neither
-/// gives an absolute path.
-pub fn native_dir_from_env() -> Option<PathBuf> {
-    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match (xdg.as_deref(), home.as_deref()) {
-        (Some(xdg), _) if xdg.is_absolute() => Some(native_dir(Some(xdg), Path::new(""))),
-        (_, Some(home)) if home.is_absolute() => Some(native_dir(None, home)),
-        _ => None,
-    }
-}
-
 /// Writes the files of `brick` under `<dir>/<name>/`, each one only when its
 /// content differs, through a rename so that no reader sees half a file.
 /// Returns the path of its declaration.
@@ -145,23 +123,6 @@ schema = "schemas/one.json"
         name: "native",
         files: &[(DECLARATION, DECL), ("schemas/one.json", SCHEMA)],
     };
-
-    #[test]
-    fn the_native_dir_follows_xdg() {
-        let home = Path::new("/home/u");
-        assert_eq!(
-            native_dir(None, home),
-            Path::new("/home/u/.local/share/nowcast/bricks")
-        );
-        assert_eq!(
-            native_dir(Some(Path::new("relative")), home),
-            Path::new("/home/u/.local/share/nowcast/bricks")
-        );
-        assert_eq!(
-            native_dir(Some(Path::new("/data")), home),
-            Path::new("/data/nowcast/bricks")
-        );
-    }
 
     #[test]
     fn enabling_writes_the_files_and_links_the_declaration() {

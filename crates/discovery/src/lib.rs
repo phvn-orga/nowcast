@@ -18,11 +18,10 @@ mod native;
 mod watch;
 
 pub use client_kind::{ClientKindError, parse_client_kind};
-pub use dirs::{DiscoveryConfig, NoHome, bricks_dir, clients_dir};
+pub use dirs::{DiscoveryConfig, NoHome, bricks_dir, clients_dir, native_dir, native_dir_from_env};
 pub use manifest::{MANIFEST_VERSION, ManifestError, load_manifest};
 pub use native::{
-    DECLARATION, EnableError, NativeFiles, disable, enable, native_dir, native_dir_from_env,
-    refresh_natives, write_native,
+    DECLARATION, EnableError, NativeFiles, disable, enable, refresh_natives, write_native,
 };
 pub use watch::{FsDiscovery, StartError};
 

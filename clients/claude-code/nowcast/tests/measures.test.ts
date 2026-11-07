@@ -82,8 +82,26 @@ test('a measure subscribes the session to its flow, then sends what it measured'
   ])
 })
 
-// Two settles of the mock clock: more than the default 5 s on a slow machine.
-test('without the brick, nothing is sent and the subscription is not asked again', { timeoutMs: 15_000 }, async ($, on) => {
+test('a quota reading goes out once, with the measure that brought it', async ($, on) => {
+  const w = world(on, { answer: service(true) })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  await $.session.measure(MEASURE as never)
+  await w.clock.advance(500)
+  await w.clock.settle()
+  await $.session.measure({ ...MEASURE, changed: ['context'] } as never)
+  await w.clock.advance(500)
+  await w.clock.settle()
+
+  const sent = inputs(w.requests)
+  expect(sent.length).toBe(2)
+  expect(sent[0]?.rate_limits).toEqual([{ name: 'five_hour', percent: 23.5, resets_at: '2026-11-07T18:00:00Z' }])
+  expect(sent[1]?.rate_limits).toBe(undefined)
+})
+
+test('without the brick, nothing is sent and the subscription is not asked again', async ($, on) => {
   const w = world(on, { answer: service(false) })
   engine(on)
   await $.session.start(START)

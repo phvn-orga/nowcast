@@ -99,8 +99,9 @@ fn log(message: impl std::fmt::Display) {
     eprintln!("{NAME}: {message}");
 }
 
-/// The quotas' reading of the usage API, alive while the flow has a
-/// subscriber.
+/// The quotas' reading of the usage API, made at the first subscription and
+/// kept after: its pace and a reading in flight outlive a flow released and
+/// subscribed again. It reads only while the flow has a subscriber.
 struct Reader {
     pacer: Pacer,
     in_flight: bool,
@@ -153,7 +154,7 @@ async fn serve() -> ExitCode {
     loop {
         let due = reader
             .as_ref()
-            .filter(|r| !r.in_flight)
+            .filter(|r| !r.in_flight && state.wants_quotas())
             .map(|r| r.pacer.next());
         tokio::select! {
             msg = from_service.recv() => {
@@ -175,7 +176,6 @@ async fn serve() -> ExitCode {
                             _watcher: watch(&paths, changed_tx.clone()),
                         });
                     }
-                    (Some(_), false) => reader = None,
                     (Some(r), true) if refresh_quotas => r.pacer.hurry(Instant::now()),
                     _ => {}
                 }

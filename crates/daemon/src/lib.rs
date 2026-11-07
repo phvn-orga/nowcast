@@ -183,8 +183,8 @@ async fn serve(
     let mut interrupt = signal(SignalKind::interrupt())?;
 
     match native_dir_from_env() {
-        Some(dir) => refresh_natives(&dir, natives),
-        None => tracing::warn!("neither XDG_DATA_HOME nor HOME is set: native bricks left as is"),
+        Ok(dir) => refresh_natives(&dir, natives),
+        Err(e) => tracing::warn!("native bricks left as is: {e}"),
     }
     let config = DiscoveryConfig::from_env()?;
     let discovery = Arc::new(

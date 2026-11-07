@@ -54,8 +54,12 @@ impl Pacer {
     }
 
     /// Someone asked for a fresh reading: as soon as [`MIN_GAP`] allows, and
-    /// never later than already planned. Close requests fold into one.
+    /// never later than already planned. Close requests fold into one. While
+    /// backing off after a `429`, the plan stands.
     pub fn hurry(&mut self, now: Instant) {
+        if self.interval > INTERVAL {
+            return;
+        }
         let earliest = self.last.map_or(now, |last| (last + MIN_GAP).max(now));
         self.next = self.next.min(earliest);
     }
@@ -99,5 +103,15 @@ mod tests {
         let mut fresh = Pacer::new(t0);
         fresh.hurry(t0);
         assert_eq!(fresh.next(), t0);
+    }
+
+    #[test]
+    fn a_hurry_does_not_cut_a_backoff() {
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(t0);
+        pacer.started(t0);
+        pacer.limited(t0, Some(Duration::from_secs(300)));
+        pacer.hurry(t0 + Duration::from_secs(20));
+        assert_eq!(pacer.next(), t0 + Duration::from_secs(300));
     }
 }
