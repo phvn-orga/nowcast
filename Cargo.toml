@@ -3,6 +3,14 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 publish = false
+
+# The binaries the release workflow publishes. A profile of its own keeps the
+# everyday `--release` build fast.
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true

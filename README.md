@@ -2,7 +2,7 @@
 
 A local service that provides ready-to-use data: the state of a PR and its CI, usage quotas, tasks, system resources. Its consumers (agent mods and extensions for Claude Code, Codex or others, dashboards, any app) connect, subscribe to bricks and receive their updates live. The service starts on the first connection and stays idle while nobody listens.
 
-Status: implementation starting. The design notes live on the `design` branch, under `docs/design/`.
+Status: alpha. Experimental, for testing only: interfaces, formats and behaviour change without notice. The design notes live on the `design` branch, under `docs/design/`.
 
 ## Requirements
 
@@ -10,19 +10,32 @@ Linux 6.5 or later: the service identifies its peers with `SO_PEERPIDFD`.
 
 ## Install
 
-One binary, `nowcast`: the command-line client, and the service itself as `nowcast daemon`. Both always ship at the same version.
+One binary, `nowcast`: the command-line client, and the service itself as `nowcast daemon`. Both always ship at the same version. The Claude Code mod runs `nowcast` from the `PATH`.
 
-Install it in `~/.local/bin`, which is usually on the `PATH`, unlike `~/.cargo/bin`:
+### Homebrew (x86_64 Linux)
+
+The formula lives in this repository and installs a prebuilt static binary:
+
+```sh
+brew tap phvn-orga/nowcast https://github.com/phvn-orga/nowcast
+brew install phvn-orga/nowcast/nowcast
+```
+
+The full name trusts this formula alone, which Homebrew 6 and later require for a tap outside Homebrew's own. Then let systemd start the service on the first connection, with the units the formula installs:
+
+```sh
+mkdir -p ~/.config/systemd/user
+ln -sf "$(brew --prefix)"/opt/nowcast/share/nowcast/systemd/nowcast.{socket,service} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nowcast.socket
+```
+
+### From source
+
+For development, install the checkout into `~/.local/bin`, where the repository's unit runs it from:
 
 ```sh
 cargo install --root ~/.local --path crates/cli
-```
-
-The Claude Code mod runs `nowcast` from the `PATH`, and the systemd unit runs `%h/.local/bin/nowcast daemon`. Installed elsewhere, edit `ExecStart=` in `nowcast.service`.
-
-Then let systemd start the service on the first connection:
-
-```sh
 mkdir -p ~/.config/systemd/user
 cp crates/daemon/systemd/nowcast.socket crates/daemon/systemd/nowcast.service ~/.config/systemd/user/
 systemctl --user daemon-reload

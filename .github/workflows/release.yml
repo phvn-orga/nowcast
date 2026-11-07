@@ -1,0 +1,145 @@
+name: Release
+
+# A version tag (v0.1.0) builds the static binary, publishes it as a GitHub
+# Release, then opens the pull request that points the Homebrew formula at it.
+# A pull request touching the release path runs the same build and packaging,
+# installs the formula from the local archive, and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Formula/**
+      - crates/daemon/systemd/**
+      # A new dependency can break the static build.
+      - Cargo.lock
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      archive: ${{ steps.package.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - name: Version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "nowcast-cli") | .version')
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: cargo build --locked -p nowcast-cli --target "$TARGET" --profile dist
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="nowcast-v$VERSION-$TARGET"
+          mkdir -p "dist/$name/systemd"
+          cp "target/$TARGET/dist/nowcast" README.md "dist/$name/"
+          cp crates/daemon/systemd/nowcast.socket crates/daemon/systemd/nowcast.service "dist/$name/systemd/"
+          test "$("dist/$name/nowcast" --version)" = "nowcast $VERSION"
+          tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/$name.tar.gz"
+          sha256=$(cut -d ' ' -f 1 "dist/$name.tar.gz.sha256")
+          sed -e "s|^  url \".*\"$|  url \"$url\"|" -e "s|^  sha256 \".*\"$|  sha256 \"$sha256\"|" \
+            Formula/nowcast.rb > dist/nowcast.rb
+          grep -qF "$url" dist/nowcast.rb && grep -qF "$sha256" dist/nowcast.rb
+          ls -l "dist/$name/nowcast" "dist/$name.tar.gz"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - name: Install the formula from the local archive
+        if: github.event_name == 'pull_request'
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          tap="$RUNNER_TEMP/tap"
+          mkdir -p "$tap/Formula"
+          sed "s|^  url \".*\"$|  url \"file://$PWD/dist/$ARCHIVE\"|" dist/nowcast.rb > "$tap/Formula/nowcast.rb"
+          git -C "$tap" init -q
+          git -C "$tap" add .
+          git -C "$tap" -c user.name=ci -c user.email=ci@localhost commit -qm formula
+          brew tap nowcast/dry-run "$tap"
+          brew style nowcast/dry-run/nowcast
+          # As in the README: the fully qualified name trusts this formula alone.
+          brew install nowcast/dry-run/nowcast
+          brew audit --formula nowcast/dry-run/nowcast
+          brew test nowcast/dry-run/nowcast
+          unit="$(brew --prefix)/opt/nowcast/share/nowcast/systemd/nowcast.service"
+          grep -x "ExecStart=$(brew --prefix)/opt/nowcast/bin/nowcast daemon" "$unit"
+          ! grep -F .local/bin "$unit"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/nowcast.rb
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the release, push the formula branch.
+      contents: write
+      # Open the formula pull request.
+      pull-requests: write
+      # Run CI on that branch: a pull request opened by GITHUB_TOKEN starts no workflow.
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      ARCHIVE: ${{ needs.build.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+      - name: Publish the release
+        run: |
+          # A version with a pre-release part (0.1.0-alpha.1) is published as
+          # a pre-release, with a warning in place of the generated notes.
+          flags=(--generate-notes)
+          if [[ $VERSION == *-* ]]; then
+            flags=(--prerelease --notes "**Experimental pre-release, for testing only.** Interfaces, formats and behaviour change without notice. Do not rely on it.")
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "nowcast $VERSION" "${flags[@]}" \
+            "$RUNNER_TEMP/dist/$ARCHIVE" "$RUNNER_TEMP/dist/$ARCHIVE.sha256"
+      - name: Open the formula pull request
+        run: |
+          branch="formula/v$VERSION"
+          title="build(formula): release nowcast $VERSION"
+          git switch -c "$branch"
+          cp "$RUNNER_TEMP/dist/nowcast.rb" Formula/nowcast.rb
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qam "$title"
+          git push origin "$branch"
+          gh workflow run ci.yml --ref "$branch"
+          gh pr create --base main --head "$branch" --title "$title" \
+            --body "Points the Homebrew formula at the $GITHUB_REF_NAME release. Merge it to make \`brew upgrade\` see $VERSION."
