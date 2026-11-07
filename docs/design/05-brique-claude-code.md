@@ -18,15 +18,18 @@ le même.
 | `sessions` | `{}` | `claude-code/sessions` | `claude-code.sessions/v1` | rien |
 | `sessions` | `{"id": "<identifiant de session>"}` | `claude-code/sessions/<id>` | `claude-code.session/v1` | rien |
 
-- **`session` est le flux d'émission d'une session**, réservé à elle seule. Elle y
-  envoie ses mesures et y relit aussitôt ce que la brique en retient. Le `release`
-  de ce flux dit à la brique que la session s'est arrêtée : désabonnement, `/clear`,
-  ou mort de son processus.
+- **`session` est le flux d'émission d'une session**, qui ne prend qu'un abonné :
+  le premier. Elle y envoie ses mesures et y relit aussitôt ce que la brique en
+  retient. Le `release` de ce flux dit à la brique que la session s'est arrêtée :
+  désabonnement, `/clear`, ou mort de son processus.
+- **Un second abonné est refusé** : tant que le flux vit, la brique répond au
+  `subscribe` par l'erreur `taken`, que le client reçoit en `422`
+  `subscription_refused`. Le service n'envoyant `release` qu'au départ du dernier
+  abonné, un second abonné cacherait la fin de la session, et pourrait envoyer des
+  mesures en son nom. Si un autre processus prend le flux avant la session, c'est
+  elle qui est refusée et ses mesures ne partent pas.
 - **`sessions` est la lecture**, de toutes les sessions ou d'une seule, par
-  n'importe quel client : une autre session, un tableau de bord. Un lecteur ne
-  s'abonne jamais au flux `session` d'une autre session : le service n'envoie
-  `release` qu'au départ du dernier abonné d'un flux, et un lecteur resté abonné
-  cacherait la fin de la session.
+  n'importe quel client : une autre session, un tableau de bord.
 
 ## Quotas
 
