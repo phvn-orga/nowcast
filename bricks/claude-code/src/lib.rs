@@ -43,7 +43,10 @@ pub const NAME: &str = "claude-code";
 /// The declaration and its schemas, by path relative to the declaration's
 /// directory.
 pub const FILES: &[(&str, &str)] = &[
-    ("brick.toml", include_str!("../brick.toml")),
+    (
+        "brick.toml",
+        include_str!(concat!(env!("OUT_DIR"), "/brick.toml")),
+    ),
     (
         "schemas/params-quotas.json",
         include_str!("../schemas/params-quotas.json"),

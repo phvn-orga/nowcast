@@ -1,12 +1,19 @@
 name: Release
 
-# A version tag (v0.1.0) builds the static binary, publishes it as a GitHub
-# Release, then opens the pull request that points the Homebrew formula at it.
+# One action releases: `gh workflow run release.yml -f version=<version>`.
+# The run opens the pull request that sets the version in Cargo.toml and
+# merges it once its checks pass, builds the static binary from the merge,
+# tags it and publishes it as a GitHub Release, then opens and merges the pull
+# request that points the Homebrew formula at it. Run again with the same
+# version after a failure, it skips what is already done up to the release.
 # A pull request touching the release path runs the same build and packaging,
 # installs the formula from the local archive, and publishes nothing.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to release, without the v (0.1.0-alpha.2)
+        required: true
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -24,29 +31,91 @@ env:
   TARGET: x86_64-unknown-linux-musl
 
 jobs:
+  version:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      # Push the version branch.
+      contents: write
+      # Open and merge the version pull request.
+      pull-requests: write
+      # Run CI on that branch: a pull request opened by GITHUB_TOKEN starts no workflow.
+      actions: write
+    outputs:
+      sha: ${{ steps.merge.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set the version and merge it
+        id: merge
+        run: |
+          if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::$VERSION is not a version (0.1.0, 0.1.0-alpha.2)"
+            exit 1
+          fi
+          if [ -n "$(git ls-remote --tags origin "v$VERSION")" ]; then
+            echo "::error::v$VERSION is already released"
+            exit 1
+          fi
+          current=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "nowcast-cli") | .version')
+          # A run again after a failure further on: main already has it.
+          if [ "$current" != "$VERSION" ]; then
+            branch="release/v$VERSION"
+            title="build(release): set the version to $VERSION"
+            # The first `version` of Cargo.toml is the workspace's.
+            sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" Cargo.toml
+            cargo update --workspace
+            git switch -c "$branch"
+            git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -qam "$title"
+            git push origin "$branch"
+            gh workflow run ci.yml --ref "$branch"
+            gh workflow run check-agents-md.yml --ref "$branch"
+            gh pr create --base main --head "$branch" --title "$title" \
+              --body "Opened by the release workflow, which merges it once its checks pass."
+            .github/scripts/merge-when-green.sh "$branch"
+            git fetch -q origin main
+          fi
+          echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
+    # The version job runs for a release only; a pull request builds alone.
+    if: ${{ !cancelled() && (needs.version.result == 'success' || needs.version.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       archive: ${{ steps.package.outputs.archive }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.version.outputs.sha || github.sha }}
           persist-credentials: false
       # For `cargo metadata` alone: the binary builds in the container below.
       - uses: dtolnay/rust-toolchain@stable
       - name: Version
         id: version
+        env:
+          INPUT: ${{ inputs.version }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "nowcast-cli") | .version')
-          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$INPUT" != "$version" ]; then
+            echo "::error::the merged version is $version, not $INPUT"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       # The same container builds the binary locally: see its header.
       - run: docker build -f build/release.Dockerfile --output out .
       - name: Package
@@ -100,13 +169,13 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
       # Create the release, push the formula branch.
       contents: write
-      # Open the formula pull request.
+      # Open and merge the formula pull request.
       pull-requests: write
       # Run CI on that branch: a pull request opened by GITHUB_TOKEN starts no workflow.
       actions: write
@@ -114,6 +183,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.build.outputs.version }}
       ARCHIVE: ${{ needs.build.outputs.archive }}
+      SHA: ${{ needs.build.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -130,9 +200,10 @@ jobs:
           if [[ $VERSION == *-* ]]; then
             flags=(--prerelease --notes "**Experimental pre-release, for testing only.** Interfaces, formats and behaviour change without notice. Do not rely on it.")
           fi
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "nowcast $VERSION" "${flags[@]}" \
+          # Tags the commit the binary was built from.
+          gh release create "v$VERSION" --target "$SHA" --title "nowcast $VERSION" "${flags[@]}" \
             "$RUNNER_TEMP/dist/$ARCHIVE" "$RUNNER_TEMP/dist/$ARCHIVE.sha256"
-      - name: Open the formula pull request
+      - name: Point the formula at the release and merge it
         run: |
           branch="formula/v$VERSION"
           title="build(formula): release nowcast $VERSION"
@@ -145,4 +216,5 @@ jobs:
           gh workflow run ci.yml --ref "$branch"
           gh workflow run check-agents-md.yml --ref "$branch"
           gh pr create --base main --head "$branch" --title "$title" \
-            --body "Points the Homebrew formula at the $GITHUB_REF_NAME release. Merge it to make \`brew upgrade\` see $VERSION."
+            --body "Points the Homebrew formula at the v$VERSION release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
+          .github/scripts/merge-when-green.sh "$branch"
