@@ -46,7 +46,11 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # ring, under the claude-code brick's TLS, compiles C for the target.
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --locked -p nowcast-cli --target "$TARGET" --profile dist
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
       - name: Package
         id: package
         env:
