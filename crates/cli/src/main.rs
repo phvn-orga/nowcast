@@ -1,5 +1,5 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `subscribe`. `nowcast daemon` runs the service itself, from the
+//! `refresh`, `input`, `subscribe`. `nowcast daemon` runs the service itself, from the
 //! `nowcast-daemon` library: one binary to install, at one version.
 //!
 //! Every command declares a session (`PUT /v1/session`) before any other call
@@ -12,6 +12,7 @@ mod client;
 mod commands;
 mod config;
 mod error;
+mod native;
 mod output;
 mod sse;
 
@@ -21,15 +22,31 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches};
 
-use crate::args::{Cli, Command};
+use crate::args::{BricksAction, Cli, Command};
 use crate::client::Client;
 use crate::error::CliError;
 
 fn main() -> ExitCode {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    if let Command::Daemon = cli.command {
-        return daemon(&matches);
+    match &cli.command {
+        Command::Daemon => return daemon(&matches),
+        // A brick runs on its own runtime, and talks to the service alone.
+        Command::Brick { name } => return brick(name),
+        Command::Bricks { action } => {
+            let result = match action {
+                BricksAction::Enable { brick } => commands::bricks::enable(brick),
+                BricksAction::Disable { brick } => commands::bricks::disable(brick),
+            };
+            return match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    error.report(cli.json);
+                    ExitCode::from(error.exit_code())
+                }
+            };
+        }
+        _ => {}
     }
     let json = cli.json;
     let result = tokio::runtime::Builder::new_current_thread()
@@ -56,7 +73,18 @@ fn daemon(matches: &clap::ArgMatches) -> ExitCode {
             .error(ErrorKind::ArgumentConflict, message)
             .exit();
     }
-    nowcast_daemon::run()
+    nowcast_daemon::run(&native::files())
+}
+
+/// Runs a native brick, as the service launches it.
+fn brick(name: &str) -> ExitCode {
+    match native::find(name) {
+        Some(native) => (native.run)(),
+        None => {
+            eprintln!("nowcast: no native brick {name:?}");
+            ExitCode::from(error::exit::USAGE)
+        }
+    }
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
@@ -70,6 +98,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
         }
         Command::Refresh { flow } => commands::refresh(&client, &flow).await,
+        Command::Input { flow } => commands::input(&client, &flow, io::stdin().lock()).await,
         Command::Subscribe {
             brick,
             kind,
@@ -85,6 +114,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let resume = last_event_id.as_deref();
             commands::watch(&client, &subscribe, resume, cli.json, &mut out, &mut err).await
         }
-        Command::Daemon => unreachable!("main runs the daemon before any client command"),
+        Command::Daemon | Command::Brick { .. } | Command::Bricks { .. } => {
+            unreachable!("main runs these before any client command")
+        }
     }
 }

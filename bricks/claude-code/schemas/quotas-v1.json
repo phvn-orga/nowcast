@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "required": ["windows", "usage_api"],
+  "properties": {
+    "windows": {
+      "type": "array",
+      "description": "One entry per known window, under the name its source gives it (five_hour, seven_day, seven_day_opus...).",
+      "items": {
+        "type": "object",
+        "required": ["name", "percent", "as_of", "source"],
+        "properties": {
+          "name": { "type": "string" },
+          "percent": { "type": "number", "description": "0 to 100." },
+          "resets_at": { "type": ["string", "null"], "description": "RFC 3339." },
+          "as_of": { "type": "string", "description": "When the reading was taken, RFC 3339." },
+          "source": { "enum": ["usage-api", "session"] }
+        }
+      }
+    },
+    "usage_api": {
+      "type": "object",
+      "required": ["status", "as_of"],
+      "properties": {
+        "status": { "enum": ["ok", "token_expired", "no_credentials", "rate_limited", "unreadable", "pending"] },
+        "as_of": { "type": ["string", "null"], "description": "The last successful reading, RFC 3339." }
+      }
+    }
+  }
+}

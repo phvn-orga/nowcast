@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["id"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "description": "The session's own id, as the agent gives it." }
+  },
+  "additionalProperties": false
+}

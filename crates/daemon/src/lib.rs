@@ -31,7 +31,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nowcast_discovery::{DiscoveryConfig, FsDiscovery};
+use nowcast_discovery::{
+    DiscoveryConfig, FsDiscovery, NativeFiles, native_dir_from_env, refresh_natives,
+};
 use nowcast_identity::PeerIdentity;
 use nowcast_router::FlowRouter;
 use nowcast_server::Server;
@@ -66,9 +68,13 @@ type Supervisor = BrickSupervisor<FsDiscovery, ProcessLauncher, FlowRouter>;
 
 /// Runs the service until it is stopped or idle, and returns its exit status.
 ///
+/// `natives` are the native bricks the binary embeds: those written once
+/// under `$XDG_DATA_HOME/nowcast/bricks/` are rewritten to match them before
+/// the bricks directory is read.
+///
 /// Reads the environment and edits it while taking the socket: call it from
 /// the main thread, before any other thread starts.
-pub fn run() -> ExitCode {
+pub fn run(natives: &[NativeFiles]) -> ExitCode {
     init_logging();
     let idle = match idle_setting(std::env::var_os(IDLE_VAR)) {
         Ok(idle) => idle,
@@ -99,7 +105,7 @@ pub fn run() -> ExitCode {
         .enable_all()
         .build();
     let result = match runtime {
-        Ok(runtime) => runtime.block_on(serve(socket, idle)),
+        Ok(runtime) => runtime.block_on(serve(socket, idle, natives)),
         Err(e) => Err(format!("cannot start the runtime: {e}").into()),
     };
     match result {
@@ -160,7 +166,11 @@ fn stderr_is_journal() -> bool {
     stream.to_str() == Some(format!("{}:{}", metadata.dev(), metadata.ino()).as_str())
 }
 
-async fn serve(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Error>> {
+async fn serve(
+    socket: Socket,
+    idle: Option<Duration>,
+    natives: &[NativeFiles],
+) -> Result<(), Box<dyn Error>> {
     // Dropped last, when `serve` returns, whether it succeeds or fails.
     let Socket {
         listener,
@@ -172,6 +182,10 @@ async fn serve(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Err
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
 
+    match native_dir_from_env() {
+        Ok(dir) => refresh_natives(&dir, natives),
+        Err(e) => tracing::warn!("native bricks left as is: {e}"),
+    }
     let config = DiscoveryConfig::from_env()?;
     let discovery = Arc::new(
         FsDiscovery::start(config).map_err(|e| format!("cannot start the discovery: {e}"))?,
@@ -190,6 +204,7 @@ async fn serve(socket: Socket, idle: Option<Duration>) -> Result<(), Box<dyn Err
         discovery,
         identity,
         sessions,
+        validators: Default::default(),
     };
     let serving = async move {
         match idle {

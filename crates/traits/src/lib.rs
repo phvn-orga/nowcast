@@ -29,4 +29,4 @@ pub use discovery::{
 pub use identity::Identity;
 pub use router::{FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
 pub use sessions::Sessions;
-pub use supervisor::{BrickUnavailable, ResolveError, Resolved, Supervisor};
+pub use supervisor::{BrickUnavailable, InputError, ResolveError, Resolved, Supervisor};

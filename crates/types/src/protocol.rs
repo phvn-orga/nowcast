@@ -24,6 +24,14 @@ pub enum ServiceMessage {
     Release { flow: FlowId },
     /// The brick publishes again once it has re-read the source.
     Refresh { flow: FlowId },
+    /// A subscriber of the flow sent a detail, already checked against the
+    /// schema of `data_type`, the type the flow's kind accepts.
+    Input {
+        flow: FlowId,
+        data_type: String,
+        /// The JSON bytes of the detail.
+        detail: Vec<u8>,
+    },
     /// The brick exits.
     Shutdown,
     /// The `publish` with this `req` was accepted.
@@ -43,6 +51,7 @@ impl ServiceMessage {
             Self::Subscribe { .. } => "subscribe",
             Self::Release { .. } => "release",
             Self::Refresh { .. } => "refresh",
+            Self::Input { .. } => "input",
             Self::Shutdown => "shutdown",
             Self::Ack { .. } => "ack",
             Self::Error { .. } => "error",

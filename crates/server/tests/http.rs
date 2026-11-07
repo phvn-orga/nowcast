@@ -14,8 +14,8 @@ use nowcast_conformance::{block_on, probe};
 use nowcast_server::{MAX_BODY, Server};
 use nowcast_traits::fake::{FakeDiscovery, FakeIdentity, FakeRouter, FakeSessions, FakeSupervisor};
 use nowcast_traits::{
-    Anchor, AnchorId, History, Identity, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
-    UnknownSubscription,
+    Anchor, AnchorId, History, Identity, InputError, ResolveError, Resolved, Router, Supervisor,
+    UnknownFlow, UnknownSubscription,
 };
 use nowcast_types::QualifiedFlowId;
 use nowcast_types::{BrickName, Event, EventId, StreamEvent, SubscriptionId};
@@ -63,6 +63,7 @@ fn start_with<I: Identity>(identity: I, mode: ProbeMode) -> Harness<I> {
         discovery: Arc::clone(&discovery),
         identity: Arc::clone(&identity),
         sessions: Arc::new(FakeSessions::new()),
+        validators: Default::default(),
     };
     let task = tokio::spawn(server.serve(listener));
     Harness {
@@ -97,6 +98,14 @@ impl<I: Identity> ApiHarness for Harness<I> {
 
     async fn refreshes(&self) -> Vec<QualifiedFlowId> {
         self.supervisor.refreshes()
+    }
+
+    async fn inputs(&self) -> Vec<(QualifiedFlowId, String, serde_json::Value)> {
+        self.supervisor
+            .inputs()
+            .into_iter()
+            .map(|(flow, ty, detail)| (flow, ty, serde_json::from_slice(&detail).unwrap()))
+            .collect()
     }
 }
 
@@ -670,6 +679,19 @@ impl Supervisor for DyingAnchor {
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
         self.inner.refresh(flow)
     }
+
+    fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
+        self.inner.kind(flow)
+    }
+
+    fn input(
+        &self,
+        flow: &QualifiedFlowId,
+        data_type: &str,
+        detail: Vec<u8>,
+    ) -> Result<(), InputError> {
+        self.inner.input(flow, data_type, detail)
+    }
 }
 
 #[test]
@@ -692,6 +714,7 @@ fn an_anchor_dying_while_its_brick_resolves_keeps_no_subscription() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
         let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;
@@ -804,6 +827,7 @@ fn an_anchor_dying_while_its_stream_opens_gets_no_stream() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
         let declared = send(&socket, "PUT", "/v1/session", &[], r#"{"id":"s"}"#).await;

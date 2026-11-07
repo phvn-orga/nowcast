@@ -45,6 +45,9 @@ pub trait ApiHarness {
 
     /// The flows the probe was asked to refresh, in order.
     fn refreshes(&self) -> impl Future<Output = Vec<QualifiedFlowId>>;
+
+    /// The inputs the probe received, in order: flow, type and detail.
+    fn inputs(&self) -> impl Future<Output = Vec<(QualifiedFlowId, String, Value)>>;
 }
 
 /// Starts a fresh service: no session, no subscription.
@@ -129,7 +132,7 @@ impl Client {
         &self,
         method: &str,
         path: &str,
-        body: Option<Value>,
+        body: Option<Bytes>,
         headers: &[(&str, &str)],
     ) -> hyper::Response<Incoming> {
         let stream = UnixStream::connect(&self.socket)
@@ -147,9 +150,9 @@ impl Client {
             request = request.header(*name, *value);
         }
         let body = match body {
-            Some(json) => {
+            Some(bytes) => {
                 request = request.header("content-type", "application/json");
-                Bytes::from(serde_json::to_vec(&json).unwrap())
+                bytes
             }
             None => Bytes::new(),
         };
@@ -160,6 +163,12 @@ impl Client {
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Response {
+        let body = body.map(|json| Bytes::from(serde_json::to_vec(&json).unwrap()));
+        self.request_raw(method, path, body).await
+    }
+
+    /// A request whose body is sent as is, JSON or not.
+    async fn request_raw(&self, method: &str, path: &str, body: Option<Bytes>) -> Response {
         let response = self.send(method, path, body, &[]).await;
         let status = response.status().as_u16();
         let content_type = content_type(&response);
@@ -178,11 +187,15 @@ impl Client {
     }
 
     async fn subscribe(&self, id: &str) -> Subscribed {
+        self.subscribe_to(probe::KIND, id).await
+    }
+
+    async fn subscribe_to(&self, kind: &str, id: &str) -> Subscribed {
         let response = self
             .request(
                 "POST",
                 "/v1/subscriptions",
-                Some(json!({ "brick": probe::NAME, "kind": probe::KIND, "params": { "id": id } })),
+                Some(json!({ "brick": probe::NAME, "kind": kind, "params": { "id": id } })),
             )
             .await;
         response.status(201);
@@ -405,6 +418,7 @@ pub async fn requests_before_the_session_are_refused<S: ApiSubject>() {
         ("DELETE", "/v1/subscriptions/s-1", None),
         ("GET", "/v1/flows/probe%2Fa", None),
         ("POST", "/v1/flows/probe%2Fa/refresh", None),
+        ("POST", "/v1/flows/probe%2Fa/input", Some(json!({}))),
         ("GET", "/v1/stream", None),
     ] {
         client
@@ -572,6 +586,66 @@ pub async fn refresh_answers_202_and_reaches_the_brick<S: ApiSubject>() {
     })
     .await;
     assert!(reached.is_ok(), "the brick never got the refresh");
+}
+
+/// `POST /v1/flows/{flow}/input` answers `202` and relays the detail to the
+/// brick, under the type the flow's kind accepts.
+pub async fn input_answers_202_and_reaches_the_brick<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let subscribed = client.subscribe_to(probe::INBOX_KIND, "a").await;
+    let path = format!("/v1/flows/{}/input", encode(&subscribed.flow));
+    for n in 1..=2 {
+        client
+            .request("POST", &path, Some(json!({ "n": n })))
+            .await
+            .status(202);
+    }
+    let expected = |n: i64| {
+        (
+            subscribed.qualified.clone(),
+            probe::INPUT_TYPE.to_owned(),
+            json!({ "n": n }),
+        )
+    };
+    let reached = timeout(WAIT, async {
+        while harness.inputs().await.len() < 2 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the brick never got both inputs");
+    assert_eq!(harness.inputs().await, vec![expected(1), expected(2)]);
+}
+
+/// An input takes a subscription to the flow (`404` `unknown_flow`), a kind
+/// that accepts one (`405` `input_not_accepted`), and JSON that matches the
+/// accepted type's schema (`400` `invalid_input`). None reaches the brick.
+pub async fn invalid_inputs_are_refused<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let inbox = client.subscribe_to(probe::INBOX_KIND, "a").await;
+    let item = client.subscribe("b").await;
+    let path = |flow: &str| format!("/v1/flows/{}/input", encode(flow));
+    client
+        .request("POST", &path("probe/inbox/never"), Some(json!({})))
+        .await
+        .error(404, "unknown_flow");
+    client
+        .request("POST", &path(&item.flow), Some(json!({})))
+        .await
+        .error(405, "input_not_accepted");
+    client
+        .request("POST", &path(&inbox.flow), Some(json!(42)))
+        .await
+        .error(400, "invalid_input");
+    client
+        .request_raw(
+            "POST",
+            &path(&inbox.flow),
+            Some(Bytes::from_static(b"{nope")),
+        )
+        .await
+        .error(400, "invalid_input");
+    assert_eq!(harness.inputs().await, vec![]);
 }
 
 /// `GET /v1/flows/{flow}` answers `204` before the first value, then `200`
@@ -816,6 +890,8 @@ macro_rules! api_suite {
                     subscriptions_are_per_subscriber,
                     unsubscribing_answers_204,
                     refresh_answers_202_and_reaches_the_brick,
+                    input_answers_202_and_reaches_the_brick,
+                    invalid_inputs_are_refused,
                     reading_a_flow_gives_its_last_event,
                     reading_an_unsubscribed_flow_answers_404,
                     flow_ids_are_percent_encoded,

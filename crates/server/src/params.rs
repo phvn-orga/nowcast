@@ -1,5 +1,6 @@
-//! Subscription params, checked against the JSON Schema of their kind.
+//! Subscription params and flow inputs, checked against their JSON Schema.
 
+use jsonschema::Validator;
 use nowcast_types::ApiErrorCode;
 use serde_json::Value;
 
@@ -16,11 +17,47 @@ const MAX_REPORTED: usize = 5;
 /// `jsonschema` across the workspace: a request never waits on the network or
 /// the disk.
 pub(crate) fn validate(schema: &Value, params: &Value, kind: &str) -> Result<(), HttpError> {
-    let validator = jsonschema::options().offline().build(schema).map_err(|e| {
-        tracing::warn!("the params schema of kind {kind:?} does not compile: {e}");
-        HttpError::internal(format!("the params schema of kind {kind:?} is invalid"))
-    })?;
-    let mut errors = validator.iter_errors(params).peekable();
+    let validator = compile(schema, &format!("the params schema of kind {kind:?}"))?;
+    report(
+        &validator,
+        params,
+        ApiErrorCode::InvalidParams,
+        &format!("params do not match the schema of kind {kind:?}"),
+    )
+}
+
+/// `400` `invalid_input` when `input` does not match the compiled schema of
+/// the accepted type `ty`.
+pub(crate) fn validate_input(
+    validator: &Validator,
+    input: &Value,
+    ty: &str,
+) -> Result<(), HttpError> {
+    report(
+        validator,
+        input,
+        ApiErrorCode::InvalidInput,
+        &format!("the input does not match the schema of type {ty:?}"),
+    )
+}
+
+/// Compiles `schema`, named `what` in the `500` of one that does not compile.
+pub(crate) fn compile(schema: &Value, what: &str) -> Result<Validator, HttpError> {
+    jsonschema::options().offline().build(schema).map_err(|e| {
+        tracing::warn!("{what} does not compile: {e}");
+        HttpError::internal(format!("{what} is invalid"))
+    })
+}
+
+/// `code` with `mismatch` and the first violations when `value` does not
+/// match.
+fn report(
+    validator: &Validator,
+    value: &Value,
+    code: ApiErrorCode,
+    mismatch: &str,
+) -> Result<(), HttpError> {
+    let mut errors = validator.iter_errors(value).peekable();
     if errors.peek().is_none() {
         return Ok(());
     }
@@ -32,11 +69,8 @@ pub(crate) fn validate(schema: &Value, params: &Value, kind: &str) -> Result<(),
         })
         .collect();
     Err(HttpError::api(
-        ApiErrorCode::InvalidParams,
-        format!(
-            "params do not match the schema of kind {kind:?}: {}",
-            reported.join("; ")
-        ),
+        code,
+        format!("{mismatch}: {}", reported.join("; ")),
     ))
 }
 

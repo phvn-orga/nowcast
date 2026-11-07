@@ -41,7 +41,10 @@ struct Run {
 struct Subscription {
     description: String,
     schema: PathBuf,
-    publishes: String,
+    #[serde(default)]
+    publishes: Option<String>,
+    #[serde(default)]
+    accepts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,8 +80,13 @@ impl ManifestSubject for Section1 {
         };
         let mut subscriptions = BTreeMap::new();
         for (kind, sub) in file.subscriptions {
-            if !file.types.contains_key(&sub.publishes) {
-                return Err(format!("{kind} publishes undeclared {}", sub.publishes));
+            for ty in sub.publishes.iter().chain(&sub.accepts) {
+                if !file.types.contains_key(ty) {
+                    return Err(format!("{kind} names undeclared {ty}"));
+                }
+            }
+            if sub.publishes.is_none() && sub.accepts.is_none() {
+                return Err(format!("{kind} neither publishes nor accepts"));
             }
             let schema = schema(&sub.schema)?;
             subscriptions.insert(
@@ -87,6 +95,7 @@ impl ManifestSubject for Section1 {
                     description: sub.description,
                     schema,
                     publishes: sub.publishes,
+                    accepts: sub.accepts,
                 },
             );
         }

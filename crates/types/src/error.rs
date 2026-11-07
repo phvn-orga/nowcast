@@ -65,6 +65,10 @@ error_codes!(
         BrickUnavailable => "brick_unavailable",
         /// The brick answered `subscribe` with `error`.
         SubscriptionRefused => "subscription_refused",
+        /// The flow's subscription kind accepts no input.
+        InputNotAccepted => "input_not_accepted",
+        /// The input is not JSON, or does not match the accepted type's schema.
+        InvalidInput => "invalid_input",
     }
 );
 

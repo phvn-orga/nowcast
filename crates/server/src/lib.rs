@@ -8,6 +8,7 @@
 //! | `DELETE /v1/subscriptions/{subscription}` | `204` | `404` `unknown_subscription` |
 //! | `GET /v1/flows/{flow}` | `200` last event, `204` none yet | `404` `unknown_flow` |
 //! | `POST /v1/flows/{flow}/refresh` | `202` | `404` `unknown_flow` |
+//! | `POST /v1/flows/{flow}/input` | `202` | `400` `invalid_input`, `404` `unknown_flow`, `405` `input_not_accepted`, `503` `brick_unavailable` |
 //! | `GET /v1/stream` | `200` `text/event-stream` | |
 //!
 //! Every route but the first answers `428` `session_required` until the
@@ -26,5 +27,7 @@ mod params;
 mod route;
 mod server;
 mod sse;
+mod validators;
 
 pub use server::{MAX_BODY, Server};
+pub use validators::Validators;

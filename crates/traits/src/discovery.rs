@@ -15,7 +15,8 @@ pub struct BrickDeclaration {
     pub protocol: u32,
     /// The command to launch. A program path (one with a `/`) is already
     /// absolute, a relative one resolved from [`Self::dir`]. A bare program
-    /// name is kept as is, to be looked up in `PATH` at launch.
+    /// name is kept as is, to be looked up in `PATH` at launch, except
+    /// `nowcast`, the service's own executable.
     pub command: Vec<String>,
     /// The real directory of the declaration file, link resolved. The brick
     /// runs there.
@@ -23,7 +24,7 @@ pub struct BrickDeclaration {
     pub env: BTreeMap<String, String>,
     /// By subscription kind.
     pub subscriptions: BTreeMap<String, SubscriptionKind>,
-    /// By published type, for example `forge.pr/v1`.
+    /// By published or accepted type, for example `forge.pr/v1`.
     pub types: BTreeMap<String, TypeDeclaration>,
 }
 
@@ -33,8 +34,11 @@ pub struct SubscriptionKind {
     /// The JSON Schema the subscription params must match, loaded.
     pub schema: serde_json::Value,
     /// The type this kind's flows publish, declared in
-    /// [`BrickDeclaration::types`].
-    pub publishes: String,
+    /// [`BrickDeclaration::types`]. A kind has this, [`Self::accepts`], or both.
+    pub publishes: Option<String>,
+    /// The type of the input a subscriber may send on this kind's flows,
+    /// declared in [`BrickDeclaration::types`].
+    pub accepts: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

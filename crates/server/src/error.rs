@@ -110,6 +110,8 @@ pub(crate) fn status_of(code: ApiErrorCode) -> StatusCode {
         }
         ApiErrorCode::BrickUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         ApiErrorCode::SubscriptionRefused => StatusCode::UNPROCESSABLE_ENTITY,
+        ApiErrorCode::InputNotAccepted => StatusCode::METHOD_NOT_ALLOWED,
+        ApiErrorCode::InvalidInput => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -127,6 +129,8 @@ mod tests {
             ("unknown_flow", 404),
             ("brick_unavailable", 503),
             ("subscription_refused", 422),
+            ("input_not_accepted", 405),
+            ("invalid_input", 400),
         ];
         for code in ApiErrorCode::ALL {
             let status = expected

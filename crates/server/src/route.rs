@@ -21,6 +21,8 @@ pub(crate) enum Route<'a> {
     Flow(&'a str),
     /// `POST /v1/flows/{flow}/refresh`
     Refresh(&'a str),
+    /// `POST /v1/flows/{flow}/input`
+    Input(&'a str),
     /// `GET /v1/stream`
     Stream,
 }
@@ -41,6 +43,7 @@ impl<'a> Route<'a> {
             ["subscriptions", id] => (Self::Unsubscribe(id), Method::DELETE),
             ["flows", flow] => (Self::Flow(flow), Method::GET),
             ["flows", flow, "refresh"] => (Self::Refresh(flow), Method::POST),
+            ["flows", flow, "input"] => (Self::Input(flow), Method::POST),
             ["stream"] => (Self::Stream, Method::GET),
             _ => return Err(HttpError::not_found()),
         };

@@ -1,0 +1,26 @@
+# A kind may accept an input besides what it publishes, or accept one alone.
+manifest_version = 1
+name = "inbox"
+version = "0.1.0"
+description = "Takes inputs."
+protocol = 1
+
+[run]
+command = ["bin/inbox"]
+
+[subscriptions.both]
+description = "Publishes and accepts."
+schema = "schemas/subscription-pr.json"
+publishes = "forge.pr/v1"
+accepts = "inbox.input/v1"
+
+[subscriptions.only]
+description = "Accepts only."
+schema = "schemas/subscription-pr.json"
+accepts = "inbox.input/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"
+
+[types."inbox.input/v1"]
+schema = "schemas/forge-pr-v1.json"

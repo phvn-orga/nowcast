@@ -181,6 +181,12 @@ impl State {
         Ok(event)
     }
 
+    pub(crate) fn is_subscribed(&self, anchor: AnchorId, flow_id: &QualifiedFlowId) -> bool {
+        self.flows
+            .get(flow_id)
+            .is_some_and(|flow| flow.has_anchor(anchor))
+    }
+
     pub(crate) fn last(
         &self,
         anchor: AnchorId,

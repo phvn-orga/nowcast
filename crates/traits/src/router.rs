@@ -86,6 +86,11 @@ pub trait Router: Send + Sync + 'static {
     /// has published nothing yet.
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow>;
 
+    /// Whether `anchor` is subscribed to `flow`, without reading its value.
+    fn is_subscribed(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> bool {
+        self.last(anchor, flow).is_ok()
+    }
+
     /// The kept events of a flow `anchor` is subscribed to whose id is greater
     /// than `after`, with whether some of them are gone.
     fn history(

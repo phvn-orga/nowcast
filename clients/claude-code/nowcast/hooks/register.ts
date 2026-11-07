@@ -1,12 +1,13 @@
 // The nowcast mod: one per Claude Code session. It declares the session to
 // the service, holds the session's one event stream through `nowcast watch`,
 // and writes each flow it receives into its state for other mods to read.
-// Requests (subscribe, unsubscribe, refresh) go from each mod to the service:
+// Requests (subscribe, unsubscribe, refresh, input) go from each mod to the service:
 // all mods run in this process, so the service ties them to the same session.
 
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
-import { STUB, history, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import { STUB, history, input, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import { registerMeasures } from './measures'
 import { Lines, type Status, type StreamEvent, isNewer, nextFlow, parseLine } from './stream'
 
 const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
@@ -56,6 +57,7 @@ export const register: Register = on => {
   })
   on('nowcast.unsubscribe', async ($, e) => ({ value: await unsubscribe($, e.subscription) }))
   on('nowcast.refresh', async ($, e) => ({ value: await refresh($, e.flow) }))
+  on('nowcast.input', async ($, e) => ({ value: await input($, e.flow, e.detail) }))
   on('nowcast.last', async ($, e) => {
     const value = await last($, e.flow)
     if (value.ok && value.last !== null) await offer($, value.last)
@@ -78,6 +80,9 @@ export const register: Register = on => {
     if (e.reason === 'clear' || e.reason === 'resume') awaitNewId($, e.sessionId, 0)
     return ended
   })
+
+  // The session's measures, for the claude-code brick when it is enabled.
+  registerMeasures(on)
 
   // A backstop: a turn always runs under the session the service knows.
   on('turn.start', async ($, e, next) => {

@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "description": "Every running session that sent a measure, as claude-code.session/v1.",
+      "items": { "type": "object" }
+    }
+  }
+}

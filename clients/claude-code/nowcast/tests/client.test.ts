@@ -153,11 +153,12 @@ test('without a socket path, nothing is sent', plugins, async ($, on) => {
   expect(w.requests).toEqual([])
 })
 
-test('refresh, last and unsubscribe reach the flow and the subscription', plugins, async ($, on) => {
+test('refresh, input, last and unsubscribe reach the flow and the subscription', plugins, async ($, on) => {
   const last = update(FLOW, '5', { number: 1 })
   const w = world(on, {
     answer: service({
       [`POST /v1/flows/${ENCODED}/refresh`]: { status: 202 },
+      [`POST /v1/flows/${ENCODED}/input`]: { status: 202 },
       [`GET /v1/flows/${ENCODED}`]: { status: 200, text: JSON.stringify(last) },
       'GET /v1/flows/forge%2Fquiet': { status: 204 },
       'DELETE /v1/subscriptions/s-1': { status: 204 },
@@ -165,6 +166,10 @@ test('refresh, last and unsubscribe reach the flow and the subscription', plugin
   })
 
   expect(await call($, 'refresh', { flow: FLOW })).toEqual({ ok: true })
+  expect(await call($, 'input', { flow: FLOW, detail: { n: 1 } })).toEqual({ ok: true })
+  const sent = w.requests.find(r => r.url.endsWith('/input'))
+  expect(sent?.method).toBe('POST')
+  expect(JSON.parse(sent?.body ?? 'null')).toEqual({ n: 1 })
   expect(await call($, 'last', { flow: FLOW })).toEqual({ ok: true, last })
   expect(await call($, 'last', { flow: 'forge/quiet' })).toEqual({ ok: true, last: null })
   expect(await call($, 'unsubscribe', { subscription: 's-1' })).toEqual({ ok: true })

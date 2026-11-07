@@ -75,6 +75,10 @@ impl Router for FlowRouter {
         self.state().last(anchor, flow)
     }
 
+    fn is_subscribed(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> bool {
+        self.state().is_subscribed(anchor, flow)
+    }
+
     fn history(
         &self,
         anchor: AnchorId,

@@ -1,0 +1,5 @@
+{
+  "type": "object",
+  "description": "No key: the account has one set of quotas.",
+  "additionalProperties": false
+}

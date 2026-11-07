@@ -1,7 +1,8 @@
 //! The probe: the brick the API and supervisor suites subscribe to.
 //!
-//! It has one subscription kind, `item`, whose params are `{"id": <string>}`
-//! and nothing else, and publishes `probe.item/v1`. A harness that runs a real
+//! It has two subscription kinds whose params are `{"id": <string>}` and
+//! nothing else, both publishing `probe.item/v1`: `item`, and `inbox`, which
+//! also accepts `probe.input/v1`. A harness that runs a real
 //! brick (the test brick) declares it with these schemas.
 
 use std::collections::BTreeMap;
@@ -14,6 +15,8 @@ use serde_json::json;
 pub const NAME: &str = "probe";
 pub const KIND: &str = "item";
 pub const TYPE: &str = "probe.item/v1";
+pub const INBOX_KIND: &str = "inbox";
+pub const INPUT_TYPE: &str = "probe.input/v1";
 
 pub fn name() -> BrickName {
     BrickName::new(NAME).unwrap()
@@ -34,6 +37,11 @@ pub fn type_schema() -> serde_json::Value {
     json!({ "type": "object" })
 }
 
+/// The JSON Schema of the `probe.input/v1` detail: any object.
+pub fn input_schema() -> serde_json::Value {
+    json!({ "type": "object" })
+}
+
 /// The probe as discovery would load it, launched by `command` in `dir`.
 pub fn declaration(command: Vec<String>, dir: PathBuf) -> BrickDeclaration {
     BrickDeclaration {
@@ -44,20 +52,40 @@ pub fn declaration(command: Vec<String>, dir: PathBuf) -> BrickDeclaration {
         command,
         dir,
         env: BTreeMap::new(),
-        subscriptions: BTreeMap::from([(
-            KIND.into(),
-            SubscriptionKind {
-                description: "One item, named by its id.".into(),
-                schema: params_schema(),
-                publishes: TYPE.into(),
-            },
-        )]),
-        types: BTreeMap::from([(
-            TYPE.into(),
-            TypeDeclaration {
-                schema: type_schema(),
-            },
-        )]),
+        subscriptions: BTreeMap::from([
+            (
+                KIND.into(),
+                SubscriptionKind {
+                    description: "One item, named by its id.".into(),
+                    schema: params_schema(),
+                    publishes: Some(TYPE.into()),
+                    accepts: None,
+                },
+            ),
+            (
+                INBOX_KIND.into(),
+                SubscriptionKind {
+                    description: "One item that takes inputs, named by its id.".into(),
+                    schema: params_schema(),
+                    publishes: Some(TYPE.into()),
+                    accepts: Some(INPUT_TYPE.into()),
+                },
+            ),
+        ]),
+        types: BTreeMap::from([
+            (
+                TYPE.into(),
+                TypeDeclaration {
+                    schema: type_schema(),
+                },
+            ),
+            (
+                INPUT_TYPE.into(),
+                TypeDeclaration {
+                    schema: input_schema(),
+                },
+            ),
+        ]),
     }
 }
 

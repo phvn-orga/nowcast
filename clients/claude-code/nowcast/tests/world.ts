@@ -263,9 +263,11 @@ export const caller: Plugin = {
             ? await $.nowcast.unsubscribe(request)
             : method === 'refresh'
               ? await $.nowcast.refresh(request)
-              : method === 'history'
-                ? await $.nowcast.history(request)
-                : await $.nowcast.last(request)
+              : method === 'input'
+                ? await $.nowcast.input(request)
+                : method === 'history'
+                  ? await $.nowcast.history(request)
+                  : await $.nowcast.last(request)
       return { text: JSON.stringify(answer) }
     })
   },
@@ -274,7 +276,7 @@ export const caller: Plugin = {
 /** What `$.nowcast.<method>(request)` answers, called by the `caller` mod. */
 export async function call(
   $: Engine,
-  method: 'subscribe' | 'unsubscribe' | 'refresh' | 'last' | 'history',
+  method: 'subscribe' | 'unsubscribe' | 'refresh' | 'input' | 'last' | 'history',
   request: unknown,
 ) {
   const args = JSON.stringify({ method, request })

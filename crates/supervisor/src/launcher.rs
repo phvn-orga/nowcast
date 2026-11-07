@@ -15,8 +15,13 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::{Instant, timeout_at};
 use tracing::{debug, info, warn};
 
+/// The program name that designates the service's own executable, whatever
+/// the `PATH`: how a native brick (`nowcast brick <name>`) is launched.
+pub const SELF: &str = "nowcast";
+
 /// Launches bricks as child processes speaking the brick protocol over their
-/// standard input and output. Each line of their standard error becomes an
+/// standard input and output. A command whose program is [`SELF`] runs the
+/// service's own executable. Each line of their standard error becomes an
 /// `info` event of the brick, for the journal; a line over 8 KiB is logged
 /// in pieces of 8 KiB.
 ///
@@ -64,7 +69,16 @@ impl BrickLauncher for ProcessLauncher {
         let (program, args) = brick.command.split_first().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "the brick's command is empty")
         })?;
-        let mut child = Command::new(program)
+        let mut command = if program == SELF {
+            // Resolved by the kernel at exec, in the forked service: the
+            // service's own binary, even once an upgrade has replaced the file.
+            let mut command = Command::new("/proc/self/exe");
+            command.arg0(SELF);
+            command
+        } else {
+            Command::new(program)
+        };
+        let mut child = command
             .args(args)
             .current_dir(&brick.dir)
             .envs(&brick.env)

@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter, Signal};
-use nowcast_traits::{AnchorId, ResolveError, Resolved, Router, Supervisor, UnknownFlow};
+use nowcast_traits::{
+    AnchorId, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+};
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
     READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
@@ -378,6 +380,53 @@ pub async fn refresh_is_relayed<S: SupervisorSubject>() {
     );
 }
 
+/// The supervisor knows the kind each flow was subscribed with, and relays an
+/// input to the brick with its own flow id, in order; an unknown flow is
+/// refused, and so is an input while the brick waits to be relaunched.
+pub async fn input_is_relayed<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let mut brick = world.subscribed("a").await;
+    assert_eq!(
+        world.supervisor.kind(&qualified("a")),
+        Some(probe::KIND.into())
+    );
+    assert_eq!(world.supervisor.kind(&qualified("never")), None);
+    for n in [b"1", b"2"] {
+        world
+            .supervisor
+            .input(&qualified("a"), probe::INPUT_TYPE, n.to_vec())
+            .unwrap();
+    }
+    for n in [b"1", b"2"] {
+        assert_eq!(
+            recv(&mut brick).await,
+            ServiceMessage::Input {
+                flow: flow("a"),
+                data_type: probe::INPUT_TYPE.into(),
+                detail: n.to_vec(),
+            }
+        );
+    }
+    assert_eq!(
+        world
+            .supervisor
+            .input(&qualified("never"), probe::INPUT_TYPE, b"{}".to_vec()),
+        Err(InputError::UnknownFlow(UnknownFlow(qualified("never"))))
+    );
+    let mut stream = world.router.stream(A, None);
+    drop(brick);
+    match timeout(LONG, stream.recv()).await.unwrap() {
+        Some(StreamEvent::FlowError { flow, .. }) => assert_eq!(flow, qualified("a")),
+        other => panic!("expected flow-error, got {other:?}"),
+    }
+    assert_eq!(
+        world
+            .supervisor
+            .input(&qualified("a"), probe::INPUT_TYPE, b"{}".to_vec()),
+        Err(InputError::Unavailable(BrickUnavailable(probe::name())))
+    );
+}
+
 /// When a flow loses its last subscriber, the brick receives `release`.
 pub async fn an_empty_flow_is_released<S: SupervisorSubject>() {
     let world = world::<S>();
@@ -663,6 +712,7 @@ macro_rules! supervisor_suite {
                     a_publish_on_a_released_flow_is_refused,
                     flow_errors_are_relayed,
                     refresh_is_relayed,
+                    input_is_relayed,
                     an_empty_flow_is_released,
                     an_idle_brick_is_kept_for_the_grace_period,
                     an_idle_brick_shuts_down_after_the_grace_period,

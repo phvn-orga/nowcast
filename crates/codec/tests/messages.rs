@@ -39,6 +39,12 @@ fn all_service_messages() -> Vec<ServiceMessage> {
             flow: flow(&"é".repeat(FLOW_ID_MAX_LEN / 2)),
         },
         ServiceMessage::Refresh { flow: flow("") },
+        ServiceMessage::Input {
+            flow: flow("a"),
+            data_type: String::new(),
+            // The codec carries the bytes, it does not check they are JSON.
+            detail: vec![0xff],
+        },
         ServiceMessage::Ack {
             req: RequestId(u64::MAX),
         },
@@ -341,6 +347,14 @@ fn service_frame(msg: &ServiceMessage, key: &str, new: Option<Value>) -> Vec<u8>
     reference::frame(&with(reference::service_value(msg), key, new))
 }
 
+/// The service's `error` among the conformance messages.
+fn error_message() -> ServiceMessage {
+    service_messages()
+        .into_iter()
+        .find(|m| matches!(m, ServiceMessage::Error { .. }))
+        .unwrap()
+}
+
 fn publish() -> BrickMessage {
     brick_messages().remove(3)
 }
@@ -478,7 +492,7 @@ fn fields_of_the_wrong_type_are_refused() {
 fn field_values_outside_the_contract_are_refused() {
     let long_flow = Value::from("x".repeat(FLOW_ID_MAX_LEN + 1).as_str());
     let hello = service_messages().remove(0);
-    let error = service_messages().remove(6);
+    let error = error_message();
     let cases = [
         decode_brick(&brick_frame(&publish(), "flow", Some(long_flow.clone()))).map(|_| ()),
         decode_service(&service_frame(
@@ -628,7 +642,7 @@ fn a_map_with_many_keys_decodes_in_linear_time() {
 
 #[test]
 fn an_unknown_error_code_is_clipped_in_the_error() {
-    let error = service_messages().remove(6);
+    let error = error_message();
     let code = "x".repeat(10_000);
     let frame = service_frame(&error, "code", Some(Value::from(code.as_str())));
     let reported = decode_service(&frame).unwrap_err().to_string();

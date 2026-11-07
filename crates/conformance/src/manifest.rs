@@ -49,7 +49,8 @@ pub fn reads_every_field<S: ManifestSubject>() {
     );
     let pr = &forge.subscriptions["pr"];
     assert_eq!(pr.description, "The PR of a branch and its CI checks.");
-    assert_eq!(pr.publishes, "forge.pr/v1");
+    assert_eq!(pr.publishes.as_deref(), Some("forge.pr/v1"));
+    assert_eq!(pr.accepts, None);
     assert_eq!(forge.subscriptions.len(), 1);
     assert_eq!(forge.types.len(), 1);
 }
@@ -150,6 +151,32 @@ pub fn refuses_an_undeclared_published_type<S: ManifestSubject>() {
     refused::<S>("invalid-undeclared-type.toml");
 }
 
+/// A kind may declare the type it accepts as input, with or without a
+/// published type; the accepted type is declared in `[types]` like the others.
+pub fn reads_an_accepted_type<S: ManifestSubject>() {
+    let inbox = load::<S>("inbox.toml").unwrap();
+    let both = &inbox.subscriptions["both"];
+    assert_eq!(both.publishes.as_deref(), Some("forge.pr/v1"));
+    assert_eq!(both.accepts.as_deref(), Some("inbox.input/v1"));
+    let only = &inbox.subscriptions["only"];
+    assert_eq!(only.publishes, None);
+    assert_eq!(only.accepts.as_deref(), Some("inbox.input/v1"));
+    assert_eq!(
+        inbox.types["inbox.input/v1"].schema,
+        schema("forge-pr-v1.json")
+    );
+}
+
+/// Every `accepts` names a type declared in `[types]`.
+pub fn refuses_an_undeclared_accepted_type<S: ManifestSubject>() {
+    refused::<S>("invalid-undeclared-input.toml");
+}
+
+/// A kind publishes a type, accepts one, or both.
+pub fn refuses_a_kind_without_type<S: ManifestSubject>() {
+    refused::<S>("invalid-no-type.toml");
+}
+
 /// A schema path must lead to a readable JSON file, or the file is refused at
 /// load.
 pub fn refuses_a_missing_schema<S: ManifestSubject>() {
@@ -182,6 +209,9 @@ macro_rules! manifest_suite {
                     refuses_a_non_semver_version,
                     refuses_a_missing_required_field,
                     refuses_an_undeclared_published_type,
+                    reads_an_accepted_type,
+                    refuses_an_undeclared_accepted_type,
+                    refuses_a_kind_without_type,
                     refuses_a_missing_schema,
                 ]
             );

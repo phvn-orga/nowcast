@@ -10,7 +10,9 @@
 //! - `subscribe` of kind `item` maps to the flow named by `id`, verbatim: the
 //!   same params give the same flow, across restarts. Unreadable params, a flow
 //!   id over 256 bytes or another kind are answered with `error`, codes
-//!   `invalid_params` and `unknown_kind`.
+//!   `invalid_params` and `unknown_kind`. `subscribe` of kind `inbox`, with
+//!   the same params, maps to the flow `inbox/<id>`.
+//! - `input` on a flow it serves publishes `{"id": <flow>, "input": <detail>}`.
 //! - `refresh` of a flow it serves publishes `{"id": <flow>, "refresh": <n>}`,
 //!   `n` counting the refreshes of this process from 1. A refresh of a flow it
 //!   does not serve is ignored. Nothing is published otherwise, so a new flow
@@ -61,10 +63,15 @@ pub use control::{Control, ControlledBrick};
 
 /// The brick's name, the conformance probe's.
 pub const NAME: &str = "probe";
-/// Its one subscription kind.
+/// Its subscription kind without input.
 pub const KIND: &str = "item";
+/// Its subscription kind that accepts an input, with the same params. Its
+/// flow is `inbox/<id>`.
+pub const INBOX_KIND: &str = "inbox";
 /// The type it publishes.
 pub const TYPE: &str = "probe.item/v1";
+/// The type `inbox` accepts: any JSON object.
+pub const INPUT_TYPE: &str = "probe.input/v1";
 /// The `error` code of every `subscribe` in [`Mode::Refusing`], the API
 /// suite's `REFUSAL_CODE`.
 pub const REFUSAL_CODE: &str = "no_such_item";

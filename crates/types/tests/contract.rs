@@ -46,6 +46,11 @@ fn service_to_brick_messages() {
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },
+        ServiceMessage::Input {
+            flow: flow(),
+            data_type: "forge.push/v1".into(),
+            detail: b"{}".to_vec(),
+        },
         ServiceMessage::Shutdown,
         ServiceMessage::Ack { req: RequestId(7) },
         ServiceMessage::Error {
@@ -60,6 +65,7 @@ fn service_to_brick_messages() {
             "subscribe",
             "release",
             "refresh",
+            "input",
             "shutdown",
             "ack",
             "error"
@@ -125,7 +131,9 @@ fn api_error_codes() {
             "unknown_kind",
             "unknown_flow",
             "brick_unavailable",
-            "subscription_refused"
+            "subscription_refused",
+            "input_not_accepted",
+            "invalid_input"
         ]
     );
     for code in ApiErrorCode::ALL {

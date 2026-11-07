@@ -11,6 +11,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - Formula/**
+      - build/**
+      - .dockerignore
       - crates/daemon/systemd/**
       # A new dependency can break the static build.
       - Cargo.lock
@@ -33,9 +35,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # For `cargo metadata` alone: the binary builds in the container below.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ env.TARGET }}
       - name: Version
         id: version
         run: |
@@ -46,7 +47,8 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - run: cargo build --locked -p nowcast-cli --target "$TARGET" --profile dist
+      # The same container builds the binary locally: see its header.
+      - run: docker build -f build/release.Dockerfile --output out .
       - name: Package
         id: package
         env:
@@ -54,7 +56,7 @@ jobs:
         run: |
           name="nowcast-v$VERSION-$TARGET"
           mkdir -p "dist/$name/systemd"
-          cp "target/$TARGET/dist/nowcast" README.md "dist/$name/"
+          cp out/nowcast README.md "dist/$name/"
           cp crates/daemon/systemd/nowcast.socket crates/daemon/systemd/nowcast.service "dist/$name/systemd/"
           test "$("dist/$name/nowcast" --version)" = "nowcast $VERSION"
           tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"

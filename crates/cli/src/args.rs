@@ -90,6 +90,15 @@ pub enum Command {
         flow: String,
     },
 
+    /// Send the JSON value read on stdin to the brick of a flow the anchor process is subscribed to
+    ///
+    /// Prints nothing. The flow's subscription kind must accept an input, and
+    /// the value must match the type it accepts.
+    Input {
+        /// Flow id, as `subscribe` prints it: <brick>/<flow>
+        flow: String,
+    },
+
     /// Subscribe to a brick and print the subscription, its flow and its last value
     ///
     /// The subscription lives as long as the anchor process: the agent when run
@@ -104,6 +113,23 @@ pub enum Command {
         params: Option<String>,
     },
 
+    /// Enable or disable a brick
+    ///
+    /// Acts on the bricks directory the service follows,
+    /// $XDG_CONFIG_HOME/nowcast/bricks/, where a link <name>.toml activates a
+    /// brick. Makes no call to the service.
+    Bricks {
+        #[command(subcommand)]
+        action: BricksAction,
+    },
+
+    /// Run a brick native to nowcast on stdin and stdout, as the service launches it
+    #[command(hide = true)]
+    Brick {
+        /// The native brick's name
+        name: String,
+    },
+
     /// Run the service, as systemd starts it on the first connection
     ///
     /// Listens on the socket systemd passes, otherwise binds
@@ -116,6 +142,25 @@ pub enum Command {
     /// The client options --socket, --session and --json are refused;
     /// NOWCAST_SOCKET and NOWCAST_SESSION are ignored.
     Daemon,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BricksAction {
+    /// Enable a brick: a brick native to nowcast by its name (claude-code),
+    /// or any brick by the path of its declaration file
+    ///
+    /// A native brick's declaration and schemas are written under
+    /// $XDG_DATA_HOME/nowcast/bricks/<name>/ first; the service keeps them in
+    /// step with its own version.
+    Enable {
+        /// A native brick's name, or the path of a declaration file
+        brick: String,
+    },
+    /// Disable a brick, by its name
+    Disable {
+        /// The brick's name
+        brick: String,
+    },
 }
 
 /// The client options `daemon` refuses, as they were written on the command

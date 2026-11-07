@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use nowcast_codec::encode_brick;
 use nowcast_test_brick::wire::{Command, Received, Reply};
-use nowcast_test_brick::{CRASH_STATUS, KIND, Mode, REFUSAL_CODE, TYPE};
+use nowcast_test_brick::{CRASH_STATUS, INBOX_KIND, KIND, Mode, REFUSAL_CODE, TYPE};
 use nowcast_types::{BrickMessage, FlowId, RequestId, ServiceMessage};
 use serde::Deserialize;
 use serde_json::json;
@@ -83,6 +83,19 @@ impl Brick {
                 })]
             }
             ServiceMessage::Refresh { .. } => vec![],
+            ServiceMessage::Input { flow, detail, .. } if self.flows.contains(&flow) => {
+                // The service checked the detail against the accepted schema.
+                let input: serde_json::Value =
+                    serde_json::from_slice(&detail).unwrap_or(serde_json::Value::Null);
+                let detail = json!({ "id": flow.as_str(), "input": input });
+                vec![Effect::Send(BrickMessage::Publish {
+                    req: self.next_req(),
+                    flow,
+                    data_type: TYPE.into(),
+                    detail: detail.to_string().into_bytes(),
+                })]
+            }
+            ServiceMessage::Input { .. } => vec![],
             ServiceMessage::Shutdown => vec![Effect::Exit(0)],
             ServiceMessage::Ack { req } if self.awaiting == Some(req) => {
                 self.awaiting = None;
@@ -154,10 +167,11 @@ impl Brick {
         if self.mode == Mode::Refusing {
             return refuse(REFUSAL_CODE, "this brick refuses every subscription".into());
         }
-        if kind != KIND {
+        if kind != KIND && kind != INBOX_KIND {
             return refuse("unknown_kind", format!("no subscription kind {kind:?}"));
         }
         let id = match serde_json::from_slice::<ItemParams>(params) {
+            Ok(params) if kind == INBOX_KIND => format!("inbox/{}", params.id),
             Ok(params) => params.id,
             Err(e) => {
                 return refuse(
