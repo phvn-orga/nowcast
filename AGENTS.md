@@ -32,5 +32,3 @@ including the Homebrew formula in `Formula/`.
   nothing.
 - When a change removes the cause behind such a rule (a check now covers it,
   the code changed), update or remove the rule.
-
-- The cache was reset on 2026-11-07, see `crates/nowhere/src/lib.rs`.
