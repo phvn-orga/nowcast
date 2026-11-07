@@ -1,7 +1,8 @@
 # Les briques
 
-État au 2026-11-05 : modèle d'extension, contrat, transport, documentation de la clé
-et découverte des briques décidés, pas d'action dans le service. Le format du fichier
+État au 2026-11-07 : modèle d'extension, contrat, transport, documentation de la clé
+et découverte des briques décidés, pas d'action dans le service, historique borné des
+flux. Le format du fichier
 de déclaration et le protocole sont fixés dans `03-contrats.md`.
 
 ## Décisions prises
@@ -88,9 +89,24 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
 - **Canal : l'entrée et la sortie standard de la brique**, en flux d'octets, messages
   préfixés par leur longueur. Pipe, socket Unix et socket à messages donnent le même
   aller-retour à la mesure : le choix du canal ne joue pas sur la performance.
-- **Le service garde la dernière valeur de chaque flux.** Un nouvel abonné la reçoit
-  sans attendre la prochaine publication, et un client à base de hooks peut la lire en
-  un appel (voir `02-clients.md`).
+- **Le service garde un historique borné de chaque flux**, ses 100 derniers
+  événements, en mémoire (le détail dans `03-contrats.md`, section 3). Un nouvel abonné
+  reçoit la dernière valeur sans attendre la prochaine publication, un client à base de
+  hooks peut la lire en un appel (voir `02-clients.md`), et un client qui se reconnecte
+  reçoit ce qu'il a manqué. Les briques publient des suites d'événements autant que des
+  états : un commit, une PR mergée, une tâche terminée ne se résument pas à la dernière
+  valeur.
+  - **Dans le service, pas dans les briques.** Le service tient l'historique sans
+    connaître le contenu, une fois pour tous les types, et il numérote déjà les
+    événements de tous les flux d'un seul compteur, ce que demande la reprise après un
+    `Last-Event-ID`. Une brique qui joindrait ses derniers événements à chaque état
+    publié laisserait chaque type réinventer sa fenêtre.
+  - **En mémoire, pas sur disque.** Un flux ne publie que tant qu'il a un abonné : un
+    historique gardé d'un arrêt du service à l'autre aurait de toute façon un trou pour
+    tout ce qui s'est passé sans abonné. Le cas qui compte, un client qui se reconnecte
+    pendant que sa session tourne, n'en a pas besoin. Comme les identifiants croissent
+    d'une exécution à l'autre, un stockage sur disque peut s'ajouter plus tard sans
+    changer le contrat.
 
 ## Ce qui existe déjà
 

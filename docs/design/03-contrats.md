@@ -1,6 +1,7 @@
 # Les contrats
 
-État au 2026-11-06 : contrats décidés, délais fixés, arrêt du service à vide décrit.
+État au 2026-11-07 : contrats décidés, délais fixés, arrêt du service à vide décrit,
+historique borné des flux.
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -150,22 +151,44 @@ répond `201` :
 `GET /v1/stream` avec `Accept: text/event-stream` ouvre le flux SSE de la session : tous
 les flux auxquels le processus d'ancrage est abonné, abonnements à venir compris.
 
-Trois sortes d'événements SSE (`event:`) :
+Quatre sortes d'événements SSE (`event:`) :
 
 - `update` : `data` est un événement CloudEvents en JSON ;
 - `flow-error` : la brique ne peut pas servir un flux. `data` vaut
   `{"flow": "<identifiant de flux>", "message": "…"}` ;
 - `flow-ended` : le flux n'existe plus (brique retirée, abonnement supprimé). `data`
-  vaut `{"flow": "<identifiant de flux>"}`.
+  vaut `{"flow": "<identifiant de flux>"}` ;
+- `flow-gap` : le service ne peut pas rendre tout ce que le client a manqué sur ce
+  flux (voir plus bas). `data` vaut `{"flow": "<identifiant de flux>"}`.
 
-Seul `update` porte le champ SSE `id`, qui reprend l'`id` de l'événement. `flow-error`
-et `flow-ended` sont des signaux : ils ne sont pas rejoués à la reconnexion.
+Seul `update` porte le champ SSE `id`, qui reprend l'`id` de l'événement. `flow-error`,
+`flow-ended` et `flow-gap` sont des signaux : ils ne sont pas rejoués à la reconnexion.
 
-À l'ouverture, le service envoie d'abord la dernière valeur de chaque flux abonné :
-toutes sans `Last-Event-ID`, seulement celles plus récentes que cet identifiant avec
-lui. La dernière valeur suffit, il n'y a pas d'historique à rejouer. Un client peut
-donc s'abonner avant ou après avoir ouvert le flux sans perdre de valeur ; il reçoit
-parfois en double une valeur déjà lue dans `last`, reconnaissable à son `id`.
+Le service garde, pour chaque flux, ses 100 derniers événements `update`, en mémoire.
+Au-delà, le plus ancien est oublié. La borne est la même pour tous les flux et ne se
+déclare pas : un flux d'état, comme un quota, a son historique comme les autres ; un
+client qui le rejoue finit sur sa dernière valeur. L'historique naît avec la première
+publication du flux et disparaît avec lui (`flow-ended`). Il ne survit pas à un arrêt
+du service.
+
+À l'ouverture, le service envoie d'abord, pour chaque flux abonné :
+
+- sans `Last-Event-ID`, sa dernière valeur ;
+- avec `Last-Event-ID`, chaque événement gardé plus récent que cet identifiant.
+  `Last-Event-ID: 0` demande donc tout l'historique gardé.
+
+Ces événements partent par identifiant croissant, tous flux confondus. Un `flow-gap`
+précède ceux d'un flux quand des événements plus récents que le `Last-Event-ID` y
+manquent : le service en a oublié un pour tenir la borne, ou l'identifiant date d'une
+exécution précédente du service, dont l'historique est perdu. Dans ce second cas, chaque
+flux abonné reçoit `flow-gap`. Le reste de la reprise est valable : le client sait
+seulement que sa vue de ce flux a un trou.
+
+Un client peut s'abonner avant ou après avoir ouvert le flux sans perdre de valeur ; il
+reçoit parfois en double une valeur déjà lue dans `last`, reconnaissable à son `id`. Un
+flux abonné après l'ouverture n'envoie sur le flux ouvert que ses publications à venir :
+pour lire ce qu'il a publié avant, le client rouvre le flux avec un `Last-Event-ID`
+antérieur.
 
 Les identifiants d'événement croissent aussi d'une exécution du service à l'autre : au
 démarrage, le compteur part de l'horloge, en microsecondes depuis 1970, puis avance de
