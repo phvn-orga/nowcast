@@ -82,7 +82,11 @@ et le rafraîchissement aussi en session interactive.
   l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
 - **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
   mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
-  `subscribe`, `unsubscribe`, `refresh` et `last`, typés par le contrat du mod central. Chaque appel rend un
+  `subscribe`, `unsubscribe`, `refresh`, `last` et `history`, typés par le contrat du mod
+  central. `history` lit l'historique d'un flux après un identifiant
+  (`GET /v1/flows/{flow}?after=<id>`) : c'est ainsi qu'un mod qui s'abonne en cours de
+  session à un flux déjà suivi lit ce qui a précédé. L'état partagé, lui, ne garde que
+  la dernière valeur de chaque flux et ne note pas les `flow-gap`. Chaque appel rend un
   résultat (succès, ou statut et code d'erreur), jamais une exception. Les requêtes
   partent toujours du processus de l'agent, directement vers le service. Écartés :
   - un fichier que chaque mod copie : un mod n'importe que des fichiers de son propre
