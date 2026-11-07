@@ -122,13 +122,24 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   rangée dans le dépôt même (`Formula/`), sans dépôt de tap à part. Installer ne
   demande aucune compilation ; `cargo install` reste la voie du développement (voir
   `02-clients.md`).
-- **Une release en une seule action.** Lancer le workflow de release avec une
-  version suffit : il ouvre la PR qui la porte dans `Cargo.toml`, puis, une fois
-  celle-ci mergée par la CI, construit le binaire, pose le tag, publie la release et
-  ouvre la PR de formule, mergée de même. La version n'est écrite qu'à un endroit,
-  `Cargo.toml` : les déclarations des briques natives la reçoivent à la compilation.
-  Plusieurs gestes à la main finissent par en oublier un. Tout passe par des PR,
-  `main` n'acceptant pas de poussée directe.
+- **Une release part d'un changement de version sur `main`.** La version n'est
+  écrite qu'à un endroit, celle du workspace dans `Cargo.toml` ; les déclarations
+  des briques natives la reçoivent à la compilation. Une PR qui la monte publie la
+  release une fois mergée, sans autre geste. Un check refuse en PR une version qui ne
+  monte pas ou qui est déjà publiée.
+  - **Rien de visible avant que tout soit validé.** Le workflow construit le
+    binaire, l'archive et sa formule, et installe celle-ci depuis l'archive locale.
+    Il publie ensuite la release d'un bloc (un brouillon complété, puis publié, ce
+    qui pose le tag), et seulement après met à jour la formule par une PR vers
+    `main`, mergée par lui une fois ses checks verts : la formule ne pointe jamais
+    vers une release absente. Un échec avant la publication ne laisse rien ; le
+    même numéro sert à la tentative suivante.
+  - **Une relance reprend où l'échec a laissé.** Relancer le workflow, ou
+    l'exécution en échec, refait la validation et ne republie pas une release déjà
+    publiée : seule la formule est refaite. Une release dont la formule a échoué
+    reste publiée ; les utilisateurs restent sur la version précédente.
+  - **Le workflow ouvre lui-même la PR de formule**, ce que l'organisation doit
+    autoriser à GitHub Actions.
 
 ## Limite assumée de la sécurité
 
