@@ -24,6 +24,8 @@ async fn prints_updates_errors_and_ends() {
     assert_eq!(watch.next_line().await, r#"update probe/a {"n":1}"#);
     fake.flow_error(&flow, "source down");
     assert_eq!(watch.next_line().await, "flow-error probe/a source down");
+    fake.flow_gap(&flow);
+    assert_eq!(watch.next_line().await, "flow-gap probe/a");
     fake.end_flow(&flow);
     assert_eq!(watch.next_line().await, "flow-ended probe/a");
 
@@ -47,6 +49,12 @@ async fn prints_json_lines() {
     assert_eq!(
         line,
         json!({ "event": "flow-error", "data": { "flow": flow, "message": "source down" } })
+    );
+    fake.flow_gap(&flow);
+    let line: Value = serde_json::from_str(&watch.next_line().await).unwrap();
+    assert_eq!(
+        line,
+        json!({ "event": "flow-gap", "data": { "flow": flow } })
     );
     fake.end_flow(&flow);
     let line: Value = serde_json::from_str(&watch.next_line().await).unwrap();

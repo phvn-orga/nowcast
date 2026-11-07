@@ -57,9 +57,9 @@ pub enum Command {
 
         /// Resume after this update id, the last one a previous watch printed
         ///
-        /// The first connection then gets only the values newer than ID. One
-        /// counter numbers every flow: a flow the previous watch did not
-        /// follow gets its last value only if it is newer too.
+        /// The first connection then gets every kept event newer than ID,
+        /// across all flows, and `flow-gap <flow>` first for a flow where
+        /// some of them are gone.
         #[arg(long, value_name = "ID")]
         last_event_id: Option<String>,
     },
@@ -70,6 +70,15 @@ pub enum Command {
     Get {
         /// Flow id, as `subscribe` prints it: <brick>/<flow>
         flow: String,
+
+        /// Print instead every kept event newer than this id, oldest first
+        ///
+        /// Readable: `flow-gap <flow>` first when some of them are gone, then
+        /// each event as without --after. --json: the service's answer,
+        /// {"gap": <bool>, "events": [<event>...]}. 0 reads the whole kept
+        /// history.
+        #[arg(long, value_name = "ID")]
+        after: Option<u64>,
     },
 
     /// Ask the brick to refresh a flow the anchor process is subscribed to
@@ -203,6 +212,19 @@ mod tests {
         assert_eq!(client_options_given(&matches), ["--socket", "--json"]);
         let matches = daemon_matches(&["nowcast", "daemon", "--session", "s1"]);
         assert_eq!(client_options_given(&matches), ["--session"]);
+    }
+
+    #[test]
+    fn get_after_takes_an_event_id() {
+        let cli = Cli::try_parse_from(["nowcast", "get", "a/b", "--after", "42"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Get {
+                after: Some(42),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["nowcast", "get", "a/b", "--after", "x"]).is_err());
     }
 
     #[test]

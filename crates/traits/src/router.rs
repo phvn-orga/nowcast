@@ -30,15 +30,32 @@ impl fmt::Display for UnknownSubscription {
 
 impl std::error::Error for UnknownSubscription {}
 
+/// How many events the router keeps per flow (contract section 3). Past it,
+/// the oldest is dropped.
+pub const FLOW_HISTORY: usize = 100;
+
+/// The kept events of a flow after an id, as [`Router::history`] returns them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct History {
+    /// Some events newer than the id are gone: dropped by the bound, or the id
+    /// comes from before this run of the service.
+    pub gap: bool,
+    /// In increasing id order.
+    pub events: Vec<Event>,
+}
+
 /// Flows, subscriptions and their delivery to anchors.
 ///
-/// The router owns the subscriber count of each flow and the flow's last value.
-/// It signals through [`Router::empty_flows`] when a flow loses its last
-/// subscriber, and keeps the flow and its last value until
-/// [`Router::end_flow`]: the supervisor decides when that happens.
+/// The router owns the subscriber count of each flow and the flow's history,
+/// its last [`FLOW_HISTORY`] events. It signals through
+/// [`Router::empty_flows`] when a flow loses its last subscriber, and keeps the
+/// flow and its history until [`Router::end_flow`]: the supervisor decides when
+/// that happens.
 ///
 /// Event ids come from one counter shared by every flow, so that they increase
 /// within each flow and a single `Last-Event-ID` can be compared across flows.
+/// The counter starts above every id of a previous run: an id at or below its
+/// start comes from before this run, whose history is lost.
 pub trait Router: Send + Sync + 'static {
     /// Subscribes `anchor` to `flow`, creating the flow if needed. Every call
     /// issues a new subscription, even for the same anchor and flow.
@@ -55,8 +72,9 @@ pub trait Router: Send + Sync + 'static {
         subscription: &SubscriptionId,
     ) -> Result<(), UnknownSubscription>;
 
-    /// Stores a new value for `flow` and delivers it once to each stream of
-    /// each subscribed anchor. The router assigns its id and time.
+    /// Adds a new value to the history of `flow`, dropping the oldest past
+    /// [`FLOW_HISTORY`], and delivers it once to each stream of each
+    /// subscribed anchor. The router assigns its id and time.
     fn publish(
         &self,
         flow: &QualifiedFlowId,
@@ -68,17 +86,29 @@ pub trait Router: Send + Sync + 'static {
     /// has published nothing yet.
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow>;
 
+    /// The kept events of a flow `anchor` is subscribed to whose id is greater
+    /// than `after`, with whether some of them are gone.
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow>;
+
     /// Delivers `flow-error` to the anchors subscribed to `flow`.
     fn flow_error(&self, flow: &QualifiedFlowId, message: String);
 
     /// Deletes the flow: its subscribed anchors receive `flow-ended`, its
-    /// subscriptions and last value are dropped. Does not signal an empty flow.
+    /// subscriptions and history are dropped. Does not signal an empty flow.
     fn end_flow(&self, flow: &QualifiedFlowId);
 
     /// Opens a stream of everything delivered to `anchor`, including flows it
-    /// subscribes to later. First sends the last value of each subscribed
-    /// flow, only those whose id is greater than `since` when given. The
-    /// stream closes when the anchor is removed.
+    /// subscribes to later. First sends, without `since`, the last value of
+    /// each subscribed flow. With `since`, it sends `flow-gap` for each
+    /// subscribed flow whose [`Router::history`] after `since` has a gap, then
+    /// the kept events of every subscribed flow whose id is greater than
+    /// `since`, in increasing id order. The stream closes when the anchor is
+    /// removed.
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent>;
 
     /// How many subscriptions `flow` has, from every anchor.

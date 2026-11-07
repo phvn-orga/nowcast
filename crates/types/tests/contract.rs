@@ -106,10 +106,11 @@ fn stream_events() {
             message: "rate limited".into(),
         },
         StreamEvent::FlowEnded { flow: qualified() },
+        StreamEvent::FlowGap { flow: qualified() },
     ];
     assert_eq!(
         names(&all, StreamEvent::name),
-        ["update", "flow-error", "flow-ended"]
+        ["update", "flow-error", "flow-ended", "flow-gap"]
     );
 }
 

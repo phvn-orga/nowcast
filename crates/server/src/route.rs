@@ -4,6 +4,7 @@
 //! is split first and each segment decoded afterwards, by [`decode`].
 
 use hyper::Method;
+use nowcast_types::EventId;
 
 use crate::error::HttpError;
 
@@ -87,9 +88,39 @@ pub(crate) fn decode(segment: &str) -> Result<String, HttpError> {
     })
 }
 
+/// The `after` parameter of a query string, the start of a history read.
+/// Other parameters are ignored; `400` `invalid_request` when `after` is not
+/// an event id.
+pub(crate) fn after(query: Option<&str>) -> Result<Option<EventId>, HttpError> {
+    let Some(value) = query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("after="))
+    else {
+        return Ok(None);
+    };
+    value
+        .parse()
+        .map(|id| Some(EventId(id)))
+        .map_err(|_| HttpError::invalid_request(format!("after={value:?} is not an event id")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn after_is_an_event_id_or_absent() {
+        let parsed = |query| after(query).map_err(|e| (e.status.as_u16(), e.code));
+        assert_eq!(parsed(None), Ok(None));
+        assert_eq!(parsed(Some("")), Ok(None));
+        assert_eq!(parsed(Some("x=1")), Ok(None));
+        assert_eq!(parsed(Some("after=0")), Ok(Some(EventId(0))));
+        assert_eq!(parsed(Some("x=1&after=42")), Ok(Some(EventId(42))));
+        assert_eq!(parsed(Some("after=")), Err((400, "invalid_request")));
+        assert_eq!(parsed(Some("after=-1")), Err((400, "invalid_request")));
+        assert_eq!(parsed(Some("after=4x")), Err((400, "invalid_request")));
+    }
 
     fn parse(method: Method, path: &str) -> Result<Route<'_>, (u16, &'static str)> {
         Route::parse(&method, path).map_err(|e| (e.status.as_u16(), e.code))

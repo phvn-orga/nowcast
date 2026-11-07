@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use nowcast_traits::{AnchorId, Router, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, History, Router, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -73,6 +73,15 @@ impl Router for FlowRouter {
 
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow> {
         self.state().last(anchor, flow)
+    }
+
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow> {
+        self.state().history(anchor, flow, after)
     }
 
     fn flow_error(&self, flow: &QualifiedFlowId, message: String) {
