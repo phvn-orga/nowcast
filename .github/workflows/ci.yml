@@ -12,13 +12,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # What the change calls for. On main, every crate; on a pull request or a
-  # branch the release workflow pushes, the crates it touches and those that
-  # depend on them. A job skipped here counts as passed for a required check.
+  # What the change calls for: on a pull request, or a branch the release
+  # workflow pushes, each job runs whole if its part changed, and not at all
+  # otherwise; on main, every job runs. A job skipped here counts as passed
+  # for a required check.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      crates: ${{ steps.changes.outputs.crates }}
+      rust: ${{ steps.changes.outputs.rust }}
       claude-code: ${{ steps.changes.outputs.claude-code }}
     steps:
       - uses: actions/checkout@v7
@@ -29,21 +30,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
-          echo "claude-code=$(.github/scripts/changed.sh 'clients/claude-code/*' .github/workflows/ci.yml)" >> "$GITHUB_OUTPUT"
-          case $GITHUB_EVENT_NAME in
-            push) crates=--workspace ;;
-            pull_request) crates=$(git diff --name-only "$BASE_SHA...HEAD" | python3 -I .github/scripts/affected-crates.py) ;;
-            *) crates=$(git diff --name-only origin/main...HEAD | python3 -I .github/scripts/affected-crates.py) ;;
-          esac
-          echo "crates: ${crates:-none}"
-          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "claude-code=true" >> "$GITHUB_OUTPUT"
+            exit
+          fi
+          # The crates, the client kinds the binary embeds, the workspace.
+          rust=$(.github/scripts/changed.sh 'crates/*' 'bricks/*' 'clients/*/*.toml' \
+            Cargo.toml Cargo.lock .github/workflows/ci.yml)
+          claude_code=$(.github/scripts/changed.sh 'clients/claude-code/*' .github/workflows/ci.yml)
+          echo "rust: $rust, claude-code: $claude_code"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "claude-code=$claude_code" >> "$GITHUB_OUTPUT"
 
   check:
     needs: changes
-    if: needs.changes.outputs.crates != ''
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    env:
-      CRATES: ${{ needs.changes.outputs.crates }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -51,9 +54,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      # Word splitting is meant: $CRATES holds several arguments.
-      - run: cargo clippy $CRATES --all-targets -- -D warnings
-      - run: cargo test $CRATES
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
   claude-code:
     needs: changes
