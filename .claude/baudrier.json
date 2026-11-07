@@ -1,0 +1,14 @@
+{
+  "modules": {
+    "editing-agents-md": {
+      "version": "0.12.0",
+      "files": {
+        "skill/SKILL.md.template": ".claude/skills/editing-agents-md/SKILL.md",
+        "scripts/check-agents-md.mjs": "scripts/check-agents-md.mjs",
+        "hooks/agents-md-reminder.mjs": ".claude/hooks/agents-md-reminder.mjs",
+        "hooks/settings.json": ".claude/settings.json",
+        "ci/check-agents-md.yml": ".github/workflows/check-agents-md.yml"
+      }
+    }
+  }
+}
