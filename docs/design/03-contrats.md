@@ -1,7 +1,7 @@
 # Les contrats
 
 État au 2026-11-07 : contrats décidés, délais fixés, arrêt du service à vide décrit,
-historique borné des flux.
+historique borné des flux ; entrée d'un flux et briques natives en premier jet.
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -20,12 +20,12 @@ c'est le lien qui l'active qui porte le nom de la brique (section 2).
 | `version` | chaîne semver | Version de la brique elle-même. |
 | `description` | chaîne | Une phrase. |
 | `protocol` | entier | Version majeure du protocole brique qu'elle parle (section 4). |
-| `[run] command` | tableau de chaînes | Commande à lancer. Le premier élément est un chemin s'il contient un `/` : relatif, il se résout depuis le répertoire réel du fichier de déclaration ; absolu, il est pris tel quel. Sans `/`, c'est un nom de programme cherché dans le `PATH` du service, comme dans un shell (`python3`). Les arguments passent tels quels. |
+| `[run] command` | tableau de chaînes | Commande à lancer. Le premier élément est un chemin s'il contient un `/` : relatif, il se résout depuis le répertoire réel du fichier de déclaration ; absolu, il est pris tel quel. Sans `/`, c'est un nom de programme cherché dans le `PATH` du service, comme dans un shell (`python3`), sauf `nowcast`, qui désigne toujours l'exécutable du service lui-même : c'est ainsi qu'une brique native se lance (`["nowcast", "brick", "claude-code"]`), quel que soit le `PATH`. Les arguments passent tels quels. |
 | `[run] env` | table, facultatif | Variables d'environnement ajoutées au lancement. |
-| `[subscriptions.<sorte>]` | table, une par sorte d'abonnement | `description` ; `schema`, chemin du JSON Schema du contenu de l'abonnement (c'est la documentation de la clé) ; `publishes`, le type de donnée publié par ce flux. |
-| `[types."<type>"]` | table, une par type publié | `schema`, chemin du JSON Schema du détail. Il devient le `dataschema` des événements. |
+| `[subscriptions.<sorte>]` | table, une par sorte d'abonnement | `description` ; `schema`, chemin du JSON Schema du contenu de l'abonnement (c'est la documentation de la clé) ; `publishes`, le type de donnée publié par ce flux ; `accepts`, facultatif, le type de l'entrée qu'un abonné peut y envoyer (section 3). Au moins l'un des deux. |
+| `[types."<type>"]` | table, une par type publié ou accepté | `schema`, chemin du JSON Schema du détail. Pour un type publié, il devient le `dataschema` des événements ; pour un type accepté, le service y valide chaque entrée. |
 
-Chaque `publishes` doit nommer un type déclaré dans `[types]`, et chaque `schema` doit
+Chaque `publishes` et chaque `accepts` doit nommer un type déclaré dans `[types]`, et chaque `schema` doit
 mener à un fichier JSON lisible, sinon le fichier est refusé au chargement.
 
 La brique est lancée avec pour répertoire de travail le répertoire réel de son fichier
@@ -87,6 +87,23 @@ schema = "schemas/forge-pr-v1.json"
   abonné, et ses flux reçoivent `flow-ended`.
 - Un fichier invalide est ignoré et journalisé.
 
+### Les briques natives
+
+Les briques du dépôt de nowcast (`01-briques.md`) sont embarquées dans le binaire,
+déclaration et schémas compris. Elles s'activent par le même lien que les autres.
+
+- `nowcast bricks enable <nom>` écrit la déclaration et les schémas embarqués de la
+  brique dans `$XDG_DATA_HOME/nowcast/bricks/<nom>/` (`~/.local/share/nowcast/bricks/`
+  par défaut), puis pose le lien `<nom>.toml` du répertoire de déclarations vers ce
+  fichier. Sa commande est `["nowcast", "brick", "<nom>"]` (section 1).
+- `nowcast bricks enable <chemin>` active n'importe quel fichier de déclaration : il le
+  valide, puis pose le lien sous le `name` qu'il déclare.
+- `nowcast bricks disable <nom>` retire le lien, et rien d'autre.
+- Au démarrage, avant de lire le répertoire de déclarations, le service réécrit les
+  fichiers de `$XDG_DATA_HOME/nowcast/bricks/` qui diffèrent de sa copie embarquée.
+  Après une mise à jour, la déclaration d'une brique native correspond donc toujours
+  au binaire qui la lance.
+
 ## 3. L'API des clients
 
 HTTP/1.1 sur le socket Unix du service. Préfixe `/v1`. Corps en JSON. Une erreur a
@@ -142,6 +159,16 @@ répond `201` :
 
 - `POST /v1/flows/{flow}/refresh` répond `202`. Le service relaie la demande à la
   brique.
+- `POST /v1/flows/{flow}/input` envoie une entrée à la brique du flux. Le corps est le
+  détail JSON lui-même, du type que la sorte d'abonnement déclare dans `accepts`
+  (section 1). Le service le valide contre le schéma de ce type, puis le relaie ;
+  il répond `202`, et les entrées d'un même processus d'ancrage arrivent à la brique
+  dans l'ordre. Seulement pour un flux auquel le processus d'ancrage est abonné
+  (`404` `unknown_flow` sinon). `405` `input_not_accepted` si la sorte n'accepte
+  aucune entrée, `400` `invalid_input` si le détail n'est pas du JSON ou ne respecte
+  pas le schéma, `503` `brick_unavailable` pendant l'attente avant une relance de la
+  brique (section 4). Le service ne garde pas les entrées : elles n'ont pas
+  d'historique.
 - `GET /v1/flows/{flow}` répond `200` avec le dernier événement, ou `204` si le flux
   n'a encore rien publié. Seulement pour un flux auquel le processus d'ancrage est
   abonné (`404` `unknown_flow` sinon).
@@ -258,6 +285,7 @@ Du service vers la brique :
 | `subscribe` | `req`, `kind`, `params` (`bin` : les octets JSON du contenu) | `subscribed` {`req`, `flow`} ou `error` {`req`, `code`, `message`} |
 | `release` | `flow` | aucune : le dernier abonné du flux est parti |
 | `refresh` | `flow` | aucune : la brique republie quand elle a relu |
+| `input` | `flow`, `type`, `detail` (`bin` : les octets JSON) | aucune : une entrée d'un abonné, déjà validée contre le schéma de `type` |
 | `shutdown` | | aucune : la brique se termine |
 
 De la brique vers le service :

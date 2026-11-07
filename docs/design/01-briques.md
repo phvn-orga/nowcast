@@ -2,7 +2,7 @@
 
 État au 2026-11-07 : modèle d'extension, contrat, transport, documentation de la clé
 et découverte des briques décidés, pas d'action dans le service, historique borné des
-flux. Le format du fichier
+flux, entrée d'un flux et briques natives. Le format du fichier
 de déclaration et le protocole sont fixés dans `03-contrats.md`.
 
 ## Décisions prises
@@ -61,10 +61,51 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
   par exemple) reste dans le mod client, qui agit directement sur la source avec ses
   propres identifiants. Ces identifiants se partagent par l'outillage de la source ou
   le trousseau du système, jamais par le service. N'importe qui écrira des mods
-  spécifiques : faire passer chaque action par le service n'aurait pas de sens. La seule
-  requête qu'un client adresse à une brique, en dehors des abonnements, est le
-  rafraîchissement immédiat d'un flux, que le service relaie à la brique, typiquement
-  après qu'un mod a agi sur la source.
+  spécifiques : faire passer chaque action par le service n'aurait pas de sens. En
+  dehors des abonnements, un client adresse deux requêtes à une brique, toujours sur un
+  flux auquel il est abonné, et le service les relaie à la brique de ce flux : le
+  rafraîchissement immédiat, typiquement après qu'un mod a agi sur la source, et
+  l'entrée (ci-dessous).
+- **L'entrée d'un flux : une donnée qu'un client envoie à la brique.** Certaines
+  données n'existent que chez le client (les mesures d'une session d'agent, que seul
+  son moteur connaît). Un abonné d'un flux peut y envoyer un détail JSON, d'un type
+  que la sorte d'abonnement déclare accepter ; le service le vérifie contre le schéma
+  de ce type et le relaie à la brique (`03-contrats.md`, sections 1, 3 et 4). Rien
+  n'y est propre à un agent : c'est le pendant montant d'une publication.
+  - **Sur un flux, pas sur une brique.** L'entrée hérite ainsi de ce que les
+    abonnements savent déjà faire : la brique est lancée au premier abonné, elle
+    apprend la fin d'un émetteur par le `release` de son flux, et seul un abonné peut
+    écrire. Une brique qui doit distinguer ses émetteurs donne à chacun son flux, par
+    la clé de l'abonnement. Écartée, une entrée adressée à la brique sans abonnement :
+    elle demandait un signal de fin d'ancrage et une règle pour une entrée qui arrive
+    quand la brique est arrêtée.
+  - **Ce n'est pas une action.** Une entrée informe une brique ; elle n'agit sur
+    aucune source.
+- **Le dépôt fournit des briques natives, toutes facultatives.** claude-code d'abord
+  (`05-brique-claude-code.md`), d'autres ensuite (git, forge). Aucune n'est requise :
+  le cœur n'en dépend pas, et une brique native ne sert qu'une fois activée par
+  l'utilisateur.
+  - **Sous-commandes du binaire unique.** Une brique native est une sous-commande,
+    `nowcast brick <nom>`, qui parle le protocole des briques sur son entrée et sa
+    sortie. Elle reste un processus à part, que le service lance à partir de sa
+    déclaration comme n'importe quelle autre. Il n'y a toujours qu'une chose à
+    installer, et une brique native tourne toujours à la version du service. Elle est
+    donc écrite en Rust.
+  - **Rangement.** Chacune vit dans `bricks/<nom>/` : sa crate
+    (`nowcast-brick-<nom>`), son fichier de déclaration (`brick.toml`) et ses schémas.
+    Déclaration et schémas sont embarqués dans le binaire, comme les déclarations de
+    types de client. Seul le binaire dépend des crates des briques.
+  - **Activation explicite, par lien.** `nowcast bricks enable <nom>` écrit la
+    déclaration embarquée et ses schémas dans un répertoire de données, puis pose le
+    lien qui active la brique ; `nowcast bricks disable <nom>` le retire
+    (`03-contrats.md`, section 2). Rien n'est actif sans ce geste.
+  - **Aucun privilège dans le service.** Il trouve une brique native par le même
+    répertoire de liens, la lance par la même déclaration et lui parle le même
+    protocole. Deux différences seulement, hors du routage : l'outil sait activer une
+    brique native par son nom, et le programme `nowcast` d'une déclaration désigne
+    l'exécutable du service lui-même.
+  - **Chacune passe les tests de conformité du protocole côté brique**, comme la
+    brique de test.
 - **Le service lance chaque brique**, au premier consommateur, et l'arrête au dernier.
   nowcast est le centre : une brique sans consommateur ne sert à rien, elle n'existe pas
   hors de lui, et aucune ne tourne pour rien. Une brique toujours active pourra devenir

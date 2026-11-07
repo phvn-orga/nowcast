@@ -104,7 +104,8 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   flux. Il lance la brique au premier abonné et l'arrête au dernier, lui transmet chaque
   abonnement et la prévient quand un flux n'a plus d'abonné (voir `01-briques.md`).
 - **Le cœur est en Rust**, et seulement en Rust : le service comme l'outil en ligne de
-  commande. Les briques sont écrites dans le langage de leur choix. L'adaptateur
+  commande. Les briques sont écrites dans le langage de leur choix ; celles du dépôt,
+  sous-commandes du binaire (`01-briques.md`), sont en Rust. L'adaptateur
   Claude Code est en TypeScript, parce que les plugins s'exécutent en JavaScript dans
   le moteur de l'agent.
 - **Pas de périmètre de première version.** Les fonctionnalités arrivent l'une après
@@ -130,8 +131,10 @@ d'agent face à un programme qui tourne sous le même utilisateur : un tel progr
 lancer l'agent lui-même, remplacer son exécutable (il appartient à l'utilisateur) ou
 s'y injecter. Aucune authentification locale ne tient contre ce cas, qui relève de la
 sécurité de la machine. Pour de la lecture, le risque est faible : un tel programme
-peut déjà lire directement ce que lisent les briques. Le service n'offre aucune action
-sur une source ; s'il en offrait un jour d'autres que le rafraîchissement, il faudrait
+peut déjà lire directement ce que lisent les briques. Il peut aussi envoyer de fausses
+entrées à une brique (`01-briques.md`) : il fausse alors ce qu'elle publie, jamais la
+source. Le service n'offre aucune action sur une source ; s'il en offrait un jour
+d'autres que le rafraîchissement et l'entrée, il faudrait
 limiter ce que chaque type de client a le droit de demander. Ces droits s'arrêtent à la
 session : le noyau ne distingue pas deux mods d'une même session, qui partagent le
 même processus.
@@ -157,7 +160,7 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
   et le canal sont décidés dans `01-briques.md` ; côté clients, voir `02-clients.md`.
 - **Des droits différents selon le type de client.** Pour l'instant, tous les clients
   ont les mêmes droits. Le service n'offrant aucune action sur une source, la question
-  ne se pose qu'au-delà du rafraîchissement. Les requêtes elles-mêmes sont
+  ne se pose qu'au-delà du rafraîchissement et de l'entrée. Les requêtes elles-mêmes sont
   décrites dans `02-clients.md`.
 - **Le comportement quand le service est absent** ou en échec : il vit dans l'outil
   en ligne de commande commun aux clients (voir `02-clients.md`), reste à le définir.

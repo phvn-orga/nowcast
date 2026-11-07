@@ -2,7 +2,8 @@
 
 État au 2026-11-07 : architecture des clients, format du flux et déclaration de
 session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
-et le rafraîchissement aussi en session interactive.
+et le rafraîchissement aussi en session interactive ; entrée d'un flux et mesures
+des sessions Claude Code ajoutées.
 
 ## Décisions prises
 
@@ -14,8 +15,9 @@ et le rafraîchissement aussi en session interactive.
   chaque flux ses derniers événements (`03-contrats.md`, section 3). Une coupure du flux
   ne fait rien perdre dans la limite de cet historique, et au-delà le client en est
   averti (`flow-gap`). Un client ne fait que
-  cinq choses : déclarer sa session, s'abonner, se désabonner, lire son flux et
-  demander le rafraîchissement immédiat d'un flux. Le service n'exécute aucune action
+  six choses : déclarer sa session, s'abonner, se désabonner, lire son flux,
+  demander le rafraîchissement immédiat d'un flux et envoyer une entrée sur un flux
+  (voir `01-briques.md`). Le service n'exécute aucune action
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
@@ -28,8 +30,8 @@ et le rafraîchissement aussi en session interactive.
   service n'a pas à deviner ce que signifie un changement de session.
 - **Un flux par session, des requêtes en appels HTTP.** La session tient un seul flux
   ouvert, qui regroupe tous ses abonnements. S'abonner, se désabonner, demander un
-  rafraîchissement, lire la dernière valeur d'un flux ou annoncer un changement de
-  session sont des appels HTTP ordinaires sur le même socket. Le service rattache
+  rafraîchissement, envoyer une entrée, lire la dernière valeur d'un flux ou annoncer
+  un changement de session sont des appels HTTP ordinaires sur le même socket. Le service rattache
   appels et flux à la même session par leur processus d'ancrage commun (voir
   `00-cadrage.md`) : ni jeton ni identifiant de connexion à échanger.
 - **Le flux est en SSE** (Server-Sent Events) sur HTTP/1.1, sur le socket Unix du
@@ -43,7 +45,9 @@ et le rafraîchissement aussi en session interactive.
 - **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
   valeur, en un appel ; avec `--after <id>`, l'historique après cet identifiant), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
-  immédiat, rien d'affiché en cas de succès). La reconnexion et la conduite à tenir
+  immédiat, rien d'affiché en cas de succès), `nowcast input <flux>` (envoie le détail
+  JSON lu sur l'entrée standard), `nowcast bricks enable <nom>` et
+  `nowcast bricks disable <nom>` (activer ou désactiver une brique). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
   après cet identifiant : chaque événement gardé depuis, plutôt que toutes les
@@ -76,13 +80,19 @@ et le rafraîchissement aussi en session interactive.
   s'abonne reçoit l'identifiant du flux en réponse et le lit ensuite dans l'état du
   mod central. Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
+- **Le mod central envoie les mesures de sa session** à la brique claude-code, quand
+  elle est activée : il s'abonne au flux de sa session, y envoie une entrée après
+  chaque requête au modèle et à chaque `session.measure`, et y relit ce que la brique
+  en retient (`05-brique-claude-code.md`). Ce flux suit
+  l'identifiant de session : après un `/clear`, le mod se désabonne de l'ancien et
+  s'abonne au nouveau.
 - **Un `watch` par identifiant de session.** Comme `/clear` vide l'état du plugin, le
   mod central arrête alors `watch` et le relance sous le nouvel identifiant, sans
   `Last-Event-ID` : le service envoie à nouveau chaque dernière valeur, qui remplit
   l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
 - **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
   mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
-  `subscribe`, `unsubscribe`, `refresh`, `last` et `history`, typés par le contrat du mod
+  `subscribe`, `unsubscribe`, `refresh`, `input`, `last` et `history`, typés par le contrat du mod
   central. `history` lit l'historique d'un flux après un identifiant
   (`GET /v1/flows/{flow}?after=<id>`) : c'est ainsi qu'un mod qui s'abonne en cours de
   session à un flux déjà suivi lit ce qui a précédé. L'état partagé, lui, ne garde que
@@ -103,7 +113,11 @@ et le rafraîchissement aussi en session interactive.
   appels, qui sont des événements du moteur.
 - **Aucun mécanisme interne non documenté d'un agent** (variable d'environnement,
   fichier de session) n'entre dans le modèle : seules les API publiques des agents
-  comptent.
+  comptent. Une exception, dans l'adaptateur Claude Code et pour une mesure
+  seulement : le mod central lit les transcriptions de la session, au chargement
+  pour retrouver les tokens consommés avant lui, et après chaque tour pour la durée
+  de vie du cache, deux valeurs qu'aucune API ne donne (`05-brique-claude-code.md`).
+  Illisibles, il compte depuis son chargement et la brique suppose une heure.
 
 ## Ce que peuvent les clients
 
