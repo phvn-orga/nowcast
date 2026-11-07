@@ -6,7 +6,7 @@
 
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
-import { STUB, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import { STUB, history, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
 import { Lines, type Status, type StreamEvent, isNewer, nextFlow, parseLine } from './stream'
 
 const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
@@ -61,6 +61,7 @@ export const register: Register = on => {
     if (value.ok && value.last !== null) await offer($, value.last)
     return { value }
   })
+  on('nowcast.history', async ($, e) => ({ value: await history($, e.flow, e.after) }))
 
   // Once per load of the mod: the session's start, or a reload. The start
   // does not wait for the service: `stream` says when the session is declared.

@@ -263,14 +263,20 @@ export const caller: Plugin = {
             ? await $.nowcast.unsubscribe(request)
             : method === 'refresh'
               ? await $.nowcast.refresh(request)
-              : await $.nowcast.last(request)
+              : method === 'history'
+                ? await $.nowcast.history(request)
+                : await $.nowcast.last(request)
       return { text: JSON.stringify(answer) }
     })
   },
 }
 
 /** What `$.nowcast.<method>(request)` answers, called by the `caller` mod. */
-export async function call($: Engine, method: 'subscribe' | 'unsubscribe' | 'refresh' | 'last', request: unknown) {
+export async function call(
+  $: Engine,
+  method: 'subscribe' | 'unsubscribe' | 'refresh' | 'last' | 'history',
+  request: unknown,
+) {
   const args = JSON.stringify({ method, request })
   const { text } = await $.command.run({ command: 'call', args, ...COMPOSER })
   return JSON.parse(text ?? 'null') as unknown
