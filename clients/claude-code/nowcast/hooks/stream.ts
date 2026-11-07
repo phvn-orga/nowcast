@@ -29,8 +29,9 @@ export type Status = { status: 'connected' } | { status: 'retrying'; reason: str
 
 /**
  * Reads one stdout line: `{"event": <name>, "data": <data>}` or `{"status":
- * <status>, ...}`. Null for a line that is none of the three events of the
- * contract nor a status, or an event that lacks its flow.
+ * <status>, ...}`. Null for a line that is none of the three events the state
+ * follows (`flow-gap` is not one) nor a status, or an event that lacks its
+ * flow.
  */
 export function parseLine(line: string): StreamEvent | Status | null {
   let parsed: unknown
@@ -87,21 +88,21 @@ export function nextFlow(previous: NowcastFlow | undefined, event: StreamEvent):
   }
 }
 
+const DECIMAL = /^[0-9]+$/
+
 /**
  * Whether `update` is more recent than `than`. Event ids come from one
  * counter for every flow (contract section 3); an id that is not a decimal
  * number is newer whenever it differs.
  */
 export function isNewer(update: NowcastEvent, than: NowcastEvent): boolean {
-  const decimal = /^[0-9]+$/
-  if (decimal.test(update.id) && decimal.test(than.id)) return BigInt(update.id) > BigInt(than.id)
+  if (DECIMAL.test(update.id) && DECIMAL.test(than.id)) return BigInt(update.id) > BigInt(than.id)
   return update.id !== than.id
 }
 
 /** Whether `update` is less recent than `than`; never for a non-decimal id. */
 function isOlder(update: NowcastEvent, than: NowcastEvent): boolean {
-  const decimal = /^[0-9]+$/
-  return decimal.test(update.id) && decimal.test(than.id) && BigInt(update.id) < BigInt(than.id)
+  return DECIMAL.test(update.id) && DECIMAL.test(than.id) && BigInt(update.id) < BigInt(than.id)
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
