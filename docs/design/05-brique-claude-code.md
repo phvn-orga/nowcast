@@ -1,6 +1,6 @@
 # La brique claude-code
 
-État au 2026-11-07 : premier jet, à relire. Première brique native du dépôt, construite
+État au 2026-11-07 : implémentation dans #62. Première brique native du dépôt, construite
 sur les briques natives et l'entrée d'un flux (`01-briques.md`, `03-contrats.md`).
 
 Elle publie ce qui appartient au compte Claude Code et à ses sessions. Chaque
@@ -18,15 +18,18 @@ le même.
 | `sessions` | `{}` | `claude-code/sessions` | `claude-code.sessions/v1` | rien |
 | `sessions` | `{"id": "<identifiant de session>"}` | `claude-code/sessions/<id>` | `claude-code.session/v1` | rien |
 
-- **`session` est le flux d'émission d'une session**, réservé à elle seule. Elle y
-  envoie ses mesures et y relit aussitôt ce que la brique en retient. Le `release`
-  de ce flux dit à la brique que la session s'est arrêtée : désabonnement, `/clear`,
-  ou mort de son processus.
+- **`session` est le flux d'émission d'une session**, qui ne prend qu'un abonné :
+  le premier. Elle y envoie ses mesures et y relit aussitôt ce que la brique en
+  retient. Le `release` de ce flux dit à la brique que la session s'est arrêtée :
+  désabonnement, `/clear`, ou mort de son processus.
+- **Un second abonné est refusé** : tant que le flux vit, la brique répond au
+  `subscribe` par l'erreur `taken`, que le client reçoit en `422`
+  `subscription_refused`. Le service n'envoyant `release` qu'au départ du dernier
+  abonné, un second abonné cacherait la fin de la session, et pourrait envoyer des
+  mesures en son nom. Si un autre processus prend le flux avant la session, c'est
+  elle qui est refusée et ses mesures ne partent pas.
 - **`sessions` est la lecture**, de toutes les sessions ou d'une seule, par
-  n'importe quel client : une autre session, un tableau de bord. Un lecteur ne
-  s'abonne jamais au flux `session` d'une autre session : le service n'envoie
-  `release` qu'au départ du dernier abonné d'un flux, et un lecteur resté abonné
-  cacherait la fin de la session.
+  n'importe quel client : une autre session, un tableau de bord.
 
 ## Quotas
 
@@ -47,11 +50,15 @@ le même.
 S'y ajoute la copie que Claude Code garde de la réponse de l'API d'usage, dans
 `~/.claude.json` (`cachedUsageUtilization`). Il ne l'écrit que quand il lit l'API
 lui-même (sur `/usage`), mais elle est datée (`fetchedAtMs`) : la brique la prend
-quand elle est plus récente que sa propre dernière lecture, par exemple au lancement
-ou pendant une attente après un `429`.
+quand elle est plus récente que sa propre dernière lecture. Elle ne la relit que
+tant que l'API d'usage n'est pas `ok` (avant la première lecture, jeton expiré,
+attente après un `429`), et seulement quand le fichier a changé : il porte tous les
+réglages de Claude Code.
 
 Pour chaque fenêtre, la brique publie la lecture la plus récente de ces sources, avec
-son instant et sa source.
+son instant et sa source. Elle publie quand un pourcentage, une échéance, une source
+ou l'état de l'API change ; un `as_of` plus récent seul attend la publication
+suivante, pour qu'un tour de session ne republie pas les quotas à chaque fois.
 
 ### Interrogation de l'API d'usage
 
@@ -62,6 +69,8 @@ son instant et sa source.
   revient à 60 s après une réponse réussie.
 - Un `refresh` du flux `quotas` déclenche une lecture dès que ce rythme le permet.
   Des demandes rapprochées n'en font qu'une.
+- Une API injoignable (réseau) laisse l'état tel quel : ce n'est pas un verdict sur
+  la source, la lecture suivante vient à son tour.
 - Les sessions n'ont pas à demander de rafraîchissement en fin de tour : leurs
   mesures portent déjà les fenêtres que leur dernière réponse a fait bouger.
 
@@ -70,8 +79,9 @@ son instant et sa source.
 - La brique relit le fichier de Claude Code à chaque interrogation, puisque Claude
   Code le réécrit quand il renouvelle le jeton. Elle ne le renouvelle jamais
   elle-même : ce serait écrire dans le fichier d'un autre programme.
-- Jeton expiré (date d'expiration passée, ou réponse `401`) : la brique cesse
-  d'interroger l'API, suit le fichier (inotify) et reprend dès qu'il change. Les
+- Jeton expiré (date d'expiration passée, ou réponse `401`) : la brique n'interroge
+  plus l'API, relit le fichier à chaque échéance et dès qu'il change (inotify), et
+  reprend avec le jeton renouvelé. Les
   fenêtres continuent de vivre par les mesures des sessions. Comme Claude Code
   renouvelle son jeton quand il travaille, un jeton expiré signifie en pratique
   qu'aucune session Claude Code n'a tourné récemment sur la machine.
@@ -95,7 +105,8 @@ son instant et sa source.
 - `windows` : une entrée par fenêtre connue, sous le nom que lui donne sa source.
   `percent` va de 0 à 100. `source` vaut `usage-api` (lecture de la brique ou copie
   de Claude Code) ou `session`.
-- `usage_api.status` : `ok`, `token_expired`, `no_credentials` (pas de fichier),
+- `usage_api.status` : `pending` (pas encore lue), `ok`, `token_expired`,
+  `no_credentials` (pas de fichier),
   `rate_limited` (en attente après un `429`) ou `unreadable` (réponse ou fichier dans
   un format inattendu). `as_of` date la dernière lecture réussie.
 
@@ -103,14 +114,15 @@ son instant et sa source.
 
 ### Ce qu'une session envoie
 
-Le mod central de Claude Code (`02-clients.md`), au début de chaque session :
+Le mod central de Claude Code (`02-clients.md`), dans chaque session :
 
-1. s'abonne à `session` avec l'identifiant de la session ;
+1. à sa première mesure, s'abonne à `session` avec l'identifiant de la session :
+   une session qui ne fait aucun tour n'envoie aucune requête ;
 2. envoie une entrée `claude-code.measure/v1` sur ce flux
    (`POST /v1/flows/{flow}/input`, `03-contrats.md`) après chaque requête au modèle
    et à chaque `session.measure`, en regroupant les envois rapprochés ;
 3. après un `/clear` ou une reprise, se désabonne du flux de l'ancien identifiant et
-   s'abonne à celui du nouveau.
+   s'abonne à celui du nouveau, à sa première mesure.
 
 Si la brique n'est pas activée, l'abonnement répond `404` `unknown_brick` : le mod
 n'envoie rien pour cette session.
