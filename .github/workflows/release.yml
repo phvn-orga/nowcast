@@ -141,5 +141,6 @@ jobs:
             commit -qam "$title"
           git push origin "$branch"
           gh workflow run ci.yml --ref "$branch"
+          gh workflow run check-agents-md.yml --ref "$branch"
           gh pr create --base main --head "$branch" --title "$title" \
             --body "Points the Homebrew formula at the $GITHUB_REF_NAME release. Merge it to make \`brew upgrade\` see $VERSION."
