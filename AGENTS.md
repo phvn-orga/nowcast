@@ -23,9 +23,9 @@ The CI (`.github/workflows/ci.yml`) runs the whole workspace and is the judge.
 
 ## Release
 
-Release with `gh workflow run release.yml -f version=<version>`, and nothing
-by hand: no version edit, no tag. The run sets the version, tags, publishes and
-updates the Homebrew formula in `Formula/`, merging its own pull requests;
+Release by raising the workspace version in `Cargo.toml` in a pull request,
+and nothing by hand: no tag, no formula edit. Merged into `main`, it publishes
+the release and updates `Formula/`; a failed run is rerun as is.
 `.github/workflows/release.yml` describes it.
 
 ## Harness

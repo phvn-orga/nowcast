@@ -1,27 +1,34 @@
 name: Release
 
-# One action releases: `gh workflow run release.yml -f version=<version>`.
-# The run opens the pull request that sets the version in Cargo.toml and
-# merges it once its checks pass, builds the static binary from the merge,
-# tags it and publishes it as a GitHub Release, then opens and merges the pull
-# request that points the Homebrew formula at it. Run again with the same
-# version after a failure, it skips what is already done up to the release.
-# A pull request touching the release path runs the same build and packaging,
-# installs the formula from the local archive, and publishes nothing.
+# A release starts when the workspace version in Cargo.toml changes on main: a
+# pull request raising it releases it once merged.
+#
+# Nothing shows before all is validated: the run builds the static binary in
+# the release container, packages it, and installs the formula from the local
+# archive. It then publishes the release whole (a draft completed, then
+# published, which creates the tag), and only then points the Homebrew formula
+# at it, through a pull request it merges once its checks pass.
+#
+# Run again (Re-run, or `gh workflow run release.yml`), it validates again,
+# keeps a release already published, and redoes the formula.
+#
+# A pull request touching the release path runs the validation alone, and
+# refuses a version that does not go up or is already released.
 on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
   workflow_dispatch:
-    inputs:
-      version:
-        description: The version to release, without the v (0.1.0-alpha.2)
-        required: true
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/scripts/**
       - Formula/**
       - build/**
       - .dockerignore
       - crates/daemon/systemd/**
-      # A new dependency can break the static build.
+      # The version, and a new dependency, which can break the static build.
+      - Cargo.toml
       - Cargo.lock
 
 permissions: {}
@@ -32,99 +39,75 @@ env:
 
 jobs:
   version:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      # Push the version branch.
-      contents: write
-      # Open and merge the version pull request.
-      pull-requests: write
-      # Run CI on that branch: a pull request opened by GITHUB_TOKEN starts no workflow.
-      actions: write
-    outputs:
-      sha: ${{ steps.merge.outputs.sha }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ inputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: main
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Set the version and merge it
-        id: merge
-        run: |
-          if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "::error::$VERSION is not a version (0.1.0, 0.1.0-alpha.2)"
-            exit 1
-          fi
-          if [ -n "$(git ls-remote --tags origin "v$VERSION")" ]; then
-            echo "::error::v$VERSION is already released"
-            exit 1
-          fi
-          current=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "nowcast-cli") | .version')
-          # A run again after a failure further on: main already has it.
-          if [ "$current" != "$VERSION" ]; then
-            branch="release/v$VERSION"
-            title="build(release): set the version to $VERSION"
-            # The first `version` of Cargo.toml is the workspace's.
-            sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" Cargo.toml
-            cargo update --workspace
-            git switch -c "$branch"
-            git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -qam "$title"
-            # The branch is this workflow's: a run again replaces it, and
-            # takes over its pull request.
-            git push --force origin "$branch"
-            gh workflow run ci.yml --ref "$branch"
-            gh workflow run check-agents-md.yml --ref "$branch"
-            gh pr view "$branch" --json state -q .state 2>/dev/null | grep -qx OPEN ||
-              gh pr create --base main --head "$branch" --title "$title" \
-                --body "Opened by the release workflow, which merges it once its checks pass."
-            .github/scripts/merge-when-green.sh "$branch"
-            git fetch -q origin main
-          fi
-          echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: version
-    # The version job runs for a release only; a pull request builds alone.
-    if: ${{ !cancelled() && (needs.version.result == 'success' || needs.version.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      archive: ${{ steps.package.outputs.archive }}
-      sha: ${{ steps.version.outputs.sha }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.version.outputs.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      # For `cargo metadata` alone: the binary builds in the container below.
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Version
+      - name: Read the version, and whether it releases
         id: version
         env:
-          INPUT: ${{ inputs.version }}
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.base_ref }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "nowcast-cli") | .version')
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$INPUT" != "$version" ]; then
-            echo "::error::the merged version is $version, not $INPUT"
-            exit 1
-          fi
+          # The first `version` of Cargo.toml is the workspace's.
+          version_at() {
+            git show "$1:Cargo.toml" | sed -n '0,/^version = "\(.*\)"$/s//\1/p'
+          }
+          version=$(version_at HEAD)
+          released=$(git ls-remote --tags origin "v$version")
+          case $GITHUB_EVENT_NAME in
+            pull_request)
+              previous=$(version_at "origin/$BASE")
+              if [ "$previous" != "$version" ]; then
+                if ! python3 -I .github/scripts/version-goes-up.py "$previous" "$version"; then
+                  echo "::error::the version goes from $previous to $version: it must go up"
+                  exit 1
+                fi
+                if [ -n "$released" ]; then
+                  echo "::error::v$version is already released"
+                  exit 1
+                fi
+              fi
+              release=false
+              ;;
+            push)
+              previous=$(version_at "$BEFORE")
+              release=$([ "$previous" != "$version" ] && echo true || echo false)
+              ;;
+            workflow_dispatch)
+              release=true
+              ;;
+          esac
+          echo "$version, release: $release"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    if: github.event_name == 'pull_request' || needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      archive: ${{ steps.package.outputs.archive }}
+      sha: ${{ steps.package.outputs.sha }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       # The same container builds the binary locally: see its header.
       - run: docker build -f build/release.Dockerfile --output out .
       - name: Package
         id: package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           name="nowcast-v$VERSION-$TARGET"
           mkdir -p "dist/$name/systemd"
@@ -140,8 +123,8 @@ jobs:
           grep -qF "$url" dist/nowcast.rb && grep -qF "$sha256" dist/nowcast.rb
           ls -l "dist/$name/nowcast" "dist/$name.tar.gz"
           echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Install the formula from the local archive
-        if: github.event_name == 'pull_request'
         env:
           ARCHIVE: ${{ steps.package.outputs.archive }}
           HOMEBREW_NO_AUTO_UPDATE: 1
@@ -168,15 +151,57 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.sha256
-            dist/nowcast.rb
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'workflow_dispatch'
-    needs: build
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
-      # Create the release, push the formula branch.
+      # Create and publish the release.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCHIVE: ${{ needs.build.outputs.archive }}
+      SHA: ${{ needs.build.outputs.sha }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+      - name: Publish the release whole
+        run: |
+          tag="v$VERSION"
+          if [ "$(gh release view "$tag" --json isDraft -q .isDraft 2>/dev/null)" = false ]; then
+            echo "$tag is already published: kept"
+            exit 0
+          fi
+          # A draft an earlier run left behind: nobody sees it, it goes.
+          gh release delete "$tag" --yes 2>/dev/null || true
+          # A version with a pre-release part (0.1.0-alpha.2) is published as
+          # a pre-release, with a warning in place of the generated notes.
+          flags=(--generate-notes)
+          if [[ $VERSION == *-* ]]; then
+            flags=(--prerelease --notes "**Experimental pre-release, for testing only.** Interfaces, formats and behaviour change without notice. Do not rely on it.")
+          fi
+          # Completed as a draft, then published: the tag, on the commit the
+          # binary was built from, appears only with the whole release.
+          if ! gh release create "$tag" --draft --target "$SHA" --title "nowcast $VERSION" "${flags[@]}" \
+              "$RUNNER_TEMP/dist/$ARCHIVE" "$RUNNER_TEMP/dist/$ARCHIVE.sha256" ||
+            ! gh release edit "$tag" --draft=false; then
+            gh release delete "$tag" --yes --cleanup-tag || true
+            echo "::error::$tag could not be published: nothing is left of it"
+            exit 1
+          fi
+
+  formula:
+    needs: [version, publish]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Push the formula branch.
       contents: write
       # Open and merge the formula pull request.
       pull-requests: write
@@ -184,42 +209,37 @@ jobs:
       actions: write
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.build.outputs.version }}
-      ARCHIVE: ${{ needs.build.outputs.archive }}
-      SHA: ${{ needs.build.outputs.sha }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: main
-      - uses: actions/download-artifact@v8
-        with:
-          name: dist
-          path: ${{ runner.temp }}/dist
-      - name: Publish the release
-        run: |
-          # A version with a pre-release part (0.1.0-alpha.1) is published as
-          # a pre-release, with a warning in place of the generated notes.
-          flags=(--generate-notes)
-          if [[ $VERSION == *-* ]]; then
-            flags=(--prerelease --notes "**Experimental pre-release, for testing only.** Interfaces, formats and behaviour change without notice. Do not rely on it.")
-          fi
-          # Tags the commit the binary was built from.
-          gh release create "v$VERSION" --target "$SHA" --title "nowcast $VERSION" "${flags[@]}" \
-            "$RUNNER_TEMP/dist/$ARCHIVE" "$RUNNER_TEMP/dist/$ARCHIVE.sha256"
       - name: Point the formula at the release and merge it
         run: |
-          branch="formula/v$VERSION"
+          tag="v$VERSION"
+          # The published archive, not this run's build: a release kept from
+          # an earlier run has its own checksum.
+          gh release download "$tag" --pattern '*.tar.gz.sha256' --dir "$RUNNER_TEMP/release"
+          read -r sha256 archive < "$RUNNER_TEMP"/release/*.sha256
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$archive"
+          sed -i -e "s|^  url \".*\"$|  url \"$url\"|" -e "s|^  sha256 \".*\"$|  sha256 \"$sha256\"|" \
+            Formula/nowcast.rb
+          if git diff --quiet Formula/nowcast.rb; then
+            echo "the formula already points at $tag"
+            exit 0
+          fi
+          branch="formula/$tag"
           title="build(formula): release nowcast $VERSION"
           git switch -c "$branch"
-          cp "$RUNNER_TEMP/dist/nowcast.rb" Formula/nowcast.rb
           git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -qam "$title"
-          # As for the version branch: replaced, its pull request taken over.
+          # The branch is this workflow's: a run again replaces it, and takes
+          # over its pull request.
           git push --force origin "$branch"
           gh workflow run ci.yml --ref "$branch"
           gh workflow run check-agents-md.yml --ref "$branch"
           gh pr view "$branch" --json state -q .state 2>/dev/null | grep -qx OPEN ||
             gh pr create --base main --head "$branch" --title "$title" \
-              --body "Points the Homebrew formula at the v$VERSION release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
+              --body "Points the Homebrew formula at the $tag release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
           .github/scripts/merge-when-green.sh "$branch"
