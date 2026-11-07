@@ -1,5 +1,5 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `subscribe`. `nowcast daemon` runs the service itself, from the
+//! `refresh`, `input`, `subscribe`. `nowcast daemon` runs the service itself, from the
 //! `nowcast-daemon` library: one binary to install, at one version.
 //!
 //! Every command declares a session (`PUT /v1/session`) before any other call
@@ -70,6 +70,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
         }
         Command::Refresh { flow } => commands::refresh(&client, &flow).await,
+        Command::Input { flow } => commands::input(&client, &flow, io::stdin().lock()).await,
         Command::Subscribe {
             brick,
             kind,

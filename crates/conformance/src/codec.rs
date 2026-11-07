@@ -40,6 +40,11 @@ pub fn service_messages() -> Vec<ServiceMessage> {
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },
+        ServiceMessage::Input {
+            flow: flow(),
+            data_type: "forge.push/v1".into(),
+            detail: br#"{"branch":"main"}"#.to_vec(),
+        },
         ServiceMessage::Shutdown,
         ServiceMessage::Ack { req: RequestId(7) },
         ServiceMessage::Error {

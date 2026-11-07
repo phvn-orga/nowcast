@@ -1,0 +1,16 @@
+# A subscription kind publishes a type, accepts one, or both.
+manifest_version = 1
+name = "inbox"
+version = "0.1.0"
+description = "Takes inputs."
+protocol = 1
+
+[run]
+command = ["bin/inbox"]
+
+[subscriptions.none]
+description = "Neither publishes nor accepts."
+schema = "schemas/subscription-pr.json"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"

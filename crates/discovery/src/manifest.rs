@@ -37,6 +37,10 @@ pub enum ManifestError {
     NonUtf8Command { path: PathBuf },
     #[error("subscription kind {kind:?} publishes {publishes:?}, which [types] does not declare")]
     UndeclaredType { kind: String, publishes: String },
+    #[error("subscription kind {kind:?} accepts {accepts:?}, which [types] does not declare")]
+    UndeclaredInput { kind: String, accepts: String },
+    #[error("subscription kind {kind:?} neither publishes nor accepts a type")]
+    NoType { kind: String },
     #[error("cannot read the schema {path}: {source}")]
     SchemaRead { path: PathBuf, source: io::Error },
     #[error("the schema {path} is not valid JSON: {source}")]
@@ -84,7 +88,10 @@ struct RawRun {
 struct RawSubscription {
     description: String,
     schema: PathBuf,
-    publishes: String,
+    #[serde(default)]
+    publishes: Option<String>,
+    #[serde(default)]
+    accepts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -133,10 +140,27 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
     let command = resolve_command(raw.run.command, &dir)?;
 
     for (kind, subscription) in &raw.subscriptions {
-        if !raw.types.contains_key(&subscription.publishes) {
+        if subscription.publishes.is_none() && subscription.accepts.is_none() {
+            return Err(ManifestError::NoType { kind: kind.clone() });
+        }
+        if let Some(publishes) = subscription
+            .publishes
+            .as_ref()
+            .filter(|ty| !raw.types.contains_key(*ty))
+        {
             return Err(ManifestError::UndeclaredType {
                 kind: kind.clone(),
-                publishes: subscription.publishes.clone(),
+                publishes: publishes.clone(),
+            });
+        }
+        if let Some(accepts) = subscription
+            .accepts
+            .as_ref()
+            .filter(|ty| !raw.types.contains_key(*ty))
+        {
+            return Err(ManifestError::UndeclaredInput {
+                kind: kind.clone(),
+                accepts: accepts.clone(),
             });
         }
     }
@@ -149,6 +173,7 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
                 description: raw.description,
                 schema,
                 publishes: raw.publishes,
+                accepts: raw.accepts,
             };
             Ok((kind, subscription))
         })

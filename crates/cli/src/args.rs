@@ -90,6 +90,15 @@ pub enum Command {
         flow: String,
     },
 
+    /// Send the JSON value read on stdin to the brick of a flow the anchor process is subscribed to
+    ///
+    /// Prints nothing. The flow's subscription kind must accept an input, and
+    /// the value must match the type it accepts.
+    Input {
+        /// Flow id, as `subscribe` prints it: <brick>/<flow>
+        flow: String,
+    },
+
     /// Subscribe to a brick and print the subscription, its flow and its last value
     ///
     /// The subscription lives as long as the anchor process: the agent when run

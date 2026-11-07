@@ -100,6 +100,12 @@ export type Nowcast = {
   /** `POST /v1/flows/{flow}/refresh`: the brick publishes again once it has read. */
   refresh(request: { flow: string }): Promise<NowcastDone | NowcastFailure>
   /**
+   * `POST /v1/flows/{flow}/input`: sends `detail` to the flow's brick. The
+   * flow's subscription kind must accept an input, and `detail` match the
+   * type it accepts (`input_not_accepted`, `invalid_input` otherwise).
+   */
+  input(request: { flow: string; detail: unknown }): Promise<NowcastDone | NowcastFailure>
+  /**
    * `GET /v1/flows/{flow}`, for a flow this process is subscribed to. Most
    * mods read the state instead, which follows the stream.
    */

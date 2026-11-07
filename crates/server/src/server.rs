@@ -14,7 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use nowcast_traits::{AnchorId, Discovery, Identity, Router, Sessions, Supervisor};
+use nowcast_traits::{AnchorId, Discovery, Identity, InputError, Router, Sessions, Supervisor};
 use nowcast_types::{
     ApiError, ApiErrorCode, BrickName, EventId, QualifiedFlowId, SessionId, SubscriptionId,
 };
@@ -238,8 +238,56 @@ where
                     .map_err(|_| HttpError::unknown_flow(&flow.to_string()))?;
                 Ok(empty(StatusCode::ACCEPTED))
             }
+            Route::Input(flow) => self.input(anchor, &flow_id(flow)?, body).await,
             Route::Stream => self.stream(anchor, &parts.headers),
         }
+    }
+
+    /// Relays a subscriber's input to the flow's brick, once checked against
+    /// the type the flow's subscription kind accepts.
+    async fn input(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        body: Incoming,
+    ) -> Result<Response<Body>, HttpError> {
+        let unknown = || HttpError::unknown_flow(&flow.to_string());
+        // Like reading it, sending to a flow takes a subscription.
+        self.router.last(anchor, flow).map_err(|_| unknown())?;
+        let kind = self.supervisor.kind(flow).ok_or_else(unknown)?;
+        let declaration = self.discovery.brick(flow.brick()).ok_or_else(unknown)?;
+        let not_accepted = || {
+            HttpError::api(
+                ApiErrorCode::InputNotAccepted,
+                format!("kind {kind:?} of brick {} accepts no input", flow.brick()),
+            )
+        };
+        let accepts = declaration
+            .subscriptions
+            .get(&kind)
+            .and_then(|k| k.accepts.clone())
+            .ok_or_else(not_accepted)?;
+        // Discovery refuses a declaration whose accepted type is undeclared.
+        let schema = &declaration
+            .types
+            .get(&accepts)
+            .ok_or_else(not_accepted)?
+            .schema;
+        let bytes = read_body(body).await?;
+        let input: Value = serde_json::from_slice(&bytes).map_err(|e| {
+            HttpError::api(
+                ApiErrorCode::InvalidInput,
+                format!("the input is not JSON: {e}"),
+            )
+        })?;
+        params::validate_input(schema, &input, &accepts)?;
+        self.supervisor
+            .input(flow, &accepts, bytes.to_vec())
+            .map_err(|e| match e {
+                InputError::UnknownFlow(_) => unknown(),
+                InputError::Unavailable(e) => ApiError::from(e).into(),
+            })?;
+        Ok(empty(StatusCode::ACCEPTED))
     }
 
     async fn subscribe(
@@ -372,7 +420,14 @@ fn flow_id(segment: &str) -> Result<QualifiedFlowId, HttpError> {
 }
 
 async fn read_json<T: DeserializeOwned>(body: Incoming) -> Result<T, HttpError> {
-    let bytes = Limited::new(body, MAX_BODY)
+    let bytes = read_body(body).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| HttpError::invalid_request(format!("the body is not the expected JSON: {e}")))
+}
+
+/// The whole body, up to [`MAX_BODY`] bytes.
+async fn read_body(body: Incoming) -> Result<Bytes, HttpError> {
+    Ok(Limited::new(body, MAX_BODY)
         .collect()
         .await
         .map_err(|e| {
@@ -382,9 +437,7 @@ async fn read_json<T: DeserializeOwned>(body: Incoming) -> Result<T, HttpError> 
                 HttpError::invalid_request(format!("cannot read the body: {e}"))
             }
         })?
-        .to_bytes();
-    serde_json::from_slice(&bytes)
-        .map_err(|e| HttpError::invalid_request(format!("the body is not the expected JSON: {e}")))
+        .to_bytes())
 }
 
 fn empty(status: StatusCode) -> Response<Body> {

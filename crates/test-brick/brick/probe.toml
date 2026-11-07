@@ -17,5 +17,14 @@ description = "One item, named by its id."
 schema = "schemas/item.json"
 publishes = "probe.item/v1"
 
+[subscriptions.inbox]
+description = "One item that takes inputs, named by its id."
+schema = "schemas/item.json"
+publishes = "probe.item/v1"
+accepts = "probe.input/v1"
+
 [types."probe.item/v1"]
 schema = "schemas/probe-item-v1.json"
+
+[types."probe.input/v1"]
+schema = "schemas/probe-input-v1.json"

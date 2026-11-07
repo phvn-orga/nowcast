@@ -6,7 +6,7 @@ mod harness;
 
 use std::time::{Duration, Instant};
 
-use harness::{AGENT_SESSION, Service, TIMEOUT, params, received};
+use harness::{AGENT_SESSION, Service, TIMEOUT, params, received, wait_for};
 use nowcast_test_brick::{ControlledBrick, Mode, TYPE};
 use nowcast_types::{FlowId, PublishErrorCode, ServiceMessage};
 use serde_json::{Value, json};
@@ -178,6 +178,49 @@ async fn a_refresh_reaches_the_brick_which_publishes_again() {
         is_update(&event, &json!({ "id": "a", "refresh": 1 })),
         "{event}"
     );
+}
+
+#[tokio::test]
+async fn an_input_reaches_the_brick_of_its_flow() {
+    let service = Service::start().await;
+    let mut agent = service.agent();
+    let subscribed = agent
+        .run(&["--json", "subscribe", "probe", "inbox", &params("a")])
+        .await;
+    let mut brick = service.brick().await;
+    assert_eq!(subscribed.json()["flow"], "probe/inbox/a", "{subscribed:?}");
+
+    let sent = agent
+        .run_with_stdin(&["input", "probe/inbox/a"], r#"{"n": 1}"#)
+        .await;
+    assert_eq!(sent.status, Some(0), "{sent:?}");
+    assert_eq!(sent.stdout, "", "{sent:?}");
+    received(&mut brick, "the brick gets the input", |message| {
+        matches!(
+            message,
+            ServiceMessage::Input { flow, data_type, detail }
+                if flow.as_str() == "inbox/a"
+                    && data_type == "probe.input/v1"
+                    && serde_json::from_slice::<Value>(detail).ok() == Some(json!({ "n": 1 }))
+        )
+    })
+    .await;
+    // The test brick publishes what it received.
+    wait_for("the input published back", async || {
+        let got = agent.run(&["--json", "get", "probe/inbox/a"]).await;
+        (got.json()["data"] == json!({ "id": "inbox/a", "input": { "n": 1 } })).then_some(())
+    })
+    .await;
+
+    // A value outside the accepted schema never reaches the brick.
+    let refused = agent
+        .run_with_stdin(&["--json", "input", "probe/inbox/a"], "42")
+        .await;
+    assert_eq!(refused.status, Some(1), "{refused:?}");
+    assert_eq!(refused.error_code(), "invalid_input");
+    // The agent goes before the brick, as in the other scenarios: the other
+    // order holds the test 10 s at teardown.
+    drop(agent);
 }
 
 #[tokio::test]

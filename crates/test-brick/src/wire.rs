@@ -77,6 +77,12 @@ pub enum Received {
     Refresh {
         flow: String,
     },
+    Input {
+        flow: String,
+        #[serde(rename = "type")]
+        data_type: String,
+        detail: Vec<u8>,
+    },
     Shutdown,
     Ack {
         req: u64,
@@ -105,6 +111,15 @@ impl From<&ServiceMessage> for Received {
             ServiceMessage::Refresh { flow } => Self::Refresh {
                 flow: flow.as_str().to_owned(),
             },
+            ServiceMessage::Input {
+                flow,
+                data_type,
+                detail,
+            } => Self::Input {
+                flow: flow.as_str().to_owned(),
+                data_type: data_type.clone(),
+                detail: detail.clone(),
+            },
             ServiceMessage::Shutdown => Self::Shutdown,
             ServiceMessage::Ack { req } => Self::Ack { req: req.0 },
             ServiceMessage::Error { req, code } => Self::Error {
@@ -132,6 +147,15 @@ impl TryFrom<Received> for ServiceMessage {
             },
             Received::Release { flow: id } => Self::Release { flow: flow(id)? },
             Received::Refresh { flow: id } => Self::Refresh { flow: flow(id)? },
+            Received::Input {
+                flow: id,
+                data_type,
+                detail,
+            } => Self::Input {
+                flow: flow(id)?,
+                data_type,
+                detail,
+            },
             Received::Shutdown => Self::Shutdown,
             Received::Ack { req } => Self::Ack {
                 req: RequestId(req),

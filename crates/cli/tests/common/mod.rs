@@ -452,7 +452,11 @@ fn route(
         return error(428, "session_required", "Declare the session first.");
     }
     if let Some(flow) = path.strip_prefix("/v1/flows/") {
-        let (flow, refresh) = match flow.strip_suffix("/refresh") {
+        // Refresh and input are both a POST answered `202`.
+        let (flow, refresh) = match flow
+            .strip_suffix("/refresh")
+            .or_else(|| flow.strip_suffix("/input"))
+        {
             Some(flow) => (flow, true),
             None => (flow, false),
         };
@@ -604,6 +608,26 @@ pub fn bare() -> Command {
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
+}
+
+/// Runs a command to its end, `stdin` written to its standard input.
+pub async fn run_with_stdin(command: &mut Command, args: &[&str], stdin: &str) -> Output {
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the command runs");
+    let mut pipe = child.stdin.take().unwrap();
+    pipe.write_all(stdin.as_bytes()).await.unwrap();
+    drop(pipe);
+    timeout(WAIT, child.wait_with_output())
+        .await
+        .expect("the command ends")
+        .expect("the command runs")
 }
 
 /// Runs a command to its end.

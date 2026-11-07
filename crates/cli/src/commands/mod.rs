@@ -2,11 +2,13 @@
 //! before its first call.
 
 mod get;
+mod input;
 mod refresh;
 mod subscribe;
 mod watch;
 
 pub use get::get;
+pub use input::input;
 pub use refresh::refresh;
 pub use subscribe::subscribe;
 pub use watch::watch;

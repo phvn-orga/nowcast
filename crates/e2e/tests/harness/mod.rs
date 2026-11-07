@@ -412,6 +412,24 @@ impl Agent {
     pub async fn run(&mut self, args: &[&str]) -> Ran {
         let mut argv = vec![cli_binary().display().to_string()];
         argv.extend(args.iter().map(|arg| arg.to_string()));
+        self.run_argv(&argv).await
+    }
+
+    /// Runs `nowcast` with `args` like [`Self::run`], `stdin` piped into it
+    /// by a shell, itself a child of the agent.
+    pub async fn run_with_stdin(&mut self, args: &[&str], stdin: &str) -> Ran {
+        let mut argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            r#"input=$1; shift; printf '%s' "$input" | "$0" "$@""#.to_owned(),
+            cli_binary().display().to_string(),
+            stdin.to_owned(),
+        ];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        self.run_argv(&argv).await
+    }
+
+    async fn run_argv(&mut self, argv: &[String]) -> Ran {
         let mut line = serde_json::to_vec(&argv).unwrap();
         line.push(b'\n');
         self.stdin.write_all(&line).await.unwrap();

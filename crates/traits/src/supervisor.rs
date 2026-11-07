@@ -69,6 +69,27 @@ impl From<ResolveError> for ApiError {
     }
 }
 
+/// Why an input did not reach its brick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputError {
+    /// The brick serves no such flow. The client gets `404` `unknown_flow`.
+    UnknownFlow(UnknownFlow),
+    /// The brick is not ready: starting, or waiting to be relaunched. The
+    /// client gets `503` `brick_unavailable`.
+    Unavailable(BrickUnavailable),
+}
+
+impl fmt::Display for InputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownFlow(e) => e.fmt(f),
+            Self::Unavailable(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for InputError {}
+
 /// A subscription made by [`Supervisor::resolve`]: what the client's `201`
 /// answer carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,4 +131,18 @@ pub trait Supervisor: Send + Sync + 'static {
 
     /// Relays a refresh request to the brick serving `flow`.
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow>;
+
+    /// The subscription kind the brick serves `flow` for, `None` if it serves
+    /// no such flow. Two kinds mapped to one flow keep the first.
+    fn kind(&self, flow: &QualifiedFlowId) -> Option<String>;
+
+    /// Relays an input to the brick serving `flow`. `detail` is JSON bytes,
+    /// already validated against the schema of `data_type`. Inputs are sent
+    /// in the order of the calls; none is kept for a brick that is not ready.
+    fn input(
+        &self,
+        flow: &QualifiedFlowId,
+        data_type: &str,
+        detail: Vec<u8>,
+    ) -> Result<(), InputError>;
 }

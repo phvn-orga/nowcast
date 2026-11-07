@@ -38,6 +38,18 @@ pub fn encode_service(msg: &ServiceMessage) -> Result<Vec<u8>, CodecError> {
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
             encode(t, &[("flow", flow.as_str().into())])
         }
+        ServiceMessage::Input {
+            flow,
+            data_type,
+            detail,
+        } => encode(
+            t,
+            &[
+                ("flow", flow.as_str().into()),
+                ("type", data_type.as_str().into()),
+                ("detail", detail.as_slice().into()),
+            ],
+        ),
         ServiceMessage::Shutdown => encode(t, &[]),
         ServiceMessage::Ack { req } => encode(t, &[("req", req.0.into())]),
         ServiceMessage::Error { req, code } => {
@@ -106,6 +118,11 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, CodecError> {
         },
         "refresh" => ServiceMessage::Refresh {
             flow: fields.flow()?,
+        },
+        "input" => ServiceMessage::Input {
+            flow: fields.flow()?,
+            data_type: fields.str("type")?.to_owned(),
+            detail: fields.bin("detail")?.to_vec(),
         },
         "shutdown" => ServiceMessage::Shutdown,
         "ack" => ServiceMessage::Ack { req: fields.req()? },

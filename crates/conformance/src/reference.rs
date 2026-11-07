@@ -102,6 +102,18 @@ pub fn service_value(msg: &ServiceMessage) -> Value {
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
             map(t, vec![("flow", s(flow.as_str()))])
         }
+        ServiceMessage::Input {
+            flow,
+            data_type,
+            detail,
+        } => map(
+            t,
+            vec![
+                ("flow", s(flow.as_str())),
+                ("type", s(data_type)),
+                ("detail", Value::Binary(detail.clone())),
+            ],
+        ),
         ServiceMessage::Shutdown => map(t, vec![]),
         ServiceMessage::Ack { req } => map(t, vec![("req", Value::from(req.0))]),
         ServiceMessage::Error { req, code } => map(
@@ -227,6 +239,11 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, String> {
         },
         "release" => ServiceMessage::Release { flow: f.flow()? },
         "refresh" => ServiceMessage::Refresh { flow: f.flow()? },
+        "input" => ServiceMessage::Input {
+            flow: f.flow()?,
+            data_type: f.str("type")?,
+            detail: f.bin("detail")?,
+        },
         "shutdown" => ServiceMessage::Shutdown,
         "ack" => ServiceMessage::Ack { req: f.req()? },
         "error" => ServiceMessage::Error {

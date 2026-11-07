@@ -1,0 +1,17 @@
+# Every accepts must name a type declared in [types].
+manifest_version = 1
+name = "inbox"
+version = "0.1.0"
+description = "Takes inputs."
+protocol = 1
+
+[run]
+command = ["bin/inbox"]
+
+[subscriptions.only]
+description = "Accepts only."
+schema = "schemas/subscription-pr.json"
+accepts = "inbox.input/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"

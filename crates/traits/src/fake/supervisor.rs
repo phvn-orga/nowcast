@@ -1,15 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nowcast_types::{BrickName, FlowId, QualifiedFlowId};
 
-use crate::{AnchorId, BrickUnavailable, ResolveError, Resolved, Router, Supervisor, UnknownFlow};
+use crate::{
+    AnchorId, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+};
 
 #[derive(Default)]
 struct State {
     failures: HashMap<BrickName, ResolveError>,
-    resolved: HashSet<QualifiedFlowId>,
+    /// The kind of each flow resolved.
+    resolved: HashMap<QualifiedFlowId, String>,
     refreshes: Vec<QualifiedFlowId>,
+    inputs: Vec<(QualifiedFlowId, String, Vec<u8>)>,
 }
 
 /// Resolves `<brick>/<kind>:<params>` without any brick, unless the test set
@@ -47,6 +51,11 @@ impl FakeSupervisor {
     pub fn refreshes(&self) -> Vec<QualifiedFlowId> {
         self.state.lock().unwrap().refreshes.clone()
     }
+
+    /// The inputs relayed, in order: flow, type and JSON bytes.
+    pub fn inputs(&self) -> Vec<(QualifiedFlowId, String, Vec<u8>)> {
+        self.state.lock().unwrap().inputs.clone()
+    }
 }
 
 impl Supervisor for FakeSupervisor {
@@ -66,7 +75,7 @@ impl Supervisor for FakeSupervisor {
         let id = format!("{kind}:{}", String::from_utf8_lossy(params));
         let flow = FlowId::new(id).expect("fake flow ids stay under the length limit");
         let flow = QualifiedFlowId::new(brick.clone(), flow);
-        state.resolved.insert(flow.clone());
+        state.resolved.insert(flow.clone(), kind.to_owned());
         let (subscription, last) = self.router.subscribe(anchor, flow.clone());
         Ok(Resolved {
             subscription,
@@ -77,10 +86,33 @@ impl Supervisor for FakeSupervisor {
 
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
         let mut state = self.state.lock().unwrap();
-        if !state.resolved.contains(flow) {
+        if !state.resolved.contains_key(flow) {
             return Err(UnknownFlow(flow.clone()));
         }
         state.refreshes.push(flow.clone());
+        Ok(())
+    }
+
+    fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
+        self.state.lock().unwrap().resolved.get(flow).cloned()
+    }
+
+    fn input(
+        &self,
+        flow: &QualifiedFlowId,
+        data_type: &str,
+        detail: Vec<u8>,
+    ) -> Result<(), InputError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.resolved.contains_key(flow) {
+            return Err(InputError::UnknownFlow(UnknownFlow(flow.clone())));
+        }
+        if let Some(ResolveError::Unavailable(e)) = state.failures.get(flow.brick()) {
+            return Err(InputError::Unavailable(e.clone()));
+        }
+        state
+            .inputs
+            .push((flow.clone(), data_type.to_owned(), detail));
         Ok(())
     }
 }

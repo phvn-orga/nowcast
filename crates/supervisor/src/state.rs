@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nowcast_traits::{
-    AnchorId, BrickDeclaration, BrickProcess, BrickUnavailable, ResolveError, Resolved, Router,
-    UnknownFlow,
+    AnchorId, BrickDeclaration, BrickProcess, BrickUnavailable, InputError, ResolveError, Resolved,
+    Router, UnknownFlow,
 };
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
@@ -321,6 +321,36 @@ impl State {
             // The relaunched brick publishes again once subscribed again.
             debug!(brick = %brick.name, %flow, "refresh dropped: the brick is not running");
         }
+        Ok(())
+    }
+
+    pub(crate) fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
+        let brick = self.bricks.get(flow.brick())?;
+        brick.flows.get(flow.flow()).map(|s| s.kind.clone())
+    }
+
+    pub(crate) fn input(
+        &self,
+        flow: &QualifiedFlowId,
+        data_type: &str,
+        detail: Vec<u8>,
+    ) -> Result<(), InputError> {
+        let brick = self
+            .bricks
+            .get(flow.brick())
+            .filter(|b| b.flows.contains_key(flow.flow()))
+            .ok_or_else(|| InputError::UnknownFlow(UnknownFlow(flow.clone())))?;
+        if !brick.is_ready() {
+            // Unlike a refresh, an input carries data the brick would lose.
+            return Err(InputError::Unavailable(BrickUnavailable(
+                brick.name.clone(),
+            )));
+        }
+        brick.send(ServiceMessage::Input {
+            flow: flow.flow().clone(),
+            data_type: data_type.to_owned(),
+            detail,
+        });
         Ok(())
     }
 }

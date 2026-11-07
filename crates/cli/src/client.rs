@@ -208,6 +208,15 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// `POST /v1/flows/{flow}/input`: the service checks the detail and
+    /// relays it to the brick.
+    pub async fn input(&self, flow: &str, detail: Value) -> Result<(), CliError> {
+        let path = format!("/v1/flows/{}/input", percent_encode(flow));
+        let reply = self.client.call(Method::POST, &path, Some(detail)).await?;
+        reply.expect(StatusCode::ACCEPTED)?;
+        Ok(())
+    }
+
     /// `GET /v1/stream`, resuming after `last_event_id` if given.
     pub async fn stream(&self, last_event_id: Option<&str>) -> Result<EventStream, CliError> {
         let mut headers = vec![(ACCEPT.as_str(), "text/event-stream")];

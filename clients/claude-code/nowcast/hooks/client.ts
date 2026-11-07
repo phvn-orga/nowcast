@@ -1,6 +1,6 @@
 // The library other mods use: what answers the calls of the `$.nowcast` noun,
-// requests to the service over HTTP (subscribe, unsubscribe, refresh, last
-// value, history). It runs in this mod, so in Claude Code's own process, the parent of
+// requests to the service over HTTP (subscribe, unsubscribe, refresh, input,
+// last value, history). It runs in this mod, so in Claude Code's own process, the parent of
 // the stream's `nowcast watch`: the service ties requests and stream to the
 // same anchor. Living beside the stream also lets it write a flow's last
 // value into the state, and subscribe again once a restarted service forgot.
@@ -40,6 +40,7 @@ export const STUB: Nowcast = {
   subscribe: unavailable,
   unsubscribe: unavailable,
   refresh: unavailable,
+  input: unavailable,
   last: unavailable,
   history: unavailable,
 }
@@ -69,6 +70,11 @@ export async function unsubscribe($: $, subscription: string): Promise<NowcastDo
 /** `$.nowcast.refresh`. */
 export async function refresh($: $, flow: string): Promise<NowcastDone | NowcastFailure> {
   return expect(await request($, 'POST', `/v1/flows/${encodeURIComponent(flow)}/refresh`), 202, done)
+}
+
+/** `$.nowcast.input`. */
+export async function input($: $, flow: string, detail: unknown): Promise<NowcastDone | NowcastFailure> {
+  return expect(await request($, 'POST', `/v1/flows/${encodeURIComponent(flow)}/input`, detail), 202, done)
 }
 
 /** `$.nowcast.last`. */
