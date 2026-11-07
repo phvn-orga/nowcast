@@ -180,6 +180,12 @@ client qui le rejoue finit sur sa dernière valeur. L'historique naît avec la p
 publication du flux et disparaît avec lui (`flow-ended`). Il ne survit pas à un arrêt
 du service.
 
+Limite connue : un flux terminé puis recréé repart d'un historique vide. Un client qui
+reprend avec un identifiant de sa vie précédente reçoit les nouveaux événements sans
+`flow-gap`, alors que ce que le flux a publié après cet identifiant avant de se terminer
+est perdu. Garder une trace des flux terminés, avec une règle de purge, est suivi par
+l'issue #58.
+
 À l'ouverture, le service envoie d'abord, pour chaque flux abonné :
 
 - sans `Last-Event-ID`, sa dernière valeur ;
