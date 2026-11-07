@@ -18,6 +18,8 @@ class Nowcast < Formula
               "ExecStart=#{opt_bin}/nowcast daemon"
   end
 
+  # The socket is enabled by a link through ~/.config/systemd/user, not by
+  # `systemctl enable`, which would record the versioned Cellar path behind it.
   def caveats
     warning = if version.to_s.include?("-")
       "nowcast #{version} is an experimental pre-release, for testing only: " \
@@ -25,10 +27,11 @@ class Nowcast < Formula
     end
     warning.to_s + <<~EOS
       To let systemd start the service on the first connection:
-        mkdir -p ~/.config/systemd/user
+        mkdir -p ~/.config/systemd/user/sockets.target.wants
         ln -sf #{opt_pkgshare}/systemd/nowcast.socket #{opt_pkgshare}/systemd/nowcast.service ~/.config/systemd/user/
+        ln -sfn ../nowcast.socket ~/.config/systemd/user/sockets.target.wants/nowcast.socket
         systemctl --user daemon-reload
-        systemctl --user enable --now nowcast.socket
+        systemctl --user start nowcast.socket
     EOS
   end
 
