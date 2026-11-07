@@ -7,6 +7,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
 import { STUB, history, input, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import { registerMeasures } from './measures'
 import { Lines, type Status, type StreamEvent, isNewer, nextFlow, parseLine } from './stream'
 
 const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
@@ -79,6 +80,9 @@ export const register: Register = on => {
     if (e.reason === 'clear' || e.reason === 'resume') awaitNewId($, e.sessionId, 0)
     return ended
   })
+
+  // The session's measures, for the claude-code brick when it is enabled.
+  registerMeasures(on)
 
   // A backstop: a turn always runs under the session the service knows.
   on('turn.start', async ($, e, next) => {
