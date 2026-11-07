@@ -30,9 +30,11 @@ impl Flow {
         self.history.back()
     }
 
-    /// The kept events whose id is greater than `since`.
+    /// The kept events whose id is greater than `since`. The history is in
+    /// increasing id order, so the first one is found by binary search.
     fn after(&self, since: EventId) -> impl Iterator<Item = &Event> {
-        self.history.iter().filter(move |event| event.id > since)
+        let first = self.history.partition_point(|event| event.id <= since);
+        self.history.range(first..)
     }
 
     /// Whether the bound dropped an event newer than `since`.
@@ -252,10 +254,11 @@ impl State {
         since: Option<EventId>,
     ) -> UnboundedReceiver<StreamEvent> {
         let (tx, rx) = unbounded_channel();
-        self.anchors.entry(anchor).or_default();
-        let mut flows: Vec<(&QualifiedFlowId, &Flow)> = self.anchors[&anchor]
-            .subscriptions
-            .values()
+        let mut flows: Vec<(&QualifiedFlowId, &Flow)> = self
+            .anchors
+            .get(&anchor)
+            .into_iter()
+            .flat_map(|entry| entry.subscriptions.values())
             .collect::<HashSet<_>>()
             .into_iter()
             .filter_map(|id| Some((id, self.flows.get(id)?)))

@@ -92,10 +92,15 @@ pub(crate) fn decode(segment: &str) -> Result<String, HttpError> {
 /// Other parameters are ignored; `400` `invalid_request` when `after` is not
 /// an event id.
 pub(crate) fn after(query: Option<&str>) -> Result<Option<EventId>, HttpError> {
-    let Some(value) = query
-        .unwrap_or_default()
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("after="))
+    let Some(value) =
+        query
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|pair| match pair.split_once('=') {
+                Some(("after", value)) => Some(value),
+                None if pair == "after" => Some(""),
+                _ => None,
+            })
     else {
         return Ok(None);
     };
@@ -118,6 +123,7 @@ mod tests {
         assert_eq!(parsed(Some("after=0")), Ok(Some(EventId(0))));
         assert_eq!(parsed(Some("x=1&after=42")), Ok(Some(EventId(42))));
         assert_eq!(parsed(Some("after=")), Err((400, "invalid_request")));
+        assert_eq!(parsed(Some("after")), Err((400, "invalid_request")));
         assert_eq!(parsed(Some("after=-1")), Err((400, "invalid_request")));
         assert_eq!(parsed(Some("after=4x")), Err((400, "invalid_request")));
     }

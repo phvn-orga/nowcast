@@ -189,7 +189,8 @@ impl Session<'_> {
         let path = format!("/v1/flows/{}?after={after}", percent_encode(flow));
         let reply = self.client.call(Method::GET, &path, None).await?;
         let body = reply.expect(StatusCode::OK)?.json()?;
-        if !body.get("events").is_some_and(Value::is_array)
+        let events = body.get("events").and_then(Value::as_array);
+        if !events.is_some_and(|events| events.iter().all(Value::is_object))
             || !body.get("gap").is_some_and(Value::is_boolean)
         {
             return Err(CliError::Protocol(format!(

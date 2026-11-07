@@ -62,12 +62,14 @@ export function parseLine(line: string): StreamEvent | Status | null {
 
 /**
  * The flow's state once `event` is applied to `previous`, or null when it
- * changes nothing: an update seen already, which a new stream sends again.
+ * changes nothing: an update seen already, which a new stream sends again,
+ * or one older than the value held, which a replay after an id may send.
  */
 export function nextFlow(previous: NowcastFlow | undefined, event: StreamEvent): NowcastFlow | null {
   const last = previous?.last ?? null
   switch (event.event) {
     case 'update':
+      if (previous !== undefined && !previous.ended && last !== null && isOlder(event.update, last)) return null
       if (
         previous !== undefined &&
         !previous.ended &&
@@ -94,6 +96,12 @@ export function isNewer(update: NowcastEvent, than: NowcastEvent): boolean {
   const decimal = /^[0-9]+$/
   if (decimal.test(update.id) && decimal.test(than.id)) return BigInt(update.id) > BigInt(than.id)
   return update.id !== than.id
+}
+
+/** Whether `update` is less recent than `than`; never for a non-decimal id. */
+function isOlder(update: NowcastEvent, than: NowcastEvent): boolean {
+  const decimal = /^[0-9]+$/
+  return decimal.test(update.id) && decimal.test(than.id) && BigInt(update.id) < BigInt(than.id)
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
