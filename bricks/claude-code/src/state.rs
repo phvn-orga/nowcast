@@ -185,6 +185,20 @@ impl State {
                 }];
             }
         };
+        // A session's own flow takes its first subscriber only: the session.
+        // A second one could hold the flow past the session's end, which its
+        // release marks, or send measures in its name.
+        if let Flow::Session(session) = &flow
+            && self.flows.contains(&flow.id())
+        {
+            return vec![BrickMessage::Error {
+                req,
+                code: "taken".into(),
+                message: format!(
+                    "session {session} already has its subscriber; readers use `sessions`"
+                ),
+            }];
+        }
         self.flows.insert(flow.id());
         let mut out = vec![BrickMessage::Subscribed { req, flow: id }];
         out.extend(self.republish(&flow));
@@ -528,6 +542,23 @@ mod tests {
         // A reader that comes later still gets the ended entry.
         let again = published(&subscribe(&mut state, "sessions", json!({ "id": "s1" })));
         assert_eq!(again[0].1["ended_at"], at(9).to_string());
+    }
+
+    #[test]
+    fn a_session_flow_takes_one_subscriber() {
+        let mut state = State::default();
+        subscribe(&mut state, "session", json!({ "id": "s1" }));
+        let second = subscribe(&mut state, "session", json!({ "id": "s1" }));
+        assert!(matches!(&second[..], [BrickMessage::Error { code, .. }] if code == "taken"));
+        // Once released, the flow is free again: a resumed session takes it.
+        state.on_service(
+            ServiceMessage::Release {
+                flow: flow("session/s1"),
+            },
+            at(1),
+        );
+        let again = subscribe(&mut state, "session", json!({ "id": "s1" }));
+        assert!(matches!(&again[0], BrickMessage::Subscribed { .. }));
     }
 
     #[test]

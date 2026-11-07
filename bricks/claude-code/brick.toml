@@ -16,7 +16,7 @@ schema = "schemas/params-quotas.json"
 publishes = "claude-code.quotas/v1"
 
 [subscriptions.session]
-description = "A session's own flow: it sends its measures there and reads back what the brick keeps. Reserved to the session itself; readers use `sessions`."
+description = "A session's own flow: it sends its measures there and reads back what the brick keeps. It takes one subscriber, the first: a second one is refused with `taken`. Readers use `sessions`."
 schema = "schemas/params-session.json"
 publishes = "claude-code.session/v1"
 accepts = "claude-code.measure/v1"

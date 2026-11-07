@@ -68,6 +68,15 @@ async fn session_measures_reach_the_list_and_the_quotas() {
     assert_eq!(quotas["windows"][0]["name"], "five_hour");
     assert_eq!(quotas["windows"][0]["source"], "session");
 
+    // Another process cannot take the session's own flow.
+    let mut other = service.agent();
+    let taken = other
+        .run(&["--json", "subscribe", "claude-code", "session", r#"{"id":"s1"}"#])
+        .await;
+    assert_eq!(taken.error_code(), "subscription_refused", "{taken:?}");
+    assert!(taken.stderr.contains("taken"), "{taken:?}");
+    drop(other);
+
     // A measure that does not match the accepted type never reaches it.
     let refused = agent
         .run_with_stdin(
