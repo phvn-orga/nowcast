@@ -22,7 +22,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - .github/scripts/**
+      - .github/scripts/version-goes-up.py
+      - .github/scripts/merge-when-green.sh
       - Formula/**
       - build/**
       - .dockerignore
