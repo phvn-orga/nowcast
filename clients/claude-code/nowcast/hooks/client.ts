@@ -1,6 +1,6 @@
 // The library other mods use: what answers the calls of the `$.nowcast` noun,
 // requests to the service over HTTP (subscribe, unsubscribe, refresh, last
-// value). It runs in this mod, so in Claude Code's own process, the parent of
+// value, history). It runs in this mod, so in Claude Code's own process, the parent of
 // the stream's `nowcast watch`: the service ties requests and stream to the
 // same anchor. Living beside the stream also lets it write a flow's last
 // value into the state, and subscribe again once a restarted service forgot.
@@ -11,6 +11,7 @@ import type {
   NowcastDone,
   NowcastEvent,
   NowcastFailure,
+  NowcastHistory,
   NowcastLast,
   NowcastSubscribeRequest,
   NowcastSubscription,
@@ -35,7 +36,13 @@ const unavailable = async (): Promise<NowcastFailure> => ({
  * The noun as `engine.create` adds it. This mod's hooks answer its calls, so
  * a call gets this only when they fail.
  */
-export const STUB: Nowcast = { subscribe: unavailable, unsubscribe: unavailable, refresh: unavailable, last: unavailable }
+export const STUB: Nowcast = {
+  subscribe: unavailable,
+  unsubscribe: unavailable,
+  refresh: unavailable,
+  last: unavailable,
+  history: unavailable,
+}
 
 const done = () => ({ ok: true as const })
 
@@ -71,6 +78,18 @@ export async function last($: $, flow: string): Promise<NowcastLast | NowcastFai
   return expect(answer, 200, text => {
     const event = parse(text)
     return isEvent(event) ? { ok: true as const, last: event } : null
+  })
+}
+
+/** `$.nowcast.history`. */
+export async function history($: $, flow: string, after: string): Promise<NowcastHistory | NowcastFailure> {
+  const path = `/v1/flows/${encodeURIComponent(flow)}?after=${encodeURIComponent(after)}`
+  return expect(await request($, 'GET', path), 200, text => {
+    const body = parse(text)
+    if (!isObject(body) || typeof body.gap !== 'boolean') return null
+    const events = body.events
+    if (!Array.isArray(events) || !events.every(isEvent)) return null
+    return { ok: true as const, gap: body.gap, events }
   })
 }
 

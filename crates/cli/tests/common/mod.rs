@@ -65,6 +65,7 @@ pub struct Logged {
     pub method: String,
     /// As sent, still percent-encoded.
     pub path: String,
+    pub query: Option<String>,
     pub body: Option<Value>,
     pub accept: Option<String>,
     pub last_event_id: Option<String>,
@@ -105,6 +106,8 @@ struct State {
     anchors: HashMap<i32, Anchor>,
     /// Flow to its last event.
     last: HashMap<String, Value>,
+    /// Flow to every event it published, oldest first.
+    history: HashMap<String, Vec<Value>>,
     next_event: u64,
     next_subscription: u64,
     log: Vec<Logged>,
@@ -148,6 +151,7 @@ impl Fake {
                 probe: Probe::Ready,
                 anchors: HashMap::new(),
                 last: HashMap::new(),
+                history: HashMap::new(),
                 next_event: 1,
                 next_subscription: 1,
                 log: Vec::new(),
@@ -231,6 +235,11 @@ impl Fake {
             "data": data,
         });
         state.last.insert(flow.to_owned(), event.clone());
+        state
+            .history
+            .entry(flow.to_owned())
+            .or_default()
+            .push(event.clone());
         let frame = update_frame(&event);
         for anchor in state.anchors.values_mut() {
             if anchor.subscribed(flow) {
@@ -243,6 +252,12 @@ impl Fake {
     pub fn flow_error(&self, flow: &str, message: &str) {
         let data = json!({ "flow": flow, "message": message });
         self.signal(flow, &format!("event: flow-error\ndata: {data}\n\n"));
+    }
+
+    /// Some events of the flow are gone.
+    pub fn flow_gap(&self, flow: &str) {
+        let data = json!({ "flow": flow });
+        self.signal(flow, &format!("event: flow-gap\ndata: {data}\n\n"));
     }
 
     /// The flow ends: its subscriptions are gone.
@@ -376,6 +391,7 @@ async fn handle(
 ) -> Result<Reply, Infallible> {
     let method = request.method().to_string();
     let path = request.uri().path().to_owned();
+    let query = request.uri().query().map(str::to_owned);
     let header = |name: &str| {
         request
             .headers()
@@ -394,6 +410,7 @@ async fn handle(
         pid,
         &method,
         &path,
+        query.as_deref(),
         body.as_ref(),
         last_event_id.as_deref(),
     );
@@ -401,6 +418,7 @@ async fn handle(
         pid,
         method,
         path,
+        query,
         body,
         accept,
         last_event_id,
@@ -414,6 +432,7 @@ fn route(
     pid: i32,
     method: &str,
     path: &str,
+    query: Option<&str>,
     body: Option<&Value>,
     last_event_id: Option<&str>,
 ) -> Reply {
@@ -446,6 +465,17 @@ fn route(
         }
         if refresh {
             return empty(202);
+        }
+        if let Some(after) = query.and_then(|q| q.strip_prefix("after=")) {
+            let after: u64 = after.parse().unwrap();
+            let events: Vec<&Value> = state
+                .history
+                .get(&flow)
+                .into_iter()
+                .flatten()
+                .filter(|e| e["id"].as_str().unwrap().parse::<u64>().unwrap() > after)
+                .collect();
+            return json_reply(200, json!({ "gap": false, "events": events }));
         }
         return match state.last.get(&flow) {
             Some(event) => json_reply(200, event.clone()),

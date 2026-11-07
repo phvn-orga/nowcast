@@ -47,6 +47,15 @@ test('a value seen already is not written again', async ($, on) => {
   expect(w.flowWrites('probe/x').length).toBe(1)
 })
 
+test('an update older than the value held is not written', async ($, on) => {
+  const w = await started($, on)
+  w.child().event('update', update('probe/x', '3', { n: 3 }))
+  w.child().event('update', update('probe/x', '2', { n: 2 }))
+  await w.clock.settle()
+
+  expect(w.flowWrites('probe/x')).toEqual([{ last: update('probe/x', '3', { n: 3 }), error: null, ended: false }])
+})
+
 test('a flow error keeps the last value until the next update', async ($, on) => {
   const w = await started($, on)
   w.child().event('update', update('probe/x', '1', { n: 1 }))

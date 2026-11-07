@@ -164,7 +164,7 @@ impl<O: Write, E: Write> Watcher<'_, O, E> {
 
     fn show(&mut self, event: SseEvent) -> Result<(), CliError> {
         let name = event.event.as_str();
-        if !matches!(name, "update" | "flow-error" | "flow-ended") {
+        if !matches!(name, "update" | "flow-error" | "flow-ended" | "flow-gap") {
             return Ok(()); // An event a later contract may add.
         }
         if name == "update"

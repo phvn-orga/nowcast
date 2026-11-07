@@ -49,6 +49,9 @@ pub enum StreamEvent {
     },
     /// The flow no longer exists: brick removed, subscription deleted.
     FlowEnded { flow: QualifiedFlowId },
+    /// Some of what the client missed on the flow is gone: the history's bound
+    /// dropped it, or it went with a previous run of the service.
+    FlowGap { flow: QualifiedFlowId },
 }
 
 impl StreamEvent {
@@ -58,13 +61,16 @@ impl StreamEvent {
             Self::Update(_) => "update",
             Self::FlowError { .. } => "flow-error",
             Self::FlowEnded { .. } => "flow-ended",
+            Self::FlowGap { .. } => "flow-gap",
         }
     }
 
     pub fn flow(&self) -> &QualifiedFlowId {
         match self {
             Self::Update(event) => &event.flow,
-            Self::FlowError { flow, .. } | Self::FlowEnded { flow } => flow,
+            Self::FlowError { flow, .. } | Self::FlowEnded { flow } | Self::FlowGap { flow } => {
+                flow
+            }
         }
     }
 }

@@ -181,6 +181,38 @@ test('a flow this process is not subscribed to is a failure', plugins, async ($,
   expect(await call($, 'last', { flow: FLOW })).toEqual({ ok: false, status: 404, code: 'unknown_flow', message: 'no' })
 })
 
+test('history reads the events after an id, and leaves the state as is', plugins, async ($, on) => {
+  const events = [update(FLOW, '6', { number: 2 }), update(FLOW, '7', { number: 3 })]
+  const w = world(on, {
+    answer: service({
+      [`GET /v1/flows/${ENCODED}?after=5`]: { status: 200, text: JSON.stringify({ gap: false, events }) },
+      [`GET /v1/flows/${ENCODED}?after=0`]: { status: 200, text: JSON.stringify({ gap: true, events: [] }) },
+      [`GET /v1/flows/${ENCODED}?after=x`]: {
+        status: 400,
+        text: '{"error":{"code":"invalid_request","message":"not an event id"}}',
+      },
+    }),
+  })
+
+  expect(await call($, 'history', { flow: FLOW, after: '5' })).toEqual({ ok: true, gap: false, events })
+  expect(await call($, 'history', { flow: FLOW, after: '0' })).toEqual({ ok: true, gap: true, events: [] })
+  expect(await call($, 'history', { flow: FLOW, after: 'x' })).toEqual({
+    ok: false,
+    status: 400,
+    code: 'invalid_request',
+    message: 'not an event id',
+  })
+  expect(w.flowWrites(FLOW)).toEqual([])
+})
+
+test('a history outside the contract is a bad answer', plugins, async ($, on) => {
+  world(on, {
+    answer: service({ [`GET /v1/flows/${ENCODED}?after=0`]: { status: 200, text: '{"gap":false,"events":[1]}' } }),
+  })
+  const answer = await call($, 'history', { flow: FLOW, after: '0' })
+  expect(answer).toMatchObject({ ok: false, status: 200, code: 'bad_answer' })
+})
+
 /** A service that forgets every subscription when `restart` is called. */
 function restartable() {
   let next = 1

@@ -14,7 +14,7 @@ use nowcast_conformance::{block_on, probe};
 use nowcast_server::{MAX_BODY, Server};
 use nowcast_traits::fake::{FakeDiscovery, FakeIdentity, FakeRouter, FakeSessions, FakeSupervisor};
 use nowcast_traits::{
-    Anchor, AnchorId, Identity, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    Anchor, AnchorId, History, Identity, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
     UnknownSubscription,
 };
 use nowcast_types::QualifiedFlowId;
@@ -745,6 +745,15 @@ impl Router for DyingOnStream {
 
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow> {
         self.inner.last(anchor, flow)
+    }
+
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow> {
+        self.inner.history(anchor, flow, after)
     }
 
     fn flow_error(&self, flow: &QualifiedFlowId, message: String) {

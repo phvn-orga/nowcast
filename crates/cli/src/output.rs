@@ -31,6 +31,29 @@ pub fn last_value(out: &mut impl Write, json: bool, event: Option<&Value>) -> io
     out.flush()
 }
 
+/// `get --after`: the flow's history after an id.
+///
+/// Readable: `flow-gap <flow>` when some events are gone, then each event as
+/// [`last_value`] prints it. JSON: the answer as is.
+pub fn history(out: &mut impl Write, json: bool, flow: &str, body: &Value) -> io::Result<()> {
+    if json {
+        writeln!(out, "{body}")?;
+        return out.flush();
+    }
+    if body.get("gap") == Some(&Value::Bool(true)) {
+        writeln!(out, "flow-gap {flow}")?;
+    }
+    for event in body
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        last_value(out, false, Some(event))?;
+    }
+    out.flush()
+}
+
 /// `subscribe`: what the service answered.
 ///
 /// Readable: `subscription <id>`, `flow <flow>`, and `last <detail>` when the
@@ -51,7 +74,8 @@ pub fn subscribed(out: &mut impl Write, json: bool, body: &Value) -> io::Result<
 /// `watch`: one line per event of the stream.
 ///
 /// Readable: `update <flow> <detail>`, `flow-error <flow> <message>`,
-/// `flow-ended <flow>`. JSON: `{"event": <name>, "data": <data>}`.
+/// `flow-ended <flow>`, `flow-gap <flow>`. JSON: `{"event": <name>, "data":
+/// <data>}`.
 pub fn stream_event(out: &mut impl Write, json: bool, name: &str, data: &Value) -> io::Result<()> {
     if json {
         writeln!(out, "{}", json!({ "event": name, "data": data }))?;
@@ -153,6 +177,26 @@ mod tests {
     fn no_value() {
         assert_eq!(printed(|out| last_value(out, true, None)), "null\n");
         assert_eq!(printed(|out| last_value(out, false, None)), "");
+    }
+
+    #[test]
+    fn a_readable_history() {
+        let body = json!({ "gap": true, "events": [event(), event()] });
+        let one = printed(|out| last_value(out, false, Some(&event())));
+        assert_eq!(
+            printed(|out| history(out, false, "forge/x", &body)),
+            format!("flow-gap forge/x\n{one}{one}")
+        );
+        let body = json!({ "gap": false, "events": [] });
+        assert_eq!(printed(|out| history(out, false, "forge/x", &body)), "");
+    }
+
+    #[test]
+    fn a_json_history_is_the_answer() {
+        let body = json!({ "gap": false, "events": [event()] });
+        let text = printed(|out| history(out, true, "forge/x", &body));
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), body);
+        assert_eq!(text.lines().count(), 1);
     }
 
     #[test]

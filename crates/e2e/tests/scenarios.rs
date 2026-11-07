@@ -104,6 +104,49 @@ async fn a_late_subscriber_gets_the_last_value() {
     assert!(is_update(&event, &last), "{event}");
 }
 
+/// A hook-based agent that subscribes to a flow another session already
+/// follows reads what it published before, and resumes from an id.
+#[tokio::test]
+async fn a_late_subscriber_reads_the_history() {
+    let service = Service::start().await;
+    let mut first = service.watch(&["a"]);
+    let mut brick = service.brick().await;
+    first.subscribed("probe/a").await;
+    let details: Vec<Value> = (1..=3).map(|n| json!({ "id": "a", "n": n })).collect();
+    for detail in &details {
+        assert_eq!(publish(&mut brick, "a", detail).await, Ok(()));
+        assert!(is_update(&first.next().await, detail));
+    }
+
+    let mut agent = service.agent();
+    agent
+        .run(&["--json", "subscribe", "probe", "item", &params("a")])
+        .await
+        .json();
+    let all = agent
+        .run(&["--json", "get", "probe/a", "--after", "0"])
+        .await
+        .json();
+    let read: Vec<&Value> = all["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["data"])
+        .collect();
+    assert_eq!(read, details.iter().collect::<Vec<_>>());
+    // `0` predates this run of the service: the history may miss older events.
+    assert_eq!(all["gap"], true);
+
+    let first_id = all["events"][0]["id"].as_str().unwrap();
+    let after = agent
+        .run(&["--json", "get", "probe/a", "--after", first_id])
+        .await
+        .json();
+    assert_eq!(after["gap"], false);
+    assert_eq!(after["events"].as_array().unwrap().len(), 2);
+    assert_eq!(after["events"][0]["data"], details[1]);
+}
+
 #[tokio::test]
 async fn a_refresh_reaches_the_brick_which_publishes_again() {
     let service = Service::start().await;

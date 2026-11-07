@@ -16,7 +16,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nowcast_traits::{AnchorId, Discovery, Identity, Router, Sessions, Supervisor};
 use nowcast_types::{
-    ApiError, ApiErrorCode, BrickName, QualifiedFlowId, SessionId, SubscriptionId,
+    ApiError, ApiErrorCode, BrickName, EventId, QualifiedFlowId, SessionId, SubscriptionId,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use crate::error::HttpError;
 use crate::event::{CloudEvent, to_line};
 use crate::params;
-use crate::route::{Route, decode};
+use crate::route::{self, Route, decode};
 use crate::sse::{self, SseBody};
 
 /// The largest request body read, in bytes. Requests carry a session id or a
@@ -64,6 +64,12 @@ struct Subscribe {
     brick: String,
     kind: String,
     params: Value,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryRead<'a> {
+    gap: bool,
+    events: Vec<CloudEvent<'a>>,
 }
 
 #[derive(serde::Serialize)]
@@ -217,7 +223,10 @@ where
                     .map_err(|_| HttpError::unknown_subscription(&id))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Route::Flow(flow) => self.last(anchor, &flow_id(flow)?),
+            Route::Flow(flow) => match route::after(parts.uri.query())? {
+                None => self.last(anchor, &flow_id(flow)?),
+                Some(after) => self.history(anchor, &flow_id(flow)?, after),
+            },
             Route::Refresh(flow) => {
                 let flow = flow_id(flow)?;
                 // Like reading it, refreshing a flow takes a subscription.
@@ -299,6 +308,33 @@ where
             HttpError::internal(e.to_string())
         })?;
         Ok(json(StatusCode::OK, to_line(&event)))
+    }
+
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<Response<Body>, HttpError> {
+        let history = self
+            .router
+            .history(anchor, flow, after)
+            .map_err(|_| HttpError::unknown_flow(&flow.to_string()))?;
+        // Like the stream, an event that cannot be written is skipped.
+        let events = history
+            .events
+            .iter()
+            .filter_map(|event| {
+                CloudEvent::new(event)
+                    .inspect_err(|e| tracing::warn!("skipping an event of {flow}'s history: {e}"))
+                    .ok()
+            })
+            .collect();
+        let body = to_line(&HistoryRead {
+            gap: history.gap,
+            events,
+        });
+        Ok(json(StatusCode::OK, body))
     }
 
     fn stream(&self, anchor: AnchorId, headers: &HeaderMap) -> Result<Response<Body>, HttpError> {

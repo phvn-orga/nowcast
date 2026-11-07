@@ -3,7 +3,7 @@
 //! Who owns what:
 //!
 //! - The [`Router`] owns flows and subscriptions: it counts the subscribers of
-//!   each flow, keeps its last value, and signals when a flow has no subscriber
+//!   each flow, keeps its bounded history, and signals when a flow has no subscriber
 //!   left. It never starts or stops a brick.
 //! - The [`Supervisor`] owns bricks: it decides to start or stop one, maps a
 //!   subscription to a flow and makes it in the router, and feeds what bricks
@@ -27,6 +27,6 @@ pub use discovery::{
     BrickDeclaration, ClientKind, Discovery, DiscoveryChange, SubscriptionKind, TypeDeclaration,
 };
 pub use identity::Identity;
-pub use router::{Router, UnknownFlow, UnknownSubscription};
+pub use router::{FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
 pub use sessions::Sessions;
 pub use supervisor::{BrickUnavailable, ResolveError, Resolved, Supervisor};

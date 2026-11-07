@@ -66,7 +66,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let mut out = io::stdout().lock();
     let mut err = io::stderr();
     match cli.command {
-        Command::Get { flow } => commands::get(&client, &flow, cli.json, &mut out, &mut err).await,
+        Command::Get { flow, after } => {
+            commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
+        }
         Command::Refresh { flow } => commands::refresh(&client, &flow).await,
         Command::Subscribe {
             brick,

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nowcast_traits::{AnchorId, Router, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
 use nowcast_types::{BrickName, Event, EventId, FlowId, QualifiedFlowId, StreamEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
@@ -178,27 +178,117 @@ pub async fn one_update_per_stream<S: RouterSubject>() {
     assert_quiet(&mut second);
 }
 
-/// On reconnection, the last value of each flow newer than `Last-Event-ID` is
-/// sent again: the last value only, no history.
-pub async fn reconnecting_replays_last_values_only<S: RouterSubject>() {
+/// On reconnection, every kept event newer than `Last-Event-ID` is sent again,
+/// in increasing id order across flows.
+pub async fn reconnecting_replays_the_history_after_the_id<S: RouterSubject>() {
     let router = S::new();
     router.subscribe(A, flow("x"));
     router.subscribe(A, flow("y"));
     router.subscribe(A, flow("z"));
-    let z = publish(&router, &flow("z"), "old");
+    publish(&router, &flow("z"), "old");
     let seen = publish(&router, &flow("x"), "1");
-    publish(&router, &flow("x"), "2");
-    let x = publish(&router, &flow("x"), "3");
+    let x2 = publish(&router, &flow("x"), "2");
     let y = publish(&router, &flow("y"), "1");
+    let x3 = publish(&router, &flow("x"), "3");
     let mut stream = router.stream(A, Some(seen.id));
-    let mut replayed = vec![
-        update(next(&mut stream).await),
-        update(next(&mut stream).await),
-    ];
-    replayed.sort_by_key(|e| e.id);
-    assert_eq!(replayed, vec![x, y]);
+    for sent in [x2, y, x3] {
+        assert_eq!(update(next(&mut stream).await), sent);
+    }
     assert_quiet(&mut stream);
-    assert!(z.id < seen.id);
+}
+
+/// A flow keeps its last [`FLOW_HISTORY`] events. A reconnection whose id is
+/// older than a dropped event gets `flow-gap` for that flow first.
+pub async fn the_history_is_bounded<S: RouterSubject>() {
+    let router = S::new();
+    router.subscribe(A, flow("x"));
+    let sent: Vec<Event> = (0..FLOW_HISTORY + 2)
+        .map(|n| publish(&router, &flow("x"), &n.to_string()))
+        .collect();
+    let kept = &sent[2..];
+
+    let mut stream = router.stream(A, Some(sent[1].id));
+    for event in kept {
+        assert_eq!(update(next(&mut stream).await), *event);
+    }
+    assert_quiet(&mut stream);
+
+    let mut stream = router.stream(A, Some(sent[0].id));
+    assert_eq!(
+        next(&mut stream).await,
+        StreamEvent::FlowGap { flow: flow("x") }
+    );
+    for event in kept {
+        assert_eq!(update(next(&mut stream).await), *event);
+    }
+    assert_quiet(&mut stream);
+}
+
+/// `Last-Event-ID: 0` predates every run of the service: each subscribed
+/// flow gets `flow-gap`, then the whole kept history follows.
+pub async fn an_id_from_before_the_run_is_a_gap<S: RouterSubject>() {
+    let router = S::new();
+    router.subscribe(A, flow("x"));
+    router.subscribe(A, flow("y"));
+    let x1 = publish(&router, &flow("x"), "1");
+    let x2 = publish(&router, &flow("x"), "2");
+    let mut stream = router.stream(A, Some(EventId(0)));
+    assert_eq!(
+        next(&mut stream).await,
+        StreamEvent::FlowGap { flow: flow("x") }
+    );
+    assert_eq!(
+        next(&mut stream).await,
+        StreamEvent::FlowGap { flow: flow("y") }
+    );
+    assert_eq!(update(next(&mut stream).await), x1);
+    assert_eq!(update(next(&mut stream).await), x2);
+    assert_quiet(&mut stream);
+}
+
+/// `GET /v1/flows/{flow}?after=<id>`: the kept events after the id, with the
+/// same gap rule as the stream, and only for a flow the anchor is subscribed
+/// to.
+pub async fn the_history_reads_after_an_id<S: RouterSubject>() {
+    let router = S::new();
+    router.subscribe(A, flow("x"));
+    let x1 = publish(&router, &flow("x"), "1");
+    let x2 = publish(&router, &flow("x"), "2");
+    let x3 = publish(&router, &flow("x"), "3");
+    assert_eq!(
+        router.history(A, &flow("x"), x1.id),
+        Ok(History {
+            gap: false,
+            events: vec![x2, x3.clone()],
+        })
+    );
+    assert_eq!(
+        router.history(A, &flow("x"), x3.id),
+        Ok(History {
+            gap: false,
+            events: vec![],
+        })
+    );
+    assert!(router.history(A, &flow("x"), EventId(0)).unwrap().gap);
+    assert_eq!(
+        router.history(B, &flow("x"), x1.id),
+        Err(UnknownFlow(flow("x")))
+    );
+}
+
+/// The history goes with the flow: a flow subscribed again after it ended
+/// starts empty.
+pub async fn ending_a_flow_drops_its_history<S: RouterSubject>() {
+    let router = S::new();
+    router.subscribe(A, flow("x"));
+    let sent = publish(&router, &flow("x"), "1");
+    router.end_flow(&flow("x"));
+    let (_, last) = router.subscribe(A, flow("x"));
+    assert_eq!(last, None);
+    let history = router
+        .history(A, &flow("x"), EventId(sent.id.0 - 1))
+        .unwrap();
+    assert_eq!(history.events, vec![]);
 }
 
 /// A stream opened without `Last-Event-ID` first sends the last value of each
@@ -360,7 +450,11 @@ macro_rules! router_suite {
                     publishing_needs_a_known_flow,
                     the_stream_follows_the_anchors_subscriptions,
                     one_update_per_stream,
-                    reconnecting_replays_last_values_only,
+                    reconnecting_replays_the_history_after_the_id,
+                    the_history_is_bounded,
+                    an_id_from_before_the_run_is_a_gap,
+                    the_history_reads_after_an_id,
+                    ending_a_flow_drops_its_history,
                     a_fresh_stream_sends_every_last_value,
                     flow_errors_reach_subscribers,
                     unsubscribing_ends_the_flow_for_the_anchor,

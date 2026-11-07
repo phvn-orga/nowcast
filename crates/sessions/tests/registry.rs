@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use nowcast_sessions::SessionRegistry;
 use nowcast_traits::fake::{FakeIdentity, FakeRouter};
-use nowcast_traits::{AnchorId, Router, Sessions, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, History, Router, Sessions, UnknownFlow, UnknownSubscription};
 use nowcast_types::{
     BrickName, Event, EventId, FlowId, QualifiedFlowId, SessionId, StreamEvent, SubscriptionId,
 };
@@ -66,6 +66,15 @@ impl Router for Spy {
 
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow> {
         self.router.last(anchor, flow)
+    }
+
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow> {
+        self.router.history(anchor, flow, after)
     }
 
     fn flow_error(&self, flow: &QualifiedFlowId, message: String) {

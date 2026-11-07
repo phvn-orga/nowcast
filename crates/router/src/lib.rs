@@ -1,8 +1,8 @@
-//! Flows, subscriptions, fan-out and last value.
+//! Flows, subscriptions, fan-out and bounded history.
 //!
 //! [`FlowRouter`] implements [`nowcast_traits::Router`]: it attaches
 //! subscriptions to anchors, fans each publication out to the anchors
-//! subscribed to its flow, keeps the last value of each flow, and signals a
+//! subscribed to its flow, keeps the last events of each flow, and signals a
 //! flow that loses its last subscriber. It never starts or stops a brick and
 //! does no IO: the supervisor and the HTTP server drive it.
 //!

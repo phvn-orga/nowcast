@@ -183,6 +183,23 @@ impl Session<'_> {
         }
     }
 
+    /// `GET /v1/flows/{flow}?after=<id>`: the kept events after `after`,
+    /// as `{"gap": <bool>, "events": [<event>...]}`.
+    pub async fn history(&self, flow: &str, after: u64) -> Result<Value, CliError> {
+        let path = format!("/v1/flows/{}?after={after}", percent_encode(flow));
+        let reply = self.client.call(Method::GET, &path, None).await?;
+        let body = reply.expect(StatusCode::OK)?.json()?;
+        let events = body.get("events").and_then(Value::as_array);
+        if !events.is_some_and(|events| events.iter().all(Value::is_object))
+            || !body.get("gap").is_some_and(Value::is_boolean)
+        {
+            return Err(CliError::Protocol(format!(
+                "a history without its events or gap: {body}"
+            )));
+        }
+        Ok(body)
+    }
+
     /// `POST /v1/flows/{flow}/refresh`: the service relays it to the brick.
     pub async fn refresh(&self, flow: &str) -> Result<(), CliError> {
         let path = format!("/v1/flows/{}/refresh", percent_encode(flow));

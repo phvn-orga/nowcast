@@ -68,13 +68,13 @@ pub(crate) struct FlowError<'a> {
     pub message: &'a str,
 }
 
-/// `data` of a `flow-ended`.
+/// `data` of a `flow-ended` or a `flow-gap`.
 #[derive(Debug, Serialize)]
-pub(crate) struct FlowEnded {
+pub(crate) struct FlowSignal {
     pub flow: String,
 }
 
-impl FlowEnded {
+impl FlowSignal {
     pub fn new(flow: &QualifiedFlowId) -> Self {
         Self {
             flow: flow.to_string(),
@@ -180,6 +180,6 @@ mod tests {
             }),
             r#"{"flow":"forge/a/b","message":"line\nbreak"}"#
         );
-        assert_eq!(to_line(&FlowEnded::new(&flow)), r#"{"flow":"forge/a/b"}"#);
+        assert_eq!(to_line(&FlowSignal::new(&flow)), r#"{"flow":"forge/a/b"}"#);
     }
 }

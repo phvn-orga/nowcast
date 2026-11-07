@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -6,15 +6,33 @@ use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
-use crate::{AnchorId, Router, UnknownFlow, UnknownSubscription};
+use crate::{AnchorId, FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
 
 #[derive(Default)]
 struct Flow {
-    last: Option<Event>,
+    history: VecDeque<Event>,
+    dropped: Option<EventId>,
     subscriptions: HashMap<SubscriptionId, AnchorId>,
 }
 
 impl Flow {
+    fn last(&self) -> Option<Event> {
+        self.history.back().cloned()
+    }
+
+    fn after(&self, since: EventId) -> Vec<Event> {
+        self.history
+            .iter()
+            .filter(|e| e.id > since)
+            .cloned()
+            .collect()
+    }
+
+    /// Ids start at 1 in the fake: `0` is the only id from "before this run".
+    fn gap(&self, since: EventId) -> bool {
+        since.0 == 0 || self.dropped.is_some_and(|d| d > since)
+    }
+
     fn has_anchor(&self, anchor: AnchorId) -> bool {
         self.subscriptions.values().any(|&a| a == anchor)
     }
@@ -100,7 +118,7 @@ impl Router for FakeRouter {
             .insert(id.clone(), (anchor, flow.clone()));
         let flow = state.flows.entry(flow).or_default();
         flow.subscriptions.insert(id.clone(), anchor);
-        let last = flow.last.clone();
+        let last = flow.last();
         state.sync_has_subscriptions();
         (id, last)
     }
@@ -141,7 +159,10 @@ impl Router for FakeRouter {
             data,
         };
         let entry = state.flows.get_mut(flow).expect("checked above");
-        entry.last = Some(event.clone());
+        entry.history.push_back(event.clone());
+        if entry.history.len() > FLOW_HISTORY {
+            entry.dropped = entry.history.pop_front().map(|e| e.id);
+        }
         let update = StreamEvent::Update(event.clone());
         for anchor in entry.anchors() {
             state.deliver(anchor, &update);
@@ -152,7 +173,23 @@ impl Router for FakeRouter {
     fn last(&self, anchor: AnchorId, flow: &QualifiedFlowId) -> Result<Option<Event>, UnknownFlow> {
         let state = self.state.lock().unwrap();
         match state.flows.get(flow) {
-            Some(f) if f.has_anchor(anchor) => Ok(f.last.clone()),
+            Some(f) if f.has_anchor(anchor) => Ok(f.last()),
+            _ => Err(UnknownFlow(flow.clone())),
+        }
+    }
+
+    fn history(
+        &self,
+        anchor: AnchorId,
+        flow: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow> {
+        let state = self.state.lock().unwrap();
+        match state.flows.get(flow) {
+            Some(f) if f.has_anchor(anchor) => Ok(History {
+                gap: f.gap(after),
+                events: f.after(after),
+            }),
             _ => Err(UnknownFlow(flow.clone())),
         }
     }
@@ -189,13 +226,28 @@ impl Router for FakeRouter {
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
         let (tx, rx) = unbounded_channel();
         let mut state = self.state.lock().unwrap();
-        let mut missed: Vec<_> = state
+        let mut subscribed: Vec<_> = state
             .flows
-            .values()
-            .filter(|f| f.has_anchor(anchor))
-            .filter_map(|f| f.last.clone())
-            .filter(|e| since.is_none_or(|since| e.id > since))
+            .iter()
+            .filter(|(_, f)| f.has_anchor(anchor))
             .collect();
+        subscribed.sort_by_key(|(id, _)| *id);
+        let mut missed: Vec<_> = match since {
+            None => subscribed.iter().filter_map(|(_, f)| f.last()).collect(),
+            Some(since) => {
+                for (id, f) in &subscribed {
+                    if f.gap(since) {
+                        let _ = tx.send(StreamEvent::FlowGap {
+                            flow: (*id).clone(),
+                        });
+                    }
+                }
+                subscribed
+                    .iter()
+                    .flat_map(|(_, f)| f.after(since))
+                    .collect()
+            }
+        };
         missed.sort_by_key(|e| e.id);
         for event in missed {
             let _ = tx.send(StreamEvent::Update(event));

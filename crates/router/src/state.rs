@@ -3,13 +3,13 @@
 //!
 //! Subscriptions are indexed both ways: by flow, to fan a publication out to
 //! the anchors subscribed to it, and by anchor, to check who owns a
-//! subscription, replay last values on a new stream and drop a dead anchor
+//! subscription, replay a flow's history on a new stream and drop a dead anchor
 //! without scanning every flow. Every method keeps the two indexes in step.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nowcast_traits::{AnchorId, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, FLOW_HISTORY, History, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
@@ -17,12 +17,31 @@ use tokio::sync::watch;
 /// A flow that has had at least one subscriber and has not been ended.
 #[derive(Default)]
 struct Flow {
-    last: Option<Event>,
+    /// The last [`FLOW_HISTORY`] events, oldest first.
+    history: VecDeque<Event>,
+    /// The id of the newest event the bound dropped.
+    dropped: Option<EventId>,
     /// Every subscription to the flow, with the anchor that holds it.
     subscriptions: HashMap<SubscriptionId, AnchorId>,
 }
 
 impl Flow {
+    fn last(&self) -> Option<&Event> {
+        self.history.back()
+    }
+
+    /// The kept events whose id is greater than `since`. The history is in
+    /// increasing id order, so the first one is found by binary search.
+    fn after(&self, since: EventId) -> impl Iterator<Item = &Event> {
+        let first = self.history.partition_point(|event| event.id <= since);
+        self.history.range(first..)
+    }
+
+    /// Whether the bound dropped an event newer than `since`.
+    fn dropped_after(&self, since: EventId) -> bool {
+        self.dropped.is_some_and(|dropped| dropped > since)
+    }
+
     fn has_anchor(&self, anchor: AnchorId) -> bool {
         self.subscriptions.values().any(|&a| a == anchor)
     }
@@ -59,6 +78,9 @@ pub(crate) struct State {
     /// a restart of the service: a client's `Last-Event-ID` from before the
     /// restart stays below every new id.
     last_event: u64,
+    /// The counter's value at startup: an id at or below it comes from a
+    /// previous run, whose history is lost.
+    start: u64,
     /// The number of subscriptions issued so far.
     issued_subscriptions: u64,
     flows: HashMap<QualifiedFlowId, Flow>,
@@ -79,6 +101,7 @@ impl State {
             });
         Self {
             last_event: now,
+            start: now,
             ..Self::default()
         }
     }
@@ -92,7 +115,7 @@ impl State {
         let id = SubscriptionId::new(format!("s-{:x}", self.issued_subscriptions));
         let entry = self.flows.entry(flow.clone()).or_default();
         entry.subscriptions.insert(id.clone(), anchor);
-        let last = entry.last.clone();
+        let last = entry.last().cloned();
         self.anchors
             .entry(anchor)
             .or_default()
@@ -145,7 +168,10 @@ impl State {
             time: SystemTime::now(),
             data,
         };
-        flow.last = Some(event.clone());
+        flow.history.push_back(event.clone());
+        if flow.history.len() > FLOW_HISTORY {
+            flow.dropped = flow.history.pop_front().map(|dropped| dropped.id);
+        }
         let update = StreamEvent::Update(event.clone());
         for anchor in flow.anchors() {
             if let Some(anchor) = self.anchors.get_mut(&anchor) {
@@ -161,9 +187,29 @@ impl State {
         flow_id: &QualifiedFlowId,
     ) -> Result<Option<Event>, UnknownFlow> {
         match self.flows.get(flow_id) {
-            Some(flow) if flow.has_anchor(anchor) => Ok(flow.last.clone()),
+            Some(flow) if flow.has_anchor(anchor) => Ok(flow.last().cloned()),
             _ => Err(UnknownFlow(flow_id.clone())),
         }
+    }
+
+    pub(crate) fn history(
+        &self,
+        anchor: AnchorId,
+        flow_id: &QualifiedFlowId,
+        after: EventId,
+    ) -> Result<History, UnknownFlow> {
+        match self.flows.get(flow_id) {
+            Some(flow) if flow.has_anchor(anchor) => Ok(History {
+                gap: self.gap(flow, after),
+                events: flow.after(after).cloned().collect(),
+            }),
+            _ => Err(UnknownFlow(flow_id.clone())),
+        }
+    }
+
+    /// Whether some events of `flow` newer than `since` are gone.
+    fn gap(&self, flow: &Flow, since: EventId) -> bool {
+        since.0 <= self.start || flow.dropped_after(since)
     }
 
     pub(crate) fn flow_error(&mut self, flow_id: &QualifiedFlowId, message: String) {
@@ -208,18 +254,38 @@ impl State {
         since: Option<EventId>,
     ) -> UnboundedReceiver<StreamEvent> {
         let (tx, rx) = unbounded_channel();
-        let entry = self.anchors.entry(anchor).or_default();
-        let flows: HashSet<&QualifiedFlowId> = entry.subscriptions.values().collect();
-        let mut replay: Vec<&Event> = flows
+        let mut flows: Vec<(&QualifiedFlowId, &Flow)> = self
+            .anchors
+            .get(&anchor)
             .into_iter()
-            .filter_map(|flow| self.flows.get(flow)?.last.as_ref())
-            .filter(|event| since.is_none_or(|since| event.id > since))
+            .flat_map(|entry| entry.subscriptions.values())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|id| Some((id, self.flows.get(id)?)))
             .collect();
+        flows.sort_by_key(|(id, _)| *id);
+        let mut replay: Vec<&Event> = match since {
+            None => flows.iter().filter_map(|(_, flow)| flow.last()).collect(),
+            Some(since) => {
+                for (id, flow) in &flows {
+                    if self.gap(flow, since) {
+                        // The receiver is still in hand: the send cannot fail.
+                        let _ = tx.send(StreamEvent::FlowGap {
+                            flow: (*id).clone(),
+                        });
+                    }
+                }
+                flows
+                    .iter()
+                    .flat_map(|(_, flow)| flow.after(since))
+                    .collect()
+            }
+        };
         replay.sort_by_key(|event| event.id);
         for event in replay {
-            // The receiver is still in hand: the send cannot fail.
             let _ = tx.send(StreamEvent::Update(event.clone()));
         }
+        let entry = self.anchors.entry(anchor).or_default();
         entry.streams.retain(|s| !s.is_closed());
         entry.streams.push(tx);
         rx

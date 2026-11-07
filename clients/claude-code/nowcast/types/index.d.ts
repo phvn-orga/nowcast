@@ -1,6 +1,6 @@
 // What the nowcast mod gives other mods: the `$.nowcast` noun, to subscribe,
-// unsubscribe, ask for a refresh or read a flow's last value from the
-// service, and its state (`$.state`, plugin `nowcast`), where every flow the
+// unsubscribe, ask for a refresh or read a flow's last value or history from
+// the service, and its state (`$.state`, plugin `nowcast`), where every flow the
 // session receives lands. A mod using either lists `nowcast` under
 // `dependencies` in its `plugin.json`.
 //
@@ -104,6 +104,14 @@ export type Nowcast = {
    * mods read the state instead, which follows the stream.
    */
   last(request: { flow: string }): Promise<NowcastLast | NowcastFailure>
+  /**
+   * `GET /v1/flows/{flow}?after=<id>`, for a flow this process is subscribed
+   * to: the events the service keeps for it (its last 100) newer than
+   * `after`, an event `id`. `'0'` reads them all. For a mod that subscribes to
+   * a flow another session already follows, and wants what came before. The
+   * state is left as is.
+   */
+  history(request: { flow: string; after: string }): Promise<NowcastHistory | NowcastFailure>
 }
 
 export type NowcastSubscribeRequest = {
@@ -131,6 +139,17 @@ export type NowcastLast = {
   ok: true
   /** Null when the flow has published nothing yet. */
   last: NowcastEvent | null
+}
+
+export type NowcastHistory = {
+  ok: true
+  /**
+   * Some events newer than `after` are gone: past the bound, or from before
+   * the service last started.
+   */
+  gap: boolean
+  /** Oldest first. */
+  events: NowcastEvent[]
 }
 
 /** A request that did not succeed. */

@@ -11,7 +11,7 @@ use nowcast_types::{EventId, StreamEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
-use crate::event::{CloudEvent, FlowEnded, FlowError, to_line};
+use crate::event::{CloudEvent, FlowError, FlowSignal, to_line};
 
 /// How often an idle stream sends a comment. Writing is how a closed client
 /// is noticed, and its stream released.
@@ -45,7 +45,9 @@ pub(crate) fn encode(event: &StreamEvent) -> Option<Bytes> {
                 message,
             }),
         ),
-        StreamEvent::FlowEnded { flow } => (None, to_line(&FlowEnded::new(flow))),
+        StreamEvent::FlowEnded { flow } | StreamEvent::FlowGap { flow } => {
+            (None, to_line(&FlowSignal::new(flow)))
+        }
     };
     let mut block = format!("event: {}\n", event.name());
     if let Some(id) = id {
@@ -160,6 +162,11 @@ mod tests {
         assert_eq!(
             text(&ended),
             "event: flow-ended\ndata: {\"flow\":\"probe/a\"}\n\n"
+        );
+        let gap = StreamEvent::FlowGap { flow: flow() };
+        assert_eq!(
+            text(&gap),
+            "event: flow-gap\ndata: {\"flow\":\"probe/a\"}\n\n"
         );
     }
 

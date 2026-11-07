@@ -703,9 +703,9 @@ pub async fn a_fresh_stream_sends_every_last_value<S: ApiSubject>() {
     }
 }
 
-/// On reconnection with `Last-Event-ID`, the last value of each flow newer
-/// than it comes again, and no older value.
-pub async fn reconnecting_replays_last_values<S: ApiSubject>() {
+/// On reconnection with `Last-Event-ID`, every kept event newer than it comes
+/// again, in increasing id order across flows, and no older one.
+pub async fn reconnecting_replays_the_history<S: ApiSubject>() {
     let (harness, client) = ready::<S>().await;
     let a = client.subscribe("a").await;
     let b = client.subscribe("b").await;
@@ -715,11 +715,11 @@ pub async fn reconnecting_replays_last_values<S: ApiSubject>() {
         .unwrap()
         .to_owned();
     publish(&harness, &a.qualified, &json!({ "v": 2 })).await;
-    publish(&harness, &a.qualified, &json!({ "v": 3 })).await;
     publish(&harness, &b.qualified, &json!({ "v": 1 })).await;
+    publish(&harness, &a.qualified, &json!({ "v": 3 })).await;
     let mut stream = client.stream(Some(&seen)).await;
     let mut replayed = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let event = stream.next().await;
         assert_eq!(event.event, "update");
         let data: Value = serde_json::from_str(&event.data).unwrap();
@@ -728,14 +728,69 @@ pub async fn reconnecting_replays_last_values<S: ApiSubject>() {
             data["data"].clone(),
         ));
     }
-    replayed.sort_by(|x, y| x.0.cmp(&y.0));
     assert_eq!(
         replayed,
-        vec![(a.flow, json!({ "v": 3 })), (b.flow, json!({ "v": 1 }))]
+        vec![
+            (a.flow.clone(), json!({ "v": 2 })),
+            (b.flow, json!({ "v": 1 })),
+            (a.flow, json!({ "v": 3 })),
+        ]
     );
     if let Some(extra) = stream.next_within(Duration::from_millis(300)).await {
-        panic!("only the last values come again, got {extra:?}");
+        panic!("only the events after the id come again, got {extra:?}");
     }
+}
+
+/// A gap shows as `flow-gap` before the flow's replay, with no SSE `id` and
+/// `{"flow"}` as data. `Last-Event-ID: 0` predates every run of the service,
+/// so it always has one.
+pub async fn a_gap_reaches_the_stream<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let a = client.subscribe("a").await;
+    publish(&harness, &a.qualified, &json!({ "v": 1 })).await;
+    let mut stream = client.stream(Some("0")).await;
+    let gap = stream.next().await;
+    assert_eq!(gap.event, "flow-gap");
+    assert_eq!(gap.id, None, "a signal carries no id");
+    let data: Value = serde_json::from_str(&gap.data).unwrap();
+    assert_eq!(data, json!({ "flow": a.flow }));
+    let event = stream.next().await;
+    assert_eq!(event.event, "update");
+    let data: Value = serde_json::from_str(&event.data).unwrap();
+    assert_eq!(data["data"], json!({ "v": 1 }));
+}
+
+/// `GET /v1/flows/{flow}?after=<id>` answers `200` with the kept events after
+/// the id as CloudEvents and whether some are gone; `400` `invalid_request`
+/// when the id is not one.
+pub async fn reading_a_flow_after_an_id_gives_its_history<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let a = client.subscribe("a").await;
+    let path = |after: &str| format!("/v1/flows/{}?after={after}", encode(&a.flow));
+    let empty = client.request("GET", &path("0"), None).await;
+    empty.status(200);
+    assert_eq!(empty.json(), json!({ "gap": true, "events": [] }));
+    for v in 1..=3 {
+        publish(&harness, &a.qualified, &json!({ "v": v })).await;
+    }
+    let all = client.request("GET", &path("0"), None).await.json();
+    let first = all["events"][0]["id"].as_str().unwrap().to_owned();
+    let after = client.request("GET", &path(&first), None).await;
+    after.status(200);
+    let body = after.json();
+    assert_eq!(body["gap"], json!(false));
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_cloudevent(&events[0], &a.flow, &json!({ "v": 2 }));
+    assert_cloudevent(&events[1], &a.flow, &json!({ "v": 3 }));
+    client
+        .request("GET", &path("x"), None)
+        .await
+        .error(400, "invalid_request");
+    client
+        .request("GET", "/v1/flows/probe%2Fnever?after=0", None)
+        .await
+        .error(404, "unknown_flow");
 }
 
 /// Runs the HTTP rules of contract section 3 against a service.
@@ -770,7 +825,9 @@ macro_rules! api_suite {
                     flow_errors_reach_the_stream,
                     unsubscribing_ends_the_flow_on_the_stream,
                     a_fresh_stream_sends_every_last_value,
-                    reconnecting_replays_last_values,
+                    reconnecting_replays_the_history,
+                    a_gap_reaches_the_stream,
+                    reading_a_flow_after_an_id_gives_its_history,
                 ]
             );
         }
