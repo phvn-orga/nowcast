@@ -195,8 +195,10 @@ l'utilisateur du service (droits `0600`, `00-cadrage.md`).
   chacune dans son cycle de vie (section 4) : `stopped` (pas de processus),
   `starting` (lancée, en attente de `ready`), `running` (prête, délai de grâce
   compris), `stopping` (en cours d'arrêt), `waiting` (plantée, en attente d'une
-  relance). `pid` est celui de son processus, `null` sans processus. `crashes`
-  compte ses plantages d'affilée, ceux que borne la limite de 8 relances.
+  relance), `given_up` (abandonnée après trop de plantages d'affilée, sans
+  processus jusqu'au prochain abonnement). `pid` est celui de son processus,
+  `null` sans processus. `crashes` compte ses plantages d'affilée, ceux que borne
+  la limite de 8 relances ; une brique abandonnée garde le sien.
 - `sessions` a une entrée par processus d'ancrage dont la session est déclarée,
   avec ses abonnements. Deux processus d'ancrage peuvent déclarer le même
   identifiant de session.
@@ -417,7 +419,9 @@ service → {"v":1,"t":"ack","req":7}
    vivant. Le compte des plantages d'affilée repart de zéro quand la brique a tenu
    60 s après `ready`. Après 8 relances d'affilée, le service abandonne : le
    plantage suivant termine tous les flux de la brique, chacun avec un `flow-error`.
-   Un abonnement ultérieur relance la brique à neuf, avec ses 8 relances.
+   Le service retient cet abandon et son compte de plantages (`GET /v1/status`,
+   section 3) jusqu'à ce qu'un abonnement ultérieur relance la brique à neuf, avec
+   ses 8 relances, ou qu'elle soit désactivée.
    Pendant l'attente, une nouvelle souscription échoue en `503` `brick_unavailable`.
 4. **Arrêt du service**, quelle qu'en soit la cause (arrêt à vide, `SIGTERM`,
    `SIGINT`) : le service ferme d'abord toutes ses connexions, puis arrête toutes ses
