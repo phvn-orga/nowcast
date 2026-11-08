@@ -129,7 +129,8 @@ contenir `/`).
 
 C'est le premier appel obligatoire pour un processus d'ancrage, répété à chaque
 changement de session (`/clear`, reprise). Tout autre appel avant lui, sauf
-`GET /v1/service`, répond `428` avec le code `session_required`.
+`GET /v1/service` et `GET /v1/status`, répond `428` avec le code
+`session_required`.
 
 Le service oublie les sessions à chaque arrêt, l'arrêt à vide compris (section 4). Un
 `428` reçu en cours de session signifie donc que le service a été relancé : le client
@@ -141,12 +142,68 @@ déclare à nouveau sa session, puis renvoie sa requête.
 déclarée :
 
 ```json
-{ "path": "/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin" }
+{
+  "version": "0.1.0-alpha.5",
+  "started_at": "2026-11-08T16:41:00Z",
+  "path": "/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin"
+}
 ```
 
-`path` est le `PATH` du service, celui où une brique sans `PATH` propre trouve son
-programme (section 1), ou `null` s'il n'en a pas. D'autres champs pourront s'y
-ajouter.
+- `version` est la version du binaire qui fait tourner le service. Après une mise à
+  jour, elle reste l'ancienne tant que le service n'a pas redémarré : c'est elle,
+  et non `nowcast --version`, qui dit à quel service un client parle. Un service
+  antérieur à ce champ ne l'envoie pas.
+- `started_at` est l'instant où le service a démarré, en RFC 3339 UTC.
+- `path` est le `PATH` du service, celui où une brique sans `PATH` propre trouve son
+  programme (section 1), ou `null` s'il n'en a pas.
+
+D'autres champs pourront s'y ajouter : un client ignore ceux qu'il ne connaît pas.
+
+### État
+
+`GET /v1/status` répond `200` avec l'état du service à un instant, sans session
+déclarée, pour l'outil `nowcast status` (`02-clients.md`). Il couvre toutes les
+sessions, pas seulement celle de l'appelant : le socket n'est ouvert qu'à
+l'utilisateur du service (droits `0600`, `00-cadrage.md`).
+
+```json
+{
+  "service": { "version": "0.1.0-alpha.5", "started_at": "2026-11-08T16:41:00Z", "path": "…" },
+  "bricks": [
+    { "name": "claude-code", "state": "running", "pid": 868412, "crashes": 0 },
+    { "name": "forge", "state": "stopped", "pid": null, "crashes": 0 }
+  ],
+  "sessions": [
+    {
+      "id": "5f1c2e9a-…",
+      "subscriptions": [ { "id": "s-12", "flow": "claude-code/session/5f1c2e9a-…" } ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "claude-code/session/5f1c2e9a-…",
+      "subscribers": 1,
+      "last_event": { "id": "42", "time": "2026-11-08T16:45:12Z" }
+    }
+  ]
+}
+```
+
+- `service` est ce que rend `GET /v1/service`.
+- `bricks` liste les briques activées (section 2), et celles qui tournent encore
+  après avoir été désactivées, par nom. `state` dit où en est
+  chacune dans son cycle de vie (section 4) : `stopped` (pas de processus),
+  `starting` (lancée, en attente de `ready`), `running` (prête, délai de grâce
+  compris), `stopping` (en cours d'arrêt), `waiting` (plantée, en attente d'une
+  relance), `given_up` (abandonnée après trop de plantages d'affilée, sans
+  processus jusqu'au prochain abonnement). `pid` est celui de son processus,
+  `null` sans processus. `crashes` compte ses plantages d'affilée, ceux que borne
+  la limite de 8 relances ; une brique abandonnée garde le sien.
+- `sessions` a une entrée par processus d'ancrage dont la session est déclarée,
+  avec ses abonnements. Deux processus d'ancrage peuvent déclarer le même
+  identifiant de session.
+- `flows` liste les flux qui ont au moins un abonné, avec leur nombre d'abonnés et
+  le dernier événement gardé (`null` si le flux n'a encore rien publié).
 
 ### Abonnements
 
@@ -362,7 +419,9 @@ service → {"v":1,"t":"ack","req":7}
    vivant. Le compte des plantages d'affilée repart de zéro quand la brique a tenu
    60 s après `ready`. Après 8 relances d'affilée, le service abandonne : le
    plantage suivant termine tous les flux de la brique, chacun avec un `flow-error`.
-   Un abonnement ultérieur relance la brique à neuf, avec ses 8 relances.
+   Le service retient cet abandon et son compte de plantages (`GET /v1/status`,
+   section 3) jusqu'à ce qu'un abonnement ultérieur relance la brique à neuf, avec
+   ses 8 relances, ou qu'elle soit désactivée.
    Pendant l'attente, une nouvelle souscription échoue en `503` `brick_unavailable`.
 4. **Arrêt du service**, quelle qu'en soit la cause (arrêt à vide, `SIGTERM`,
    `SIGINT`) : le service ferme d'abord toutes ses connexions, puis arrête toutes ses
