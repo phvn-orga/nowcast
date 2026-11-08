@@ -81,10 +81,13 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   fois connu (voir plus bas). Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
 - **Le mod central refuse un service trop ancien.** Il déclare la plus ancienne
-  version du service qu'il accepte, et lit celle de `nowcast --version` avant
-  chaque lancement de `watch`. Plus ancienne, le flux reste arrêté (`stopped`) et
-  son erreur dit les deux versions ; le mod relit la version à chaque relance, si
-  bien qu'une mise à jour en cours de session est prise. Limite : le service déjà
+  version du service qu'il accepte, et lit celle de `nowcast --version` avant tout
+  échange avec le service : avant de déclarer la session, puis avant chaque
+  lancement de `watch`. Plus ancienne, rien ne part vers le service : le flux
+  reste arrêté (`stopped`), son erreur dit les deux versions, et chaque requête de
+  `$.nowcast` répond `service_too_old`, un abonnement restant en attente
+  (`retrying`). Le mod relit la version à chaque relance de `watch`, si bien
+  qu'une mise à jour en cours de session est prise. Limite : le service déjà
   lancé reste sur l'ancienne version jusqu'à son redémarrage, au plus tard une
   minute après que plus aucune session ne le tient. Faire annoncer sa version par
   le service lui-même est écarté pour l'instant.
