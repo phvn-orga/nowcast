@@ -215,7 +215,8 @@ export type NowcastFailure = {
    * `brick_unavailable`...), or one of this mod's: `unreachable` (no service
    * on the socket), `no_socket` (no socket path) and `unavailable` (the
    * nowcast mod did not answer), `invalid_name` (a subscription without a
-   * name).
+   * name), `service_too_old` (the installed service is older than this mod
+   * accepts: nothing was sent).
    */
   code: string
   message: string

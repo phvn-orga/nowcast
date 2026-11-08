@@ -7,7 +7,7 @@
 
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastStream } from '../types'
-import { STUB, history, input, last, refresh, socketPath } from './client'
+import { CLI, STUB, checkService, history, input, last, refresh, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
 import { registerMeasures } from './measures'
 import { Lines, type Status, parseLine } from './stream'
@@ -15,8 +15,6 @@ import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFo
 
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
 
-/** The command line tool, looked up in the session's `PATH`. */
-const CLI = 'nowcast'
 /** Why the stream stops when the command cannot start and is not on `PATH`. */
 export const NOT_ON_PATH = `the ${CLI} command is not on PATH; install it, see https://github.com/phvn-orga/nowcast#install`
 
@@ -99,7 +97,7 @@ function awaitNewId($: $, ended: string, attempt: number): void {
   })
 }
 
-/** Declares `session` and runs `watch` for it, unless it already runs. */
+/** Runs `watch` for `session`, which `start` declares, unless it already runs. */
 function follow($: $, session: string): Promise<void> {
   queue = queue
     .then(async () => {
@@ -111,7 +109,6 @@ function follow($: $, session: string): Promise<void> {
       // flow again, each written anew.
       forgetFlows()
       await rewrite($)
-      await declare($, session)
       watch = start($, session)
     })
     .catch(error => $.ui.log(`nowcast: cannot follow session ${session}: ${message(error)}`, { to: 'debug' }))
@@ -151,6 +148,8 @@ async function declare($: $, session: string): Promise<void> {
 
 /**
  * Runs `watch` for `session` until stopped, starting it again if it exits.
+ * Each start reads the service's version first; the session is declared
+ * once the version is accepted.
  * The `watch` started again resumes after the last update the previous one
  * printed, rather than sending every last value again. A new session gets a
  * new `start`, with no update seen: its state is empty and needs them all.
@@ -159,16 +158,29 @@ function start($: $, session: string): Watch {
   let child: ReturnType<$['process']['spawn']> | undefined
   let stopped = false
   let lastEventId: string | undefined
+  let declared = false
   void (async () => {
     let delay = FIRST_RESTART_MS
     for (;;) {
       const startedAt = await $.clock.now()
       if (stopped) return
-      const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
-      child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
-      const why = await run($, child, () => stopped, id => (lastEventId = id))
+      // Read before anything goes to the service, and again before each
+      // start: an upgrade during the session is taken.
+      let why = await checkService($)
+      // Stopped while the version was read: no `watch` for the session left behind.
       if (stopped) return
-      await setStream($, { status: 'stopped', error: why })
+      if (why === null && !declared) {
+        await declare($, session)
+        declared = true
+        if (stopped) return
+      }
+      if (why === null) {
+        const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
+        child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
+        why = await run($, child, () => stopped, id => (lastEventId = id))
+      }
+      if (stopped) return
+      await setStream($, { session, status: 'stopped', error: why })
       $.ui.log(`nowcast: ${why}`, { to: 'debug' })
       if ((await $.clock.now()) - startedAt >= STABLE_MS) delay = FIRST_RESTART_MS
       await $.clock.sleep(delay)

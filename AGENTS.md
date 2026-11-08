@@ -28,6 +28,13 @@ and nothing by hand: no tag, no formula edit. Merged into `main`, it publishes
 the release and updates `Formula/`; a failed run is rerun as is.
 `.github/workflows/release.yml` describes it.
 
+The Claude Code plugins version apart from the service: a pull request raising
+`version` in `clients/claude-code/nowcast/.claude-plugin/plugin.json` (and the
+example's) releases them, once a batch is ready.
+
+A change that makes the mod rely on a newer service raises `OLDEST_SERVICE` in
+`clients/claude-code/nowcast/hooks/version.ts`.
+
 ## Harness
 
 - After a finding that could recur beyond the current work (a review, a

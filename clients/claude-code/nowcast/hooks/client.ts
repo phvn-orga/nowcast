@@ -5,6 +5,7 @@
 // subscriptions themselves are kept by `subscriptions.ts`.
 
 import type { EngineInterface } from 'claude-code'
+import { OLDEST_SERVICE, isOlder, printedVersion } from './version'
 import type {
   Nowcast,
   NowcastDone,
@@ -16,6 +17,9 @@ import type {
 } from '../types'
 
 type $ = EngineInterface
+
+/** The command line tool, looked up in the session's `PATH`. */
+export const CLI = 'nowcast'
 
 /** What `POST /v1/subscriptions` asks for. */
 export type Wanted = Omit<NowcastSubscribeRequest, 'name'>
@@ -110,12 +114,36 @@ export async function history($: $, flow: string, after: string): Promise<Nowcas
   })
 }
 
+// Whether the installed service is too old, as last read: every request
+// waits for it.
+let verdict: Promise<string | null> | undefined
+
 /**
- * One request to the service. One the service refuses for want of a declared
- * session (`428`), as when a mod asks before this mod has declared it,
- * declares the current session and is sent again.
+ * Reads `nowcast --version` again: why the service is too old for this mod,
+ * or null. Until the next reading, every request goes by this one.
+ */
+export function checkService($: $): Promise<string | null> {
+  verdict = tooOld($)
+  return verdict
+}
+
+/** A version that cannot be read is let through: what fails next says why. */
+async function tooOld($: $): Promise<string | null> {
+  const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 }).catch(() => null)
+  const version = ran?.exitCode === 0 ? printedVersion(ran.stdout) : null
+  if (version === null || !isOlder(version, OLDEST_SERVICE)) return null
+  return `${CLI} ${version} is older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it`
+}
+
+/**
+ * One request to the service, unless the service is too old. One the
+ * service refuses for want of a declared session (`428`), as when a mod
+ * asks before this mod has declared it, declares the current session and is
+ * sent again.
  */
 async function request($: $, method: string, path: string, body?: unknown): Promise<Answer | NowcastFailure> {
+  const why = await (verdict ?? checkService($))
+  if (why !== null) return { ok: false, status: null, code: 'service_too_old', message: why }
   const answer = await send($, method, path, body)
   if ('code' in answer || answer.status !== 428) return answer
   const declared = await send($, 'PUT', '/v1/session', { id: await $.session.id() })
