@@ -123,7 +123,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     retire.
   - **Un abonnement vit jusqu'à `unsubscribe`**, que sa première tentative ait réussi
     ou non. Seule une requête qui ne peut jamais aboutir est refusée, sans rien
-    garder : `unknown_brick`, `unknown_kind`, `invalid_params`. Une brique non activée
+    garder : `unknown_brick`, `unknown_kind`, `invalid_params`, `invalid_request` (un
+    corps mal formé). Une brique non activée
     répond `unknown_brick`, et le service ne peut pas la distinguer d'un nom mal
     tapé : il faut l'activer, puis recharger le mod. Toute autre erreur (service
     absent, `brick_unavailable`, `subscription_refused`, `5xx`) est retentée après
@@ -132,7 +133,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     service, une brique retirée ou abandonnée après ses relances. Il le vérifie à
     chaque reconnexion du flux, et quand le flux d'un abonnement se termine ou tombe
     en erreur. Une erreur définitive à ce moment laisse l'abonnement en échec, avec
-    sa raison, jusqu'à `unsubscribe`.
+    sa raison, sans nouvelle tentative de lui-même. Un `subscribe` du même nom et de
+    la même requête le tente à nouveau : un consommateur rechargé après la
+    réactivation de sa brique le retrouve ainsi.
   - **L'état dit où en est chaque abonnement** : une famille `subscriptions`, indexée
     par `<mod>/<nom>`, avec son statut (`active`, `retrying` ou `failed`), la raison
     d'un échec et son flux une fois connu. L'identifiant étant déterministe, un
