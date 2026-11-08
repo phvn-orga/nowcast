@@ -127,19 +127,23 @@ export function checkService($: $): Promise<string | null> {
   return verdict
 }
 
+/** How long the service has to tell its version, and `nowcast --version` to print it. */
+const VERSION_TIMEOUT_MS = 5_000
+
 /**
  * The running service's version, from `GET /v1/service`. A service that does
- * not tell it, older than the field or out of reach, falls back on the
- * installed binary's, `nowcast --version`. A version that cannot be read is
- * let through: what fails next says why.
+ * not tell it, older than the field, out of reach or not answering within
+ * `VERSION_TIMEOUT_MS`, falls back on the installed binary's, `nowcast
+ * --version`. A version that cannot be read is let through: what fails next
+ * says why.
  */
 async function tooOld($: $): Promise<string | null> {
-  const running = await runningVersion($)
+  const running = await Promise.race([runningVersion($), $.clock.sleep(VERSION_TIMEOUT_MS).then(() => null)])
   if (running !== null) {
     if (!isOlder(running, OLDEST_SERVICE)) return null
     return `the running ${CLI} service is ${running}, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and restart the service`
   }
-  const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 }).catch(() => null)
+  const ran = await $.process.run([CLI, '--version'], { timeoutMs: VERSION_TIMEOUT_MS }).catch(() => null)
   const version = ran?.exitCode === 0 ? printedVersion(ran.stdout) : null
   if (version === null || !isOlder(version, OLDEST_SERVICE)) return null
   return `${CLI} ${version} is older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it`

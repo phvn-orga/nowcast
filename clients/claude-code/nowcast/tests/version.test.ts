@@ -160,3 +160,12 @@ for (const [why, service] of [
     expect(w.stream()).toEqual({ session: 'session-1', status: 'stopped', error: TOO_OLD })
   })
 }
+
+test("a service that does not answer falls back on the installed binary's version", async ($, on) => {
+  const w = world(on, { service: new Promise(() => {}), version: '0.1.0-alpha.1' })
+  await $.session.start(START)
+  await w.clock.settle()
+  expect(w.stream()?.status).not.toBe('stopped')
+  await w.clock.advance(5_000)
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'stopped', error: TOO_OLD })
+})

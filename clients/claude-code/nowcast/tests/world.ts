@@ -107,10 +107,11 @@ export type WorldOptions = {
   spawnFails?: boolean
   /**
    * The service's answer to `GET /v1/service`, kept out of `requests`; a
-   * string makes the call fail. A service too old to tell its version when
-   * absent, so that the mod reads `nowcast --version`.
+   * string makes the call fail, a promise answers once settled. A service too
+   * old to tell its version when absent, so that the mod reads `nowcast
+   * --version`.
    */
-  service?: Partial<HttpResponse> | string
+  service?: Partial<HttpResponse> | string | Promise<Partial<HttpResponse> | string>
   /** What `nowcast --version` prints; the oldest version the mod accepts when absent. */
   version?: string
   /** What `nowcast --version` waits for before it answers; nothing when absent. */
@@ -202,7 +203,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     }
     const service = request.method === 'GET' && request.url === 'http://nowcast/v1/service'
     if (!service) requests.push(request)
-    const answer = (service ? options.service : await options.answer?.(request)) ?? (service ? SERVICE : {})
+    const answer = (service ? await options.service : await options.answer?.(request)) ?? (service ? SERVICE : {})
     if (typeof answer === 'string') return { deny: answer }
     const status = answer.status ?? 204
     return { value: { status, ok: status < 300, headers: {}, text: '', ...answer } }
