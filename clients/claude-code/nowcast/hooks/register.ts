@@ -1,16 +1,18 @@
 // The nowcast mod: one per Claude Code session. It declares the session to
 // the service, holds the session's one event stream through `nowcast watch`,
-// and writes each flow it receives into its state for other mods to read.
-// Requests (subscribe, unsubscribe, refresh, input) go from each mod to the service:
-// all mods run in this process, so the service ties them to the same session.
+// keeps the subscriptions every mod takes, and writes each subscription and
+// each flow it receives into its state for other mods to read. Requests go
+// from this process to the service: all mods run in it, so the service ties
+// them to the same session.
 
 import type { EngineInterface, Register } from 'claude-code'
-import type { NowcastEvent, NowcastFlow, NowcastStream } from '../types'
-import { STUB, history, input, last, refresh, resubscribe, socketPath, subscribeKept, unsubscribe } from './client'
+import type { NowcastStream } from '../types'
+import { STUB, history, input, last, refresh, socketPath } from './client'
+import { apply, forgetFlows, offer, write } from './flows'
 import { registerMeasures } from './measures'
-import { Lines, type Status, type StreamEvent, isNewer, nextFlow, parseLine } from './stream'
+import { Lines, type Status, parseLine } from './stream'
+import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
 
-const FLOWS = { plugin: 'nowcast', key: 'flows' } as const
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
 
 /** The command line tool, looked up in the session's `PATH`. */
@@ -39,23 +41,15 @@ type Watch = { session: string; stop: () => void }
 let watch: Watch | undefined
 let queue: Promise<void> = Promise.resolve()
 
-// What this mod last wrote to its state. It is the only writer, and a read
-// through the `$` of a long-lived loop would answer the moment that loop's
-// dispatch began.
-const flows = new Map<string, NowcastFlow>()
+// What this mod last wrote about the stream: see `flows.ts`.
 let stream: NowcastStream = { session: null, status: 'starting', error: null }
 
 export const register: Register = on => {
   // The library other mods use: `$.nowcast`, answered below.
   on('engine.create', async (_, e, next) => ({ ...(await next(e)), nowcast: STUB }))
-  // A flow's last value in an answer is written to the state as well: the
-  // stream does not send it.
-  on('nowcast.subscribe', async ($, e) => {
-    const value = await subscribeKept($, e)
-    if (value.ok && value.last !== null) await offer($, value.last)
-    return { value }
-  })
-  on('nowcast.unsubscribe', async ($, e) => ({ value: await unsubscribe($, e.subscription) }))
+  // Subscriptions belong to the calling mod, which the engine names.
+  on('nowcast.subscribe', async ($, e, next) => ({ value: await subscribeFor($, next.origin.plugin, e) }))
+  on('nowcast.unsubscribe', async ($, e, next) => ({ value: await unsubscribeFor($, next.origin.plugin, e.name) }))
   on('nowcast.refresh', async ($, e) => ({ value: await refresh($, e.flow) }))
   on('nowcast.input', async ($, e) => ({ value: await input($, e.flow, e.detail) }))
   on('nowcast.last', async ($, e) => {
@@ -67,8 +61,10 @@ export const register: Register = on => {
 
   // Once per load of the mod: the session's start, or a reload. The start
   // does not wait for the service: `stream` says when the session is declared.
+  // A reload finds the subscriptions it kept in its state.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await restore($).catch(error => $.ui.log(`nowcast: cannot restore: ${message(error)}`, { to: 'debug' }))
     void follow($, await $.session.id())
     return started
   })
@@ -110,9 +106,11 @@ function follow($: $, session: string): Promise<void> {
       if (watch?.session === session) return
       watch?.stop()
       watch = undefined
-      // A new session starts with an empty state: the new `watch` sends the
-      // last value of every flow again, and each is written anew.
-      flows.clear()
+      // A new session starts with an empty state: the subscriptions are
+      // written again, and the new `watch` sends the last value of every
+      // flow again, each written anew.
+      forgetFlows()
+      await rewrite($)
       await declare($, session)
       watch = start($, session)
     })
@@ -217,6 +215,9 @@ async function run(
             // `watch` refuses an id it could not send back as a header.
             if (parsed.event === 'update' && HEADER_VALUE.test(parsed.update.id)) seen(parsed.update.id)
             await apply($, parsed)
+            // The service may have dropped the subscriptions of a flow that
+            // ends or fails.
+            if (parsed.event !== 'update') void flowChanged($, parsed.flow).catch(() => undefined)
           }
         }
       } else {
@@ -248,34 +249,12 @@ async function onPath($: $): Promise<boolean> {
   return false
 }
 
-/** Subscribes again to what a restarted service forgot. */
-async function subscribeAgain($: $): Promise<void> {
-  for (const last of await resubscribe($)) await offer($, last)
-}
-
-/**
- * A flow's last value from a request's answer: the stream does not send it,
- * so it is written here, unless the state holds it or a newer one.
- */
-async function offer($: $, last: NowcastEvent): Promise<void> {
-  const previous = flows.get(last.subject)
-  if (previous?.last && !previous.ended && !isNewer(last, previous.last)) return
-  await apply($, { event: 'update', flow: last.subject, update: last })
-}
-
-async function apply($: $, event: StreamEvent): Promise<void> {
-  const next = nextFlow(flows.get(event.flow), event)
-  if (next === null) return
-  flows.set(event.flow, next)
-  await write($, () => $.state.set({ ...FLOWS, id: event.flow }, next), `flow ${event.flow}`)
-}
-
 async function onStatus($: $, status: Status): Promise<void> {
   if (status.status === 'connected') {
     await setStream($, { status: 'up', error: null })
     // Each time the stream opens, after an outage or in a `watch` started
     // again: the service may have restarted and forgotten the subscriptions.
-    void subscribeAgain($)
+    void reconnected($).catch(error => $.ui.log(`nowcast: cannot subscribe again: ${message(error)}`, { to: 'debug' }))
   } else {
     await setStream($, { status: 'down', error: status.reason })
   }
@@ -285,19 +264,6 @@ async function setStream($: $, change: Partial<NowcastStream>): Promise<void> {
   stream = { ...stream, ...change }
   const value = stream
   await write($, () => $.state.set(STREAM, value), 'stream')
-}
-
-/**
- * A write to the state. One another mod refuses (its `state.set` hook may)
- * is logged and skipped: it must not end the stream, which would only replay
- * the same value into the same refusal.
- */
-async function write($: $, set: () => Promise<unknown>, what: string): Promise<void> {
-  try {
-    await set()
-  } catch (error) {
-    $.ui.log(`nowcast: cannot write ${what}: ${message(error)}`, { to: 'debug' })
-  }
 }
 
 /** A fatal error's message from `--json` output, or the line as it is. */

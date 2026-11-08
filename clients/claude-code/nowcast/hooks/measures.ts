@@ -4,7 +4,8 @@
 // request to the model and each `session.measure`, grouped when close.
 //
 // Nothing is sent until the session measures something, and nothing at all
-// when the brick is not enabled (`unknown_brick`).
+// when the brick is not enabled (`unknown_brick`). The subscription is this
+// mod's own, named `session`: the next session's replaces the previous one.
 //
 // Two values come from the session's transcripts, which no API gives: the
 // tokens spent before this mod loaded (a resume, a reload), read once per
@@ -13,11 +14,15 @@
 // out: the count starts at the load, and the brick assumes one hour.
 
 import type { EngineInterface, On } from 'claude-code'
-import { input, subscribeKept, unsubscribe } from './client'
+import { input } from './client'
+import { subscribeFor } from './subscriptions'
 
 type $ = EngineInterface
 
 const BRICK = 'claude-code'
+/** Who owns the subscription, and under what name. */
+const OWNER = 'nowcast'
+const NAME = 'session'
 /** Measures closer than this go out as one. */
 const GROUP_MS = 500
 /** The longest wait for the transcripts' count before a request. */
@@ -37,9 +42,8 @@ type Usage = {
 /** The session being measured, and what it measured. */
 type Measured = {
   id: string
-  /** The flow and subscription, once subscribed. */
+  /** The flow, once the subscription is active. */
   flow?: string
-  subscription?: string
   /** The subscription being made: one at a time. */
   subscribing?: Promise<boolean>
   /** The brick is not enabled: nothing is sent for this session. */
@@ -133,10 +137,8 @@ export function registerMeasures(on: On): void {
 async function measured($: $): Promise<Measured> {
   const id = await $.session.id()
   if (current?.id === id) return current
-  const left = current
   const m: Measured = { id, off: false, tokens: zero(), seeding: Promise.resolve(), scheduled: false }
   current = m
-  if (left?.subscription !== undefined) void unsubscribe($, left.subscription)
   m.seeding = seed($, m)
   return m
 }
@@ -176,20 +178,20 @@ function schedule($: $, m: Measured): void {
   })
 }
 
-/** Subscribes the session to its flow; whether it is subscribed. */
+/**
+ * Subscribes the session to its flow; whether it is active. One waiting is
+ * asked again by the next measure, which finds it in place.
+ */
 async function subscribe($: $, m: Measured): Promise<boolean> {
-  const answer = await subscribeKept($, { brick: BRICK, kind: 'session', params: { id: m.id } })
+  const answer = await subscribeFor($, OWNER, { name: NAME, brick: BRICK, kind: 'session', params: { id: m.id } })
   if (!answer.ok) {
     // Not enabled: nothing to send this session. Anything else may pass.
     if (answer.code === 'unknown_brick') m.off = true
     return false
   }
-  if (m !== current) {
-    void unsubscribe($, answer.subscription)
-    return false
-  }
+  // A later session's subscription replaces this one: it is not undone here.
+  if (m !== current || answer.status !== 'active' || answer.flow === null) return false
   m.flow = answer.flow
-  m.subscription = answer.subscription
   return true
 }
 

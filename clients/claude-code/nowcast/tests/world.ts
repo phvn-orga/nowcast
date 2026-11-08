@@ -5,7 +5,7 @@
 import type { HttpResponse, On, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { mock } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
-import type { NowcastFlow, NowcastStream } from '../types'
+import type { NowcastFlow, NowcastStream, NowcastSubscription } from '../types'
 
 export const SOCKET = '/run/user/1000/nowcast/nowcast.sock'
 
@@ -127,6 +127,10 @@ export type World = {
   flowWrites: (id: string) => NowcastFlow[]
   /** The last value written for the stream. */
   stream: () => NowcastStream | undefined
+  /** The last value written for a subscription, by `<mod>/<name>`; undefined if none. */
+  subscription: (id: string) => NowcastSubscription | null | undefined
+  /** The last ids of the subscriptions kept written. */
+  subscribed: () => string[] | undefined
   /** What the observer mod logged. */
   observed: string[]
   /** What mods put in the status line, in order. */
@@ -168,6 +172,14 @@ export function world(on: On, options: WorldOptions = {}): World {
     writes.push({ key: e.key, id: undefined, value: e.value })
     return next(e)
   })
+  on('state.set', { plugin: 'nowcast', key: 'subscriptions' }, (_, e, next) => {
+    writes.push({ key: e.key, id: e.id, value: e.value })
+    return next(e)
+  })
+  on('state.set', { plugin: 'nowcast', key: 'subscribed' }, (_, e, next) => {
+    writes.push({ key: e.key, id: undefined, value: e.value })
+    return next(e)
+  })
   on('http.fetch', (_, e) => {
     const request = {
       method: e.init?.method ?? 'GET',
@@ -201,6 +213,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     flowWrites,
     flow: id => flowWrites(id).at(-1),
     stream: () => writes.filter(w => w.key === 'stream').at(-1)?.value as NowcastStream | undefined,
+    subscription: id =>
+      writes.filter(w => w.key === 'subscriptions' && w.id === id).at(-1)?.value as NowcastSubscription | null | undefined,
+    subscribed: () => writes.filter(w => w.key === 'subscribed').at(-1)?.value as string[] | undefined,
     child: () => {
       const last = children.at(-1)
       if (last === undefined) throw new Error('no process started')
@@ -273,14 +288,30 @@ export const caller: Plugin = {
   },
 }
 
+/**
+ * A second mod, which subscribes and unsubscribes through its `call-other`
+ * command. A plugin's `register` runs on its own, so it repeats `caller`'s.
+ */
+export const other: Plugin = {
+  name: 'other',
+  register: on => {
+    on('command.run', { command: 'call-other' }, async ($, e) => {
+      const { method, request } = JSON.parse(e.args) as { method: string; request: never }
+      const answer = method === 'subscribe' ? await $.nowcast.subscribe(request) : await $.nowcast.unsubscribe(request)
+      return { text: JSON.stringify(answer) }
+    })
+  },
+}
+
 /** What `$.nowcast.<method>(request)` answers, called by the `caller` mod. */
 export async function call(
   $: Engine,
   method: 'subscribe' | 'unsubscribe' | 'refresh' | 'input' | 'last' | 'history',
   request: unknown,
+  command = 'call',
 ) {
   const args = JSON.stringify({ method, request })
-  const { text } = await $.command.run({ command: 'call', args, ...COMPOSER })
+  const { text } = await $.command.run({ command, args, ...COMPOSER })
   return JSON.parse(text ?? 'null') as unknown
 }
 
