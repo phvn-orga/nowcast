@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 use std::os::fd::AsFd;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
@@ -53,6 +53,8 @@ pub struct Server<R, Su, D, I, Se> {
     pub discovery: Arc<D>,
     pub identity: Arc<I>,
     pub sessions: Arc<Se>,
+    /// When the service started, which `GET /v1/service` tells.
+    pub started_at: SystemTime,
     /// The compiled schemas of accepted types: [`Validators::default`].
     pub validators: Validators,
 }
@@ -213,7 +215,7 @@ where
             return Err(HttpError::session_required());
         }
         match route {
-            Route::Service => Ok(service()),
+            Route::Service => service(self.started_at),
             Route::Session => {
                 let DeclareSession { id } = read_json(body).await?;
                 if id.is_empty() {
@@ -450,14 +452,19 @@ async fn read_body(body: Incoming) -> Result<Bytes, HttpError> {
         .to_bytes())
 }
 
-/// The service's own `PATH`, the one bricks are looked up in: `null` when
-/// unset or not UTF-8.
-fn service() -> Response<Body> {
+/// What the service says of itself: the version of the binary running it,
+/// when it started, and its own `PATH`, the one bricks are looked up in
+/// (`null` when unset or not UTF-8).
+fn service(started_at: SystemTime) -> Result<Response<Body>, HttpError> {
+    let started_at = jiff::Timestamp::try_from(started_at)
+        .map_err(|e| HttpError::internal(format!("the start time is out of range: {e}")))?;
     let path = std::env::var("PATH").ok();
-    json(
-        StatusCode::OK,
-        serde_json::json!({ "path": path }).to_string(),
-    )
+    let body = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "started_at": started_at.to_string(),
+        "path": path,
+    });
+    Ok(json(StatusCode::OK, body.to_string()))
 }
 
 fn empty(status: StatusCode) -> Response<Body> {

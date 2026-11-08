@@ -4,7 +4,7 @@
 //! | Route | Success | Errors |
 //! |---|---|---|
 //! | `PUT /v1/session` | `204` | |
-//! | `GET /v1/service` | `200` `{"path": ...}` | |
+//! | `GET /v1/service` | `200` `{"version": ..., "started_at": ..., "path": ...}` | |
 //! | `POST /v1/subscriptions` | `201` | `400` `invalid_params`, `404` `unknown_brick` / `unknown_kind`, `422` `subscription_refused`, `503` `brick_unavailable` |
 //! | `DELETE /v1/subscriptions/{subscription}` | `204` | `404` `unknown_subscription` |
 //! | `GET /v1/flows/{flow}` | `200` last event, `204` none yet | `404` `unknown_flow` |

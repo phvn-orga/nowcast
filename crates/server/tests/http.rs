@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -43,6 +43,11 @@ impl<I: Identity> Drop for Harness<I> {
     }
 }
 
+/// 2026-11-08T16:41:00.5Z, when the harness's service says it started.
+fn started_at() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(1_794_156_060_500)
+}
+
 fn start_with<I: Identity>(identity: I, mode: ProbeMode) -> Harness<I> {
     let router = Arc::new(FakeRouter::new());
     let supervisor = Arc::new(FakeSupervisor::new(router.clone()));
@@ -63,6 +68,7 @@ fn start_with<I: Identity>(identity: I, mode: ProbeMode) -> Harness<I> {
         discovery: Arc::clone(&discovery),
         identity: Arc::clone(&identity),
         sessions: Arc::new(FakeSessions::new()),
+        started_at: started_at(),
         validators: Default::default(),
     };
     let task = tokio::spawn(server.serve(listener));
@@ -249,14 +255,21 @@ fn a_wrong_method_answers_405_with_allow() {
 }
 
 #[test]
-fn the_service_tells_its_path_without_a_session() {
+fn the_service_tells_its_version_start_and_path_without_a_session() {
     run(async {
         let harness = start(ProbeMode::Ready);
         let response = request(&harness, "GET", "/v1/service", "").await;
         assert_eq!(response.status, 200);
         assert_eq!(response.headers["content-type"], "application/json");
         let path = std::env::var("PATH").unwrap();
-        assert_eq!(response.json(), json!({ "path": path }));
+        assert_eq!(
+            response.json(),
+            json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "started_at": "2026-11-08T16:41:00.5Z",
+                "path": path,
+            })
+        );
     });
 }
 
@@ -726,6 +739,7 @@ fn an_anchor_dying_while_its_brick_resolves_keeps_no_subscription() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            started_at: SystemTime::now(),
             validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));
@@ -839,6 +853,7 @@ fn an_anchor_dying_while_its_stream_opens_gets_no_stream() {
             discovery,
             identity: Arc::new(FakeIdentity::new()),
             sessions,
+            started_at: SystemTime::now(),
             validators: Default::default(),
         };
         let task = tokio::spawn(server.serve(UnixListener::bind(&socket).unwrap()));

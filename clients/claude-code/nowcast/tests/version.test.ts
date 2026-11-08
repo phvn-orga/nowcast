@@ -1,5 +1,6 @@
 // The oldest service the mod accepts (`02-clients.md` on the design branch):
-// read from `nowcast --version` before each `watch`.
+// the running service's version, read from `GET /v1/service` before each
+// `watch`, or from `nowcast --version` for a service that does not tell it.
 
 import { expect, test } from 'claude-code/testing'
 import { OLDEST_SERVICE, isOlder, printedVersion } from '../hooks/version'
@@ -114,4 +115,57 @@ test('a session left while its version is read gets no `watch`', async ($, on) =
   await w.clock.settle()
 
   expect(w.children.map(c => c.session)).toEqual(['session-2'])
+})
+
+/** `GET /v1/service` as a service at `version` answers it. */
+function running(version: string) {
+  return { status: 200, text: JSON.stringify({ version, started_at: '2026-11-08T16:41:00Z', path: null }) }
+}
+
+const RUNNING_TOO_OLD = `the running nowcast service is 0.1.0-alpha.1, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and restart the service`
+
+test('a running service too old is refused even when the installed binary is newer, until it restarts', async ($, on) => {
+  const options: WorldOptions = { service: running('0.1.0-alpha.1'), version: '9.0.0' }
+  const w = world(on, options)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(w.requests).toEqual([])
+  expect(w.children).toEqual([])
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'stopped', error: RUNNING_TOO_OLD })
+
+  // Restarted on the installed binary: the next attempt declares the session.
+  options.service = running('9.0.0')
+  await w.clock.advance(1_000)
+  expect(w.requests.map(r => `${r.method} ${r.url}`)).toEqual(['PUT http://nowcast/v1/session'])
+  expect(w.children.length).toBe(1)
+})
+
+test('a running service recent enough is accepted whatever the installed binary', async ($, on) => {
+  const w = world(on, { service: running(OLDEST_SERVICE), version: '0.1.0-alpha.1' })
+  await $.session.start(START)
+  await w.clock.settle()
+  expect(w.children.length).toBe(1)
+})
+
+for (const [why, service] of [
+  ['out of reach', 'connection refused'],
+  ['refusing the route', { status: 404, text: '{"error":{"code":"not_found","message":"no such route"}}' }],
+  ['telling no readable version', running('not a version')],
+] as const) {
+  test(`a service ${why} falls back on the installed binary's version`, async ($, on) => {
+    const w = world(on, { service, version: '0.1.0-alpha.1' })
+    await $.session.start(START)
+    await w.clock.settle()
+    expect(w.stream()).toEqual({ session: 'session-1', status: 'stopped', error: TOO_OLD })
+  })
+}
+
+test("a service that does not answer falls back on the installed binary's version", async ($, on) => {
+  const w = world(on, { service: new Promise(() => {}), version: '0.1.0-alpha.1' })
+  await $.session.start(START)
+  await w.clock.settle()
+  expect(w.stream()?.status).not.toBe('stopped')
+  await w.clock.advance(5_000)
+  expect(w.stream()).toEqual({ session: 'session-1', status: 'stopped', error: TOO_OLD })
 })

@@ -1,5 +1,5 @@
 // A fake world beneath the mod: the session, the environment, a nowcast
-// service answering `PUT /v1/session`, and `nowcast watch` processes the test
+// service answering `GET /v1/service` and `PUT /v1/session`, and `nowcast watch` processes the test
 // writes to and ends.
 
 import type { HttpResponse, On, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
@@ -105,6 +105,13 @@ export type WorldOptions = {
   answer?: (request: Request) => Partial<HttpResponse> | string | Promise<Partial<HttpResponse> | string>
   /** Makes starting a process fail, as with a command not installed. */
   spawnFails?: boolean
+  /**
+   * The service's answer to `GET /v1/service`, kept out of `requests`; a
+   * string makes the call fail, a promise answers once settled. A service too
+   * old to tell its version when absent, so that the mod reads `nowcast
+   * --version`.
+   */
+  service?: Partial<HttpResponse> | string | Promise<Partial<HttpResponse> | string>
   /** What `nowcast --version` prints; the oldest version the mod accepts when absent. */
   version?: string
   /** What `nowcast --version` waits for before it answers; nothing when absent. */
@@ -142,6 +149,9 @@ export type World = {
 }
 
 export type Write = { key: string; id: string | undefined; value: unknown }
+
+/** What a service too old to tell its version answers to `GET /v1/service`. */
+const SERVICE = { status: 200, text: '{"path":null}' }
 
 export function world(on: On, options: WorldOptions = {}): World {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -191,8 +201,9 @@ export function world(on: On, options: WorldOptions = {}): World {
       body: e.init?.body,
       socketPath: e.init?.socketPath,
     }
-    requests.push(request)
-    const answer = (await options.answer?.(request)) ?? {}
+    const service = request.method === 'GET' && request.url === 'http://nowcast/v1/service'
+    if (!service) requests.push(request)
+    const answer = (service ? await options.service : await options.answer?.(request)) ?? (service ? SERVICE : {})
     if (typeof answer === 'string') return { deny: answer }
     const status = answer.status ?? 204
     return { value: { status, ok: status < 300, headers: {}, text: '', ...answer } }
