@@ -20,19 +20,25 @@ const DEFINITIVE = new Set(['unknown_brick', 'unknown_kind', 'invalid_params', '
 /** Delay before trying a refused subscription again, doubled up to the max. */
 const FIRST_RETRY_MS = 1_000
 const MAX_RETRY_MS = 60_000
+/** A subscription active this long and then lost is taken again at once. */
+const STABLE_MS = 60_000
 
 type Entry = {
   readonly id: string
   readonly wanted: Wanted
   /** What the state holds for it. */
   value: NowcastSubscription
-  /** Attempts refused in a row, for the delay before the next. */
+  /** Attempts refused or lost in a row, for the delay before the next. */
   refused: number
   /** Bumped by each attempt: a timer set before it no longer runs. */
   attempt: number
+  /** When it last turned active; null when not known, as after a restore. */
+  activeSince: number | null
 }
 
 const entries = new Map<string, Entry>()
+/** Service subscriptions to delete that the service did not hear about. */
+const pending = new Set<string>()
 /** The work on each id, one piece at a time. */
 const queues = new Map<string, Promise<unknown>>()
 
@@ -66,13 +72,13 @@ export function subscribeFor(
       value: { ...wanted, status: 'retrying', error: null, flow: null, service: null },
       refused: 0,
       attempt: 0,
+      activeSince: null,
     }
-    entries.set(id, entry)
+    // Kept only once the service answered: a request refused for good must
+    // never reach the state, through a `rewrite` or another id's `saveIds`.
     const refused = await attempt($, entry)
-    if (refused !== null) {
-      entries.delete(id)
-      return refused
-    }
+    if (refused !== null) return refused
+    entries.set(id, entry)
     await saveIds($)
     return answer(entry)
   })
@@ -92,10 +98,15 @@ export function unsubscribeFor($: $, owner: string, name: unknown): Promise<Nowc
 
 /**
  * The stream opened, after an outage or with a `watch` started again: the
- * service may have restarted and forgotten. What waits is tried now, and
- * what the service no longer serves is taken again.
+ * service may have restarted and forgotten. What waits is tried now, what
+ * the service no longer serves is taken again, and the deletes it missed
+ * are sent again.
  */
 export async function reconnected($: $): Promise<void> {
+  for (const service of pending) {
+    pending.delete(service)
+    void release($, service)
+  }
   const byFlow = new Map<string, Entry[]>()
   const waiting: Array<Promise<void>> = []
   for (const entry of entries.values()) {
@@ -128,11 +139,17 @@ export async function rewrite($: $): Promise<void> {
 export async function restore($: $): Promise<void> {
   const { value: ids } = await $.state.get(SUBSCRIBED)
   for (const id of ids ?? []) {
-    if (entries.has(id)) continue
     const { value } = await $.state.get({ ...SUBSCRIPTIONS, id })
-    if (value === undefined || value === null || entries.has(id)) continue
+    if (value === undefined || value === null) continue
+    const held = entries.get(id)
+    if (held !== undefined) {
+      // The service still serves the one replaced: not awaited, the start
+      // does not wait for the service.
+      if (value.service !== null && value.service !== held.value.service) void release($, value.service)
+      continue
+    }
     const wanted = { brick: value.brick, kind: value.kind, params: value.params }
-    entries.set(id, { id, wanted, value, refused: 0, attempt: 0 })
+    entries.set(id, { id, wanted, value, refused: 0, attempt: 0, activeSince: null })
   }
 }
 
@@ -144,20 +161,26 @@ async function attempt($: $, entry: Entry): Promise<NowcastFailure | null> {
   entry.attempt++
   const created = await createSubscription($, entry.wanted)
   if (created.ok) {
-    entry.refused = 0
-    await set($, entry, { status: 'active', error: null, flow: created.flow, service: created.subscription })
+    entry.activeSince = await $.clock.now()
+    // The flow first: a consumer reads it once its subscription is active.
     await answered($, created.flow, created.last)
+    await set($, entry, { status: 'active', error: null, flow: created.flow, service: created.subscription })
     return null
   }
   if (DEFINITIVE.has(created.code)) return created
   await set($, entry, { status: 'retrying', error: reason(created), service: null })
+  later($, entry)
+  return null
+}
+
+/** Tries `entry` again after the delay its refusals in a row call for. */
+function later($: $, entry: Entry): void {
   const delay = Math.min(FIRST_RETRY_MS * 2 ** entry.refused, MAX_RETRY_MS)
   entry.refused++
-  const made = entry.attempt
+  const made = ++entry.attempt
   $.clock.after(delay, async () => {
     if (entry.attempt === made) await retry($, entry)
   })
-  return null
 }
 
 /** Tries a waiting subscription again, unless it changed meanwhile. */
@@ -169,24 +192,46 @@ function retry($: $, entry: Entry): Promise<void> {
   })
 }
 
-/** Takes again the subscriptions to `flow` the service no longer serves. */
+/**
+ * Takes again the subscriptions to `flow` the service no longer serves: at
+ * once after a minute active, otherwise after the delay, doubled at each
+ * loss. A brick the service gave up on is not relaunched without end.
+ */
 async function check($: $, flow: string, held: Entry[]): Promise<void> {
   if (await flowKnown($, flow)) return
-  for (const entry of held) {
-    if (entries.get(entry.id) !== entry || entry.value.status !== 'active') continue
-    entry.refused = 0
-    entry.value = { ...entry.value, status: 'retrying', service: null }
-  }
-  await Promise.all(held.map(entry => retry($, entry)))
+  const now = await $.clock.now()
+  const lost = { code: 'lost', message: 'the service no longer serves it' }
+  await Promise.all(
+    held.map(entry =>
+      serial(entry.id, async () => {
+        if (entries.get(entry.id) !== entry || entry.value.status !== 'active') return
+        await set($, entry, { status: 'retrying', error: lost, service: null })
+        if (now - (entry.activeSince ?? now) < STABLE_MS) return later($, entry)
+        entry.refused = 0
+        const refused = await attempt($, entry)
+        if (refused !== null) await set($, entry, { status: 'failed', error: reason(refused), service: null })
+      }),
+    ),
+  )
 }
 
-/** Ends a subscription kept: nothing of it stays, here or in the service. */
-async function drop($: $, entry: Entry): Promise<NowcastDone | NowcastFailure> {
+/**
+ * Ends a subscription kept: nothing of it stays here, and the service is
+ * told, now or at a later reconnection.
+ */
+async function drop($: $, entry: Entry): Promise<NowcastDone> {
   entries.delete(entry.id)
   entry.attempt++
   await save($, entry.id, null)
   await saveIds($)
-  return entry.value.service === null ? { ok: true } : deleteSubscription($, entry.value.service)
+  if (entry.value.service !== null) await release($, entry.value.service)
+  return { ok: true }
+}
+
+/** Deletes a service subscription, kept to send again if it did not land. */
+async function release($: $, service: string): Promise<void> {
+  const deleted = await deleteSubscription($, service)
+  if (!deleted.ok) pending.add(service)
 }
 
 async function set($: $, entry: Entry, change: Partial<NowcastSubscription>): Promise<void> {

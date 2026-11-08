@@ -101,6 +101,36 @@ test('a quota reading goes out once, with the measure that brought it', async ($
   expect(sent[1]?.rate_limits).toBe(undefined)
 })
 
+test('a failed subscription the reloaded mod restores is asked once more, then measures stop', async ($, on) => {
+  const w = world(on, { answer: service(false) })
+  engine(on)
+  // Kept failed before the mod reloaded: the brick was removed.
+  const id = 'nowcast/session'
+  const failed = {
+    brick: 'claude-code',
+    kind: 'session',
+    params: { id: 'session-1' },
+    status: 'failed',
+    error: { code: 'unknown_brick', message: 'no brick' },
+    flow: FLOW,
+    service: null,
+  }
+  on('state.get', { plugin: 'nowcast', key: 'subscribed' }, () => ({ value: { value: [id], version: 1 } }))
+  on('state.get', { plugin: 'nowcast', key: 'subscriptions' }, (_, e) => ({
+    value: e.id === id ? { value: failed as never, version: 1 } : { value: undefined, version: 0 },
+  }))
+  await $.session.start(START)
+  await w.clock.settle()
+
+  for (let i = 0; i < 3; i++) {
+    await $.session.measure(MEASURE as never)
+    await w.clock.advance(500)
+    await w.clock.settle()
+  }
+  expect(w.requests.filter(r => r.url.endsWith('/v1/subscriptions')).length).toBe(1)
+  expect(inputs(w.requests)).toEqual([])
+})
+
 test('without the brick, nothing is sent and the subscription is not asked again', async ($, on) => {
   const w = world(on, { answer: service(false) })
   engine(on)

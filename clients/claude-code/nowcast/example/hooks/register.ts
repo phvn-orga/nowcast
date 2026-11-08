@@ -17,7 +17,7 @@ export const register: Register = on => {
   const subscription = { name: 'item', brick: 'probe', kind: 'item', params: { id: 'nowcast-example' } }
   // The subscription's member in the nowcast mod's state: this mod's name,
   // then the subscription's.
-  const id = 'nowcast-example/item'
+  const id = `nowcast-example/${subscription.name}`
   // The flow subscribed to, once the service accepted the subscription.
   let flow: string | undefined
 

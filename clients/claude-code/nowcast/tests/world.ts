@@ -102,7 +102,7 @@ export class Child {
 export type WorldOptions = {
   env?: Record<string, string>
   /** The service's answer to `PUT /v1/session`; a string makes the call fail. */
-  answer?: (request: Request) => Partial<HttpResponse> | string
+  answer?: (request: Request) => Partial<HttpResponse> | string | Promise<Partial<HttpResponse> | string>
   /** Makes starting a process fail, as with a command not installed. */
   spawnFails?: boolean
   /** What `nowcast --version` prints; the oldest version the mod accepts when absent. */
@@ -184,7 +184,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     writes.push({ key: e.key, id: undefined, value: e.value })
     return next(e)
   })
-  on('http.fetch', (_, e) => {
+  on('http.fetch', async (_, e) => {
     const request = {
       method: e.init?.method ?? 'GET',
       url: e.url,
@@ -192,7 +192,7 @@ export function world(on: On, options: WorldOptions = {}): World {
       socketPath: e.init?.socketPath,
     }
     requests.push(request)
-    const answer = options.answer?.(request) ?? {}
+    const answer = (await options.answer?.(request)) ?? {}
     if (typeof answer === 'string') return { deny: answer }
     const status = answer.status ?? 204
     return { value: { status, ok: status < 300, headers: {}, text: '', ...answer } }
