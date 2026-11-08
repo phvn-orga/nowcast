@@ -12,7 +12,8 @@ const WANTED = { brick: 'forge', kind: 'pr', params: { remote: 'git@github.com:o
 const PR = { name: 'pr', ...WANTED }
 const ID = 'caller/pr'
 
-type Route = (request: Request) => Partial<HttpResponse> | string | undefined
+type Answer = Partial<HttpResponse> | string
+type Route = (request: Request) => Answer | Promise<Answer> | undefined
 
 /** A service answering `routes` by `<method> <path>`, and `204` to the rest. */
 function service(routes: Record<string, Partial<HttpResponse> | string | Route>) {
@@ -167,6 +168,30 @@ for (const [status, code] of [
     expect(posts(w.requests).length).toBe(1)
   })
 }
+
+test('a request refused for good never reaches the state, whatever runs meanwhile', plugins, async ($, on) => {
+  let release: () => void = () => undefined
+  let arrived = false
+  const w = world(on, {
+    answer: service({
+      'POST /v1/subscriptions': request => {
+        if (!request.body?.includes('"kind":"nope"')) return subscribed('s-1')
+        arrived = true
+        // Answered once the other subscription is kept.
+        return new Promise<Answer>(resolve => (release = () => resolve(refused(404, 'unknown_kind'))))
+      },
+    }),
+  })
+
+  const nope = call($, 'subscribe', { ...PR, name: 'nope', kind: 'nope' })
+  while (!arrived) await w.clock.settle()
+  expect(await call($, 'subscribe', PR)).toMatchObject({ ok: true, status: 'active' })
+  release()
+  expect(await nope).toMatchObject({ ok: false, code: 'unknown_kind' })
+
+  expect(w.subscription('caller/nope')).toBeUndefined()
+  expect(w.writes.filter(x => x.key === 'subscribed').map(x => x.value)).toEqual([[ID]])
+})
 
 test('a subscription without a name fails, and nothing is sent', plugins, async ($, on) => {
   const w = world(on)
@@ -498,10 +523,11 @@ test('a subscription taken before the reloaded mod restores stays, and the other
   await $.session.start(START)
   await w.clock.settle()
 
-  // The fresh subscription is the one kept, and the other one is back.
+  // The fresh subscription is the one kept, the one it replaced is ended in
+  // the service, and the other one is back.
   expect(await call($, 'unsubscribe', { name: 'pr' })).toEqual({ ok: true })
   expect(svc.known()).toEqual([])
   await call($, 'unsubscribe', { name: 'pr' }, 'call-other')
   const deletes = w.requests.filter(r => r.method === 'DELETE').map(r => r.url.replace('http://nowcast', ''))
-  expect(deletes).toEqual(['/v1/subscriptions/s-1', '/v1/subscriptions/s-9'])
+  expect(deletes).toEqual(['/v1/subscriptions/s-0', '/v1/subscriptions/s-1', '/v1/subscriptions/s-9'])
 })

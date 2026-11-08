@@ -184,9 +184,11 @@ function schedule($: $, m: Measured): void {
  */
 async function subscribe($: $, m: Measured): Promise<boolean> {
   const answer = await subscribeFor($, OWNER, { name: NAME, brick: BRICK, kind: 'session', params: { id: m.id } })
-  if (!answer.ok) {
+  // A subscription kept but failed says why as well.
+  const code = answer.ok ? (answer.status === 'failed' ? answer.error?.code : undefined) : answer.code
+  if (!answer.ok || code !== undefined) {
     // Not enabled: nothing to send this session. Anything else may pass.
-    if (answer.code === 'unknown_brick') m.off = true
+    if (code === 'unknown_brick') m.off = true
     return false
   }
   // A later session's subscription replaces this one: it is not undone here.

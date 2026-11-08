@@ -67,12 +67,11 @@ export function subscribeFor(
       refused: 0,
       attempt: 0,
     }
-    entries.set(id, entry)
+    // Kept only once the service answered: a request refused for good must
+    // never reach the state, through a `rewrite` or another id's `saveIds`.
     const refused = await attempt($, entry)
-    if (refused !== null) {
-      entries.delete(id)
-      return refused
-    }
+    if (refused !== null) return refused
+    entries.set(id, entry)
     await saveIds($)
     return answer(entry)
   })
@@ -128,9 +127,15 @@ export async function rewrite($: $): Promise<void> {
 export async function restore($: $): Promise<void> {
   const { value: ids } = await $.state.get(SUBSCRIBED)
   for (const id of ids ?? []) {
-    if (entries.has(id)) continue
     const { value } = await $.state.get({ ...SUBSCRIPTIONS, id })
-    if (value === undefined || value === null || entries.has(id)) continue
+    if (value === undefined || value === null) continue
+    const held = entries.get(id)
+    if (held !== undefined) {
+      // The service still serves the one replaced: not awaited, the start
+      // does not wait for the service.
+      if (value.service !== null && value.service !== held.value.service) void deleteSubscription($, value.service)
+      continue
+    }
     const wanted = { brick: value.brick, kind: value.kind, params: value.params }
     entries.set(id, { id, wanted, value, refused: 0, attempt: 0 })
   }
@@ -145,8 +150,9 @@ async function attempt($: $, entry: Entry): Promise<NowcastFailure | null> {
   const created = await createSubscription($, entry.wanted)
   if (created.ok) {
     entry.refused = 0
-    await set($, entry, { status: 'active', error: null, flow: created.flow, service: created.subscription })
+    // The flow first: a consumer reads it once its subscription is active.
     await answered($, created.flow, created.last)
+    await set($, entry, { status: 'active', error: null, flow: created.flow, service: created.subscription })
     return null
   }
   if (DEFINITIVE.has(created.code)) return created
