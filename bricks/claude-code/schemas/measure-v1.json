@@ -16,7 +16,7 @@
     },
     "tokens": {
       "type": "object",
-      "description": "Tokens spent since the session began, main thread and subagents, by category.",
+      "description": "Tokens spent since the session began, by category: the main thread, its subagents, the mods' forks and completions, and the compactions' summaries.",
       "properties": {
         "input": { "type": "integer" },
         "output": { "type": "integer" },
@@ -24,7 +24,7 @@
         "cache_read": { "type": "integer" }
       }
     },
-    "last_request_at": { "type": "string", "description": "The main thread's last request, RFC 3339." },
+    "last_request_at": { "type": "string", "description": "The last request that read or wrote the main thread's prompt cache, RFC 3339." },
     "cache_ttl": { "enum": ["5m", "1h", null], "description": "The lifetime of the main thread's prompt cache, when known." },
     "rate_limits": {
       "type": "array",
