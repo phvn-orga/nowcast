@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter, Signal};
 use nowcast_traits::{
-    AnchorId, BrickState, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    AnchorId, BrickState, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved,
+    Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
@@ -521,7 +522,9 @@ pub async fn the_supervisor_tells_its_bricks<S: SupervisorSubject>() {
     assert_eq!(world.supervisor.bricks(), vec![]);
 
     let pending = world.resolve("a");
-    let mut brick = timeout(LONG, world.launcher.next()).await.expect("a launch");
+    let mut brick = timeout(LONG, world.launcher.next())
+        .await
+        .expect("a launch");
     assert_eq!(world.supervisor.bricks(), summary(BrickState::Starting, 0));
     recv(&mut brick).await;
     brick.to_service.send(BrickMessage::Ready).unwrap();

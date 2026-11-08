@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use nowcast_traits::{AnchorId, FLOW_HISTORY, FlowSummary, History, Router, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{
+    AnchorId, FLOW_HISTORY, FlowSummary, History, Router, UnknownFlow, UnknownSubscription,
+};
 use nowcast_types::{BrickName, Event, EventId, FlowId, QualifiedFlowId, StreamEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
