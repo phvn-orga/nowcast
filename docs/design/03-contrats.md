@@ -190,7 +190,8 @@ l'utilisateur du service (droits `0600`, `00-cadrage.md`).
 ```
 
 - `service` est ce que rend `GET /v1/service`.
-- `bricks` liste les briques activées (section 2), par nom. `state` dit où en est
+- `bricks` liste les briques activées (section 2), et celles qui tournent encore
+  après avoir été désactivées, par nom. `state` dit où en est
   chacune dans son cycle de vie (section 4) : `stopped` (pas de processus),
   `starting` (lancée, en attente de `ready`), `running` (prête, délai de grâce
   compris), `stopping` (en cours d'arrêt), `waiting` (plantée, en attente d'une

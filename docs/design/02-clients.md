@@ -51,15 +51,20 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   (ce qui tourne, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast status` dit ce qui tourne, et à quelle version.** Il affiche, lisible
-  par défaut et en JSON sous `--json`, l'état que rend `GET /v1/status`
-  (`03-contrats.md` section 3) : la version du service en marche à côté de la
-  sienne, celle du binaire installé, signalées quand elles diffèrent ; depuis quand
-  le service tourne ; les briques activées et celles lancées ; les sessions
-  déclarées et leurs abonnements ; les flux actifs. Il ne réveille pas un service
-  arrêté : quand systemd tient le socket (`nowcast.socket` actif) sans que
-  `nowcast.service` tourne, s'y connecter le démarrerait, et status le dit arrêté
-  sans se connecter. Sans systemd, ou sans unité socket active, il se connecte
-  directement, et un socket sans réponse veut dire arrêté.
+  par défaut, l'état que rend `GET /v1/status` (`03-contrats.md` section 3) : la
+  version du service en marche à côté de la sienne, celle du binaire installé,
+  signalées quand elles diffèrent ; depuis quand le service tourne ; les briques
+  activées et celles lancées ; les sessions déclarées et leurs abonnements ; les
+  flux actifs. Sous `--json`, il écrit
+  `{"installed": "<sa version>", "running": <la réponse de GET /v1/status>}`,
+  `running` à `null` pour un service arrêté. Arrêté est un état, pas une erreur :
+  status sort en 0.
+- **`nowcast status` ne réveille pas un service arrêté.** Quand systemd tient le
+  socket (`nowcast.socket` actif) sans que `nowcast.service` tourne, s'y connecter
+  le démarrerait : status le dit arrêté sans se connecter. Sans systemd, sans unité
+  socket active, ou avec un socket donné explicitement (`--socket`,
+  `NOWCAST_SOCKET`, qui n'est pas celui de systemd), il se connecte directement, et
+  un socket où rien n'écoute veut dire arrêté.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
   après cet identifiant : chaque événement gardé depuis, plutôt que toutes les
   dernières valeurs.
