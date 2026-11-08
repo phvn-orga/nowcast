@@ -98,6 +98,13 @@ déclaration et schémas compris. Elles s'activent par le même lien que les aut
   fichier. Sa commande est `["nowcast", "brick", "<nom>"]` (section 1).
 - `nowcast bricks enable <chemin>` active n'importe quel fichier de déclaration : il le
   valide, puis pose le lien sous le `name` qu'il déclare.
+- Quand la commande commence par un nom de programme sans `/` (autre que `nowcast`),
+  `enable` le cherche dans le `PATH` où le service le cherchera : celui que la
+  déclaration fixe dans `[run] env`, sinon celui du service, qu'il lui demande
+  (`GET /v1/service`, section 3). Programme introuvable ou non exécutable : il refuse,
+  en nommant le programme et le `PATH` parcouru, et `--force` active quand même. Si le
+  service ne peut pas répondre (injoignable, trop ancien pour cette route), il active
+  sans vérifier et le signale.
 - `nowcast bricks disable <nom>` retire le lien, et rien d'autre.
 - Au démarrage, avant de lire le répertoire de déclarations, le service réécrit les
   fichiers de `$XDG_DATA_HOME/nowcast/bricks/` qui diffèrent de sa copie embarquée.
@@ -121,12 +128,25 @@ contenir `/`).
 `PUT /v1/session` avec `{"id": "<identifiant de session>"}` répond `204`.
 
 C'est le premier appel obligatoire pour un processus d'ancrage, répété à chaque
-changement de session (`/clear`, reprise). Tout autre appel avant lui répond `428`
-avec le code `session_required`.
+changement de session (`/clear`, reprise). Tout autre appel avant lui, sauf
+`GET /v1/service`, répond `428` avec le code `session_required`.
 
 Le service oublie les sessions à chaque arrêt, l'arrêt à vide compris (section 4). Un
 `428` reçu en cours de session signifie donc que le service a été relancé : le client
 déclare à nouveau sa session, puis renvoie sa requête.
+
+### Service
+
+`GET /v1/service` répond `200` avec ce que le service dit de lui-même, sans session
+déclarée :
+
+```json
+{ "path": "/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin" }
+```
+
+`path` est le `PATH` du service, celui où une brique sans `PATH` propre trouve son
+programme (section 1), ou `null` s'il n'en a pas. D'autres champs pourront s'y
+ajouter.
 
 ### Abonnements
 
@@ -145,7 +165,9 @@ répond `201` :
 - Le service valide `params` contre le JSON Schema déclaré pour cette sorte
   d'abonnement : `400` `invalid_params` sinon. `404` `unknown_brick` ou
   `unknown_kind` si la brique ou la sorte n'existe pas.
-- `503` `brick_unavailable` si la brique ne répond pas `ready` à temps (section 4).
+- `503` `brick_unavailable` si la brique ne peut pas être lancée ou ne répond pas
+  `ready` à temps (section 4). Quand le lancement a échoué, le `message` en donne la
+  cause : `"brick lost cannot be launched: program \"node\" not found in PATH …"`.
 - `422` `subscription_refused` si la brique répond `error` au `subscribe` (section 4).
   Le `message` reprend le code et le message de la brique : `"no_such_repo: …"`.
 - `last` porte la dernière valeur du flux (un événement, voir plus bas), ou `null`.
@@ -324,7 +346,9 @@ service → {"v":1,"t":"ack","req":7}
 
 1. **Lancement** à la première souscription : le service envoie `hello` et attend
    `ready` dans un délai de 5 s. Sans réponse, la brique est arrêtée et
-   la souscription échoue (`503` `brick_unavailable` côté client). Une brique prête
+   la souscription échoue (`503` `brick_unavailable` côté client). Un processus qui ne
+   démarre pas (programme introuvable, non exécutable) la fait échouer de même, avec
+   la cause dans le message. Une brique prête
    répond ensuite à chaque `subscribe` en 10 s au plus, sinon la souscription échoue
    de la même façon.
 2. **Arrêt** quand plus aucun flux n'a d'abonné, après un délai de grâce
