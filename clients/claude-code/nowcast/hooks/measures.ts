@@ -1,7 +1,8 @@
 // What this session measures, sent to the claude-code brick (its
 // `05-brique-claude-code.md` on the design branch): the session subscribes to
 // its own flow there and sends a `claude-code.measure/v1` input after each
-// request to the model and each `session.measure`, grouped when close.
+// request to the model (the session's, a mod's fork or completion, a
+// compaction's summary) and each `session.measure`, grouped when close.
 //
 // Nothing is sent until the session measures something, and nothing at all
 // when the brick is not enabled (`unknown_brick`). The subscription is this
@@ -12,6 +13,11 @@
 // session, and the lifetime of the main thread's prompt cache, read from the
 // last response that wrote to it. An unreadable transcript only leaves them
 // out: the count starts at the load, and the brick assumes one hour.
+//
+// The mods' forks and completions and the compactions' summaries are not in
+// the transcripts: they are also counted apart, from this mod's load
+// (`side_tokens`, `side_since`). The brick keeps the counts of the earlier
+// loads and adds them, so a reload loses none.
 
 import type { EngineInterface, On } from 'claude-code'
 import { input } from './client'
@@ -49,6 +55,10 @@ type Measured = {
   /** The brick is not enabled: nothing is sent for this session. */
   off: boolean
   tokens: Tokens
+  /** The part of `tokens` the transcripts do not hold, since `since`. */
+  side: Tokens
+  /** When this mod began measuring the session. */
+  since: string
   /** The transcripts' count, which requests wait for: see `seed`. */
   seeding: Promise<void>
   context?: unknown
@@ -59,6 +69,12 @@ type Measured = {
   rateLimits?: Array<{ kind: string; percentUsed: number; resetsAt?: string }>
   cost?: number
   effort?: string | number
+  /**
+   * The effort the main thread's last request carried, none included (a
+   * model without effort); absent until one is seen. A fork at it is the
+   * same request.
+   */
+  stepEffort?: { value: string | number | undefined }
   lastRequestAt?: string
   cacheTtl?: '5m' | '1h'
   scheduled: boolean
@@ -93,22 +109,52 @@ export function registerMeasures(on: On): void {
 
   // Every request to the model, the subagents' too: its usage adds to the
   // session's tokens. The main thread's also says its effort, and refreshes
-  // its cache.
+  // its cache when a response read or wrote it.
   on('turn.step', async function* ($, e, next) {
-    let m: Measured | undefined
-    await quietly($, async () => {
-      m = await measured($)
+    const request = await started($)
+    if (request !== undefined) {
       if (e.agentId === undefined) {
-        if (e.effort !== undefined) m.effort = e.effort
-        m.lastRequestAt = new Date(await $.clock.now()).toISOString()
+        if (e.effort !== undefined) request.m.effort = e.effort
+        request.m.stepEffort = { value: e.effort }
       }
-      await m.seeding
-    })
-    const result = yield* next(e)
-    if (m !== undefined) {
-      add(m.tokens, result.usage)
-      schedule($, m)
+      await request.m.seeding.catch(() => undefined)
     }
+    const result = yield* next(e)
+    if (request !== undefined) count($, request, result.usage, { refreshes: e.agentId === undefined, side: false })
+    return result
+  })
+
+  // A mod's fork over the main thread's transcript. At the main thread's
+  // effort it opens as the main thread's last request did, so a response read
+  // or wrote the main thread's cache. At another effort it may have written
+  // an entry of its own instead, which nothing in its result tells apart: it
+  // leaves the cache's time as it was.
+  on('model.fork', async ($, e, next) => {
+    const request = await started($)
+    const answer = await next(e)
+    const result = answer.value
+    if (request !== undefined && result !== undefined && 'usage' in result) {
+      const main = request.m.stepEffort
+      const atMainEffort = e.effort === undefined || (main !== undefined && result.effort === main.value)
+      count($, request, result.usage, { refreshes: atMainEffort, side: true })
+    }
+    return answer
+  })
+
+  // A mod's own completion, and the engine's summary of a compaction: both
+  // spend the session's tokens without touching its cache.
+  on('model.complete', async ($, e, next) => {
+    const request = await started($)
+    const answer = await next(e)
+    if (request !== undefined && answer.value !== undefined) {
+      count($, request, answer.value.usage, { refreshes: false, side: true })
+    }
+    return answer
+  })
+  on('session.compact', async ($, e, next) => {
+    const request = await started($)
+    const result = await next(e)
+    if (request !== undefined && 'usage' in result) count($, request, result.usage, { refreshes: false, side: true })
     return result
   })
 
@@ -137,17 +183,29 @@ export function registerMeasures(on: On): void {
 async function measured($: $): Promise<Measured> {
   const id = await $.session.id()
   if (current?.id === id) return current
-  const m: Measured = { id, off: false, tokens: zero(), seeding: Promise.resolve(), scheduled: false }
+  const since = new Date(await $.clock.now()).toISOString()
+  // Another request may have started it meanwhile.
+  if (current?.id === id) return current
+  const m: Measured = {
+    id,
+    off: false,
+    tokens: zero(),
+    side: zero(),
+    since,
+    seeding: Promise.resolve(),
+    scheduled: false,
+  }
   current = m
   m.seeding = seed($, m)
   return m
 }
 
 /**
- * Adds what the transcripts count to the tokens. Requests wait for it
- * (`turn.step`), so that a response is never both read there and counted
- * by this mod; a transcript that takes longer than `SEED_MS` to read is
- * left out.
+ * Adds what the transcripts count to the tokens. The session's requests wait
+ * for it (`turn.step`), so that a response is never both read there and
+ * counted by this mod; the mods' forks and completions and the compactions'
+ * summaries are never written there, and do not wait. A transcript that
+ * takes longer than `SEED_MS` to read is left out.
  */
 async function seed($: $, m: Measured): Promise<void> {
   const found = await Promise.race([
@@ -156,6 +214,38 @@ async function seed($: $, m: Measured): Promise<void> {
   ])
   if (found === undefined) return
   for (const key of Object.keys(found) as Array<keyof Tokens>) m.tokens[key] += found[key]
+  schedule($, m)
+}
+
+/** A request to the model about to go: the session's measures, and when. */
+type Started = { m: Measured; at: string }
+
+/** The session's measures before a request; undefined when the session cannot be measured. */
+async function started($: $): Promise<Started | undefined> {
+  let request: Started | undefined
+  await quietly($, async () => {
+    const m = await measured($)
+    request = { m, at: new Date(await $.clock.now()).toISOString() }
+  })
+  return request
+}
+
+/**
+ * Adds a request's usage to the session's tokens, and to `side` when the
+ * transcripts do not hold it. One that may refresh the main thread's cache
+ * moves its time when the response read or wrote a cache: a request that
+ * failed refreshed nothing. Requests overlap, so the time only moves forward.
+ */
+function count(
+  $: $,
+  { m, at }: Started,
+  usage: Usage | null | undefined,
+  { refreshes, side }: { refreshes: boolean; side: boolean },
+): void {
+  add(m.tokens, usage)
+  if (side) add(m.side, usage)
+  const cached = (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) > 0
+  if (refreshes && cached && (m.lastRequestAt === undefined || at > m.lastRequestAt)) m.lastRequestAt = at
   schedule($, m)
 }
 
@@ -213,6 +303,8 @@ async function detail($: $, m: Measured): Promise<Record<string, unknown>> {
     root: await $.session.root(),
     model: await $.session.model(),
     tokens: m.tokens,
+    side_tokens: m.side,
+    side_since: m.since,
   }
   if (m.context !== undefined) out.context = m.context
   if (m.effort !== undefined) out.effort = m.effort

@@ -2,9 +2,9 @@
 // flow (the brick's `claude-code.measure/v1` input).
 
 import type { HttpResponse, On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { type Engine, type Plugin, expect, test } from 'claude-code/testing'
 import { lastTtl, sumUsage } from '../hooks/measures'
-import { type Request, START, world } from './world'
+import { COMPOSER, type Request, START, type World, world } from './world'
 
 const FLOW = 'claude-code/session/session-1'
 const INPUT = `/v1/flows/${encodeURIComponent(FLOW)}/input`
@@ -12,8 +12,18 @@ const INPUT = `/v1/flows/${encodeURIComponent(FLOW)}/input`
 const assistant = (id: string, usage: Record<string, unknown>) =>
   JSON.stringify({ type: 'assistant', message: { id, usage } })
 
-/** The engine's answers the measures read, beneath the mod. */
-function engine(on: On) {
+const USAGE = { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 30, cache_read_input_tokens: 40 }
+/** What a failed call reports: nothing counted. */
+const ZERO = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+/** `USAGE` counted `n` times, as the measures send it. */
+const times = (n: number) => ({ input: 10 * n, output: 20 * n, cache_creation: 30 * n, cache_read: 40 * n })
+
+/**
+ * The engine's answers the measures read, beneath the mod. Each request
+ * answers `usage`; null makes the main thread's fail with no response.
+ * `withEffort` false is a model that takes no effort.
+ */
+function engine(on: On, usage: typeof USAGE | null = USAGE, withEffort = true) {
   on('session.root', () => ({ value: '/project' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
@@ -23,11 +33,61 @@ function engine(on: On) {
       index: e.index,
       answer: '',
       toolUses: [],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 30, cache_read_input_tokens: 40 },
+      stopReason: usage === null ? null : 'end_turn',
+      usage,
     } as never
   })
+  // A fork runs at the effort it names, else at the session's; a model that
+  // takes none is sent none.
+  on('model.fork', (_, e) => ({
+    value:
+      usage === null
+        ? ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: ZERO } as never)
+        : { isAnswered: true, text: '', usage, effort: withEffort ? (e.effort ?? 'high') : undefined },
+  }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: '', usage: USAGE } }))
+  on('session.compact', (_, e) => ({ messages: e.messages, usage: USAGE }))
 }
+
+/** One request of the main thread, at `effort`: null on a model that takes none. */
+async function step($: Engine, effort: 'high' | null = 'high') {
+  for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'm', effort: effort ?? undefined } as never)) {
+    // The step's pieces: none here.
+  }
+}
+
+/**
+ * Another mod, calling the model as a mod does: its `fork` and `complete`
+ * commands take the request as their arguments.
+ */
+const caller: Plugin = {
+  name: 'model-caller',
+  register: on => {
+    on('command.run', { command: 'fork' }, async ($, e) => {
+      await $.model.fork(JSON.parse(e.args) as never)
+      return { text: '' }
+    })
+    on('command.run', { command: 'complete' }, async ($, e) => {
+      await $.model.complete(JSON.parse(e.args) as never)
+      return { text: '' }
+    })
+  },
+}
+const plugins = { plugins: [caller] }
+
+/** The `caller` mod calls `$.model.<command>(request)`. */
+async function model($: Engine, command: 'fork' | 'complete', request: unknown) {
+  await $.command.run({ command, args: JSON.stringify(request), ...COMPOSER })
+}
+
+/** The measures sent last, once the grouping delay passed. */
+async function sent(w: World) {
+  await w.clock.advance(500)
+  await w.clock.settle()
+  return inputs(w.requests).at(-1)
+}
+
+const at = (ms: number) => new Date(ms).toISOString()
 
 /** A service where the brick is enabled, or not. */
 function service(enabled: boolean) {
@@ -73,6 +133,8 @@ test('a measure subscribes the session to its flow, then sends what it measured'
       root: '/project',
       model: 'claude-opus-5-5',
       tokens: { input: 10, output: 20, cache_creation: 30, cache_read: 40 },
+      side_tokens: times(0),
+      side_since: new Date(1_000_000).toISOString(),
       context: MEASURE.context,
       effort: 'high',
       last_request_at: new Date(1_000_000).toISOString(),
@@ -80,6 +142,104 @@ test('a measure subscribes the session to its flow, then sends what it measured'
       rate_limits: [{ name: 'five_hour', percent: 23.5, resets_at: '2026-11-07T18:00:00Z' }],
     },
   ])
+})
+
+test("a mod's fork counts in the tokens, and refreshes the main thread's cache", plugins, async ($, on) => {
+  const w = world(on, { answer: service(true) })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+  await step($)
+
+  await w.clock.advance(60_000)
+  await model($, 'fork', { prompt: 'Keep warm.' })
+  const measures = await sent(w)
+  expect(measures?.tokens).toEqual(times(2))
+  // The transcripts do not hold the fork: it counts apart as well.
+  expect(measures?.side_tokens).toEqual(times(1))
+  expect(measures?.last_request_at).toBe(at(1_060_000))
+})
+
+// Each move of the clock takes about a second.
+test("a fork at another effort than the main thread's leaves the cache's time", { ...plugins, timeoutMs: 10_000 }, async ($, on) => {
+  const w = world(on, { answer: service(true) })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+  await step($)
+
+  // It may have written a cache entry of its own.
+  await w.clock.advance(60_000)
+  await model($, 'fork', { prompt: 'Shorter.', effort: 'low' })
+  const measures = await sent(w)
+  expect(measures?.tokens).toEqual(times(2))
+  expect(measures?.last_request_at).toBe(at(1_000_000))
+
+  // Named, the main thread's own effort makes the same request.
+  await model($, 'fork', { prompt: 'Again.', effort: 'high' })
+  expect((await sent(w))?.last_request_at).toBe(at(1_060_500))
+})
+
+test("a request that failed leaves the cache's time as it was", plugins, async ($, on) => {
+  const w = world(on, { answer: service(true) })
+  engine(on, null)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  await step($)
+  await model($, 'fork', { prompt: 'Keep warm.' })
+  const measures = await sent(w)
+  expect(measures?.tokens).toEqual(times(0))
+  expect(measures?.last_request_at).toBe(undefined)
+})
+
+test(
+  'on a model that takes no effort, a fork naming one is the main thread\'s request',
+  { ...plugins, timeoutMs: 10_000 },
+  async ($, on) => {
+    const w = world(on, { answer: service(true) })
+    engine(on, USAGE, false)
+    await $.session.start(START)
+    await w.clock.settle()
+    // At `high`, then on a model without effort (`/model`).
+    await step($, 'high')
+    await step($, null)
+
+    await w.clock.advance(60_000)
+    await model($, 'fork', { prompt: 'Shorter.', effort: 'high' })
+    expect((await sent(w))?.last_request_at).toBe(at(1_060_000))
+  },
+)
+
+test("a mod's fork does not wait for the transcripts' count", plugins, async ($, on) => {
+  const w = world(on, { answer: service(true), env: { XDG_RUNTIME_DIR: '/run/user/1000', HOME: '/home/u' } })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  // The transcripts are still being read: the fork goes on all the same.
+  await model($, 'fork', { prompt: 'Keep warm.' })
+  await w.clock.settle()
+  const cat = w.children.find(c => c.argv[0] === 'sh')
+  cat?.stdout(`${assistant('a', { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 })}\n`)
+  cat?.exit(0)
+  expect((await sent(w))?.tokens).toEqual({ input: 11, output: 22, cache_creation: 33, cache_read: 44 })
+})
+
+test("a mod's completion and a compaction's summary count in the tokens, and leave the cache's time", plugins, async ($, on) => {
+  const w = world(on, { answer: service(true) })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+  await step($)
+
+  await w.clock.advance(60_000)
+  await model($, 'complete', { model: 'haiku', prompt: 'One word.' })
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Hi.', toolUses: [] }] } as never)
+  const measures = await sent(w)
+  expect(measures?.tokens).toEqual(times(3))
+  expect(measures?.side_tokens).toEqual(times(2))
+  expect(measures?.last_request_at).toBe(at(1_000_000))
 })
 
 test('a quota reading goes out once, with the measure that brought it', async ($, on) => {
