@@ -152,6 +152,9 @@ struct Brick {
     /// Crashes in a row, the one being handled included.
     crashes: u32,
     ready_at: Option<Instant>,
+    /// Why the last launch failed, until the next one: what subscriptions
+    /// failing meanwhile tell the client.
+    launch_error: Option<String>,
 }
 
 /// Every brick the supervisor looks after.
@@ -226,7 +229,7 @@ impl State {
     ) -> oneshot::Receiver<Result<Resolved, ResolveError>> {
         let (reply, answer) = oneshot::channel();
         if self.closing {
-            let unavailable = BrickUnavailable(brick.clone());
+            let unavailable = BrickUnavailable::new(brick.clone());
             let _ = reply.send(Err(ResolveError::Unavailable(unavailable)));
             return answer;
         }
@@ -263,6 +266,23 @@ impl State {
     /// The brick's output closed: its process ended, or never started.
     pub(crate) fn exited(&mut self, brick: &BrickName, generation: u64, router: &dyn Router) {
         self.with(brick, router, |b, ctx| b.exited(generation, ctx));
+    }
+
+    /// The brick's process could not be started, for `error`: an exit whose
+    /// cause the subscriptions it fails carry.
+    pub(crate) fn launch_failed(
+        &mut self,
+        brick: &BrickName,
+        generation: u64,
+        error: String,
+        router: &dyn Router,
+    ) {
+        self.with(brick, router, |b, ctx| {
+            if generation == b.generation {
+                b.launch_error = Some(error);
+            }
+            b.exited(generation, ctx);
+        });
     }
 
     pub(crate) fn message(
@@ -342,9 +362,7 @@ impl State {
             .ok_or_else(|| InputError::UnknownFlow(UnknownFlow(flow.clone())))?;
         if !brick.is_ready() {
             // Unlike a refresh, an input carries data the brick would lose.
-            return Err(InputError::Unavailable(BrickUnavailable(
-                brick.name.clone(),
-            )));
+            return Err(InputError::Unavailable(brick.why_unavailable()));
         }
         brick.send(ServiceMessage::Input {
             flow: flow.flow().clone(),
@@ -376,6 +394,7 @@ impl Brick {
             requests: HashMap::new(),
             crashes: 0,
             ready_at: None,
+            launch_error: None,
         }
     }
 
@@ -384,7 +403,14 @@ impl Brick {
     }
 
     fn unavailable(&self) -> ResolveError {
-        ResolveError::Unavailable(BrickUnavailable(self.name.clone()))
+        ResolveError::Unavailable(self.why_unavailable())
+    }
+
+    fn why_unavailable(&self) -> BrickUnavailable {
+        BrickUnavailable {
+            brick: self.name.clone(),
+            cause: self.launch_error.clone(),
+        }
     }
 
     /// Whether the process is ready and knows the live flows.
@@ -433,6 +459,7 @@ impl Brick {
     }
 
     fn launch(&mut self, ctx: &mut Ctx<'_>) {
+        self.launch_error = None;
         self.generation = ctx.stamp();
         self.enter(Phase::Starting, ctx);
         ctx.effects.push(Effect::Launch {

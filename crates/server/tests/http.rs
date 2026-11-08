@@ -249,6 +249,18 @@ fn a_wrong_method_answers_405_with_allow() {
 }
 
 #[test]
+fn the_service_tells_its_path_without_a_session() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        let response = request(&harness, "GET", "/v1/service", "").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers["content-type"], "application/json");
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(response.json(), json!({ "path": path }));
+    });
+}
+
+#[test]
 fn a_malformed_session_answers_400_invalid_request() {
     run(async {
         let harness = start(ProbeMode::Ready);

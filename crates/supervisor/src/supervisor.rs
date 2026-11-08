@@ -106,7 +106,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
             let resolved = (&mut answer.reply).await;
             answer.taken = true;
             // A dropped reply means the supervisor itself went away.
-            resolved.unwrap_or(Err(ResolveError::Unavailable(BrickUnavailable(brick))))
+            resolved.unwrap_or(Err(ResolveError::Unavailable(BrickUnavailable::new(brick))))
         }
     }
 
@@ -230,7 +230,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Inner<D, L, R> {
             }
             Err(e) => {
                 warn!(brick = %brick, "cannot launch the brick: {e}");
-                state.exited(&brick, generation, router);
+                state.launch_failed(&brick, generation, e.to_string(), router);
             }
         }
     }

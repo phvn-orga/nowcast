@@ -68,7 +68,7 @@ fn qualified(id: &str) -> QualifiedFlowId {
 }
 
 fn unavailable() -> ResolveError {
-    ResolveError::Unavailable(BrickUnavailable(probe::name()))
+    ResolveError::Unavailable(BrickUnavailable::new(probe::name()))
 }
 
 impl World {

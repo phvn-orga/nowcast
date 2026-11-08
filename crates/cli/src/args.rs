@@ -117,7 +117,7 @@ pub enum Command {
     ///
     /// Acts on the bricks directory the service follows,
     /// $XDG_CONFIG_HOME/nowcast/bricks/, where a link <name>.toml activates a
-    /// brick. Makes no call to the service.
+    /// brick.
     Bricks {
         #[command(subcommand)]
         action: BricksAction,
@@ -152,9 +152,18 @@ pub enum BricksAction {
     /// A native brick's declaration and schemas are written under
     /// $XDG_DATA_HOME/nowcast/bricks/<name>/ first; the service keeps them in
     /// step with its own version.
+    ///
+    /// A brick whose program is a bare name (node, python3) is refused when
+    /// that program is missing from the PATH it will be looked up in: the one
+    /// its declaration sets, otherwise the service's, which enable asks the
+    /// service for. When the service cannot tell, the brick is enabled
+    /// unchecked.
     Enable {
         /// A native brick's name, or the path of a declaration file
         brick: String,
+        /// Enable the brick without looking for its program
+        #[arg(long)]
+        force: bool,
     },
     /// Disable a brick, by its name
     Disable {

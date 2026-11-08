@@ -87,7 +87,8 @@ impl BrickLauncher for ProcessLauncher {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn()
+            .map_err(|e| why_not_started(e, program, brick))?;
         let piped = "the standard streams are piped";
         let stdin = child.stdin.take().expect(piped);
         let stdout = child.stdout.take().expect(piped);
@@ -120,6 +121,33 @@ impl BrickLauncher for ProcessLauncher {
             process: Box::new(Signals(signals)),
         })
     }
+}
+
+/// Says why `program` did not start, in terms its declaration's author can
+/// act on. A bare name is looked up in the `PATH` the brick's environment
+/// sets, otherwise the service's: the one the message names.
+fn why_not_started(e: io::Error, program: &str, brick: &BrickDeclaration) -> io::Error {
+    let bare = !program.contains('/') && program != SELF;
+    // A missing working directory fails the same way as a missing program.
+    let message = if !brick.dir.is_dir() {
+        format!("cannot run in {}: {e}", brick.dir.display())
+    } else {
+        match e.kind() {
+            io::ErrorKind::NotFound if bare => {
+                let path = match brick.env.get("PATH") {
+                    Some(path) => path.clone(),
+                    None => std::env::var_os("PATH")
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                };
+                format!("program {program:?} not found in PATH {path}")
+            }
+            io::ErrorKind::NotFound => format!("program {program:?} not found"),
+            io::ErrorKind::PermissionDenied => format!("program {program:?} is not executable"),
+            _ => format!("cannot run program {program:?}: {e}"),
+        }
+    };
+    io::Error::new(e.kind(), message)
 }
 
 /// Writes the service's messages until the supervisor drops its sender,

@@ -63,6 +63,20 @@ impl Client {
         Ok(Session { client: self })
     }
 
+    /// `GET /v1/service`: the `PATH` the service runs with, `None` when it
+    /// has none. Needs no session.
+    pub async fn service_path(&self) -> Result<Option<String>, CliError> {
+        let reply = self.call(Method::GET, "/v1/service", None).await?;
+        let body = reply.expect(StatusCode::OK)?.json()?;
+        match body.get("path") {
+            Some(Value::String(path)) => Ok(Some(path.clone())),
+            Some(Value::Null) => Ok(None),
+            _ => Err(CliError::Protocol(format!(
+                "a service description without its path: {body}"
+            ))),
+        }
+    }
+
     async fn send(
         &self,
         method: Method,

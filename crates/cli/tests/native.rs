@@ -1,11 +1,13 @@
 //! The native bricks the binary carries: `nowcast brick <name>` against the
-//! brick side of the protocol, and `nowcast bricks enable|disable`.
+//! brick side of the protocol, and `nowcast bricks enable|disable`, which
+//! looks a brick's program up in the service's `PATH`.
 
 mod common;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use common::{bare, run};
+use common::{Anchoring, Fake, bare, nowcast, run, stderr};
 use nowcast_conformance::brick::BrickSubject;
 use nowcast_types::BrickName;
 
@@ -89,6 +91,90 @@ async fn an_unknown_native_brick_exits_2() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let output = run(&mut bare(), &["brick", "nope"]).await;
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+/// `nowcast bricks` against `fake`, a service whose `PATH` is `path`.
+fn bricks_with_path(fake: &Fake, path: &Path, root: &Path) -> tokio::process::Command {
+    let body = serde_json::json!({ "path": path }).to_string();
+    fake.can("/v1/service", 200, "application/json", &body);
+    let mut command = nowcast(fake);
+    command
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .arg("bricks");
+    command
+}
+
+fn probe_link(root: &Path) -> std::path::PathBuf {
+    root.join("config/nowcast/bricks/probe.toml")
+}
+
+#[tokio::test]
+async fn a_program_missing_from_the_services_path_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = Fake::start(Anchoring::PerProcess).await;
+    let empty = root.path().join("bin");
+    std::fs::create_dir(&empty).unwrap();
+    let probe = nowcast_test_brick_manifest();
+    let mut command = bricks_with_path(&fake, &empty, root.path());
+    let output = run(&mut command, &["enable", probe.to_str().unwrap()]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let message = stderr(&output);
+    assert!(
+        message.contains(&format!(
+            "program \"nowcast-test-brick\" not found in the service's PATH ({})",
+            empty.display()
+        )),
+        "{message}"
+    );
+    assert!(message.contains("--force"), "{message}");
+    assert!(std::fs::symlink_metadata(probe_link(root.path())).is_err());
+
+    let mut command = bricks_with_path(&fake, &empty, root.path());
+    let forced = run(
+        &mut command,
+        &["enable", "--force", probe.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(forced.status.code(), Some(0), "{forced:?}");
+    assert!(probe_link(root.path()).is_symlink());
+}
+
+#[tokio::test]
+async fn a_program_on_the_services_path_is_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = Fake::start(Anchoring::PerProcess).await;
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let program = bin.join("nowcast-test-brick");
+    std::fs::write(&program, "").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = nowcast_test_brick_manifest();
+    let mut command = bricks_with_path(&fake, &bin, root.path());
+    let output = run(&mut command, &["enable", probe.to_str().unwrap()]).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stderr(&output), "");
+    assert!(probe_link(root.path()).is_symlink());
+}
+
+#[tokio::test]
+async fn a_service_out_of_reach_leaves_the_program_unchecked() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = Fake::absent(Anchoring::PerProcess);
+    let probe = nowcast_test_brick_manifest();
+    let mut command = nowcast(&fake);
+    command
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .arg("bricks");
+    let output = run(&mut command, &["enable", probe.to_str().unwrap()]).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let message = stderr(&output);
+    assert!(
+        message.contains("\"nowcast-test-brick\" not looked for in the service's PATH"),
+        "{message}"
+    );
+    assert!(probe_link(root.path()).is_symlink());
 }
 
 /// The test brick's declaration, shipped with its crate.
