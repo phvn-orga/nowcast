@@ -1,9 +1,9 @@
 # Les clients
 
-État au 2026-11-07 : architecture des clients, format du flux et déclaration de
+État au 2026-11-08 : architecture des clients, format du flux et déclaration de
 session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
 et le rafraîchissement aussi en session interactive ; entrée d'un flux et mesures
-des sessions Claude Code ajoutées.
+des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central.
 
 ## Décisions prises
 
@@ -77,15 +77,15 @@ des sessions Claude Code ajoutées.
   désabonner, demander un rafraîchissement) partent directement du processus de
   l'agent vers le service en HTTP : tous les mods tournent dans le même processus
   d'ancrage, donc le service les rattache à la même session que le flux. Un mod qui
-  s'abonne reçoit l'identifiant du flux en réponse et le lit ensuite dans l'état du
-  mod central. Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
+  s'abonne suit son abonnement dans l'état du mod central, qui lui donne le flux une
+  fois connu (voir plus bas). Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
 - **Le mod central envoie les mesures de sa session** à la brique claude-code, quand
   elle est activée : il s'abonne au flux de sa session, y envoie une entrée après
   chaque requête au modèle et à chaque `session.measure`, et y relit ce que la brique
   en retient (`05-brique-claude-code.md`). Ce flux suit
-  l'identifiant de session : après un `/clear`, le mod se désabonne de l'ancien et
-  s'abonne au nouveau.
+  l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
+  même nom, ce qui remplace l'abonnement à l'ancien.
 - **Un `watch` par identifiant de session.** Comme `/clear` vide l'état du plugin, le
   mod central arrête alors `watch` et le relance sous le nouvel identifiant, sans
   `Last-Event-ID` : le service envoie à nouveau chaque dernière valeur, qui remplit
@@ -111,6 +111,51 @@ des sessions Claude Code ajoutées.
   En contrepartie, le code de la bibliothèque évolue avec le mod central, un mod
   chargé sans lui n'a pas `$.nowcast`, et tout plugin peut observer ou réécrire les
   appels, qui sont des événements du moteur.
+- **Le mod central garde chaque abonnement, sous un nom que choisit le mod qui le
+  prend.** Un consommateur demande un flux et lit ses mises à jour, rien de plus : il
+  ne retente rien, ne trie pas les valeurs périmées et n'appelle pas le service.
+  - **Un abonnement porte un nom**, unique dans le mod qui le prend :
+    `subscribe({ name, brick, kind, params })`. Le mod central le range sous
+    `<mod>/<nom>`. Le mod vient de `next.origin`, que le moteur fixe et qu'aucun mod
+    ne peut falsifier : deux mods ne se gênent pas. Le même nom avec la même requête
+    rend l'abonnement en place ; avec une autre requête, il le remplace, si bien
+    qu'un changement de branche n'a rien à désabonner. `unsubscribe({ name })` le
+    retire.
+  - **Un abonnement vit jusqu'à `unsubscribe`**, que sa première tentative ait réussi
+    ou non. Seule une requête qui ne peut jamais aboutir est refusée, sans rien
+    garder : `unknown_brick`, `unknown_kind`, `invalid_params`. Une brique non activée
+    répond `unknown_brick`, et le service ne peut pas la distinguer d'un nom mal
+    tapé : il faut l'activer, puis recharger le mod. Toute autre erreur (service
+    absent, `brick_unavailable`, `subscription_refused`, `5xx`) est retentée après
+    1 s, délai doublé jusqu'à 60 s, et aussitôt à chaque reconnexion du flux.
+  - **Le mod central refait ce que le service a perdu** : après un redémarrage du
+    service, une brique retirée ou abandonnée après ses relances. Il le vérifie à
+    chaque reconnexion du flux, et quand le flux d'un abonnement se termine ou tombe
+    en erreur. Une erreur définitive à ce moment laisse l'abonnement en échec, avec
+    sa raison, jusqu'à `unsubscribe`.
+  - **L'état dit où en est chaque abonnement** : une famille `subscriptions`, indexée
+    par `<mod>/<nom>`, avec son statut (`active`, `retrying` ou `failed`), la raison
+    d'un échec et son flux une fois connu. L'identifiant étant déterministe, un
+    consommateur suit son abonnement sans attendre la réponse, puis lit la valeur
+    dans `flows`. Un nouvel abonnement efface la valeur `ended` qu'un ancien a
+    laissée sur son flux.
+  - **Ni un `/clear` ni un rechargement ne coupent un abonnement.** La famille sert
+    aussi de registre au mod central : elle survit à son propre rechargement, et il
+    la réécrit depuis sa mémoire après un `/clear`, qui la vide. Un consommateur
+    rechargé s'abonne à nouveau sous les mêmes noms et retrouve ses abonnements. Un
+    nom qu'il n'utilise plus reste abonné jusqu'à la fin du processus : le mod
+    central ne voit pas le rechargement d'un autre mod (voir « Ce que peuvent les
+    clients »). Un identifiant de chargement dans `next.origin`, si le moteur en
+    donne un, suffirait à retirer ces restes.
+
+  Écartés :
+  - un abonnement par appel, sans nom : chaque rechargement d'un consommateur laisse
+    les siens orphelins jusqu'à la fin du processus ;
+  - un identifiant de chargement généré par chaque consommateur : il n'aide pas au
+    changement de branche, et deux modules d'un même plugin s'effaceraient l'un
+    l'autre ;
+  - un abonnement partagé par requête identique : celui d'une requête changée pendant
+    un rechargement reste orphelin.
 - **Aucun mécanisme interne non documenté d'un agent** (variable d'environnement,
   fichier de session) n'entre dans le modèle : seules les API publiques des agents
   comptent. Une exception, dans l'adaptateur Claude Code et pour une mesure
@@ -174,6 +219,17 @@ des sessions Claude Code ajoutées.
   par le flux du mod central, ce qui n'est possible que si requête et flux partagent
   un ancrage ; après un `/clear`, le nouvel identifiant est déclaré et la dernière
   valeur réécrite dans l'état vidé, sans nouvel abonnement.
+
+  Spike du 2026-11-08 (Claude Code 2.1.319, `claude -p`, deux mods de test, l'un
+  dépendant de l'autre, rechargés à chaud par `CLAUDE_CODE_PLUGIN_DIR_WATCH`) :
+  - Le hook d'un *noun* reçoit le mod appelant dans `next.origin` (`{ plugin, tier }`),
+    identique avant et après un rechargement de ce mod : rien ne distingue deux
+    chargements.
+  - L'état d'un mod survit à son rechargement : une valeur posée avant se relit en
+    version 1.
+  - Un mod ne voit pas le rechargement d'un mod qui dépend de lui : `plugin.register`
+    n'est jugé que par les mods chargés avant, et le moteur charge un mod avant ses
+    dépendances. Aucun autre événement ne le signale.
 
   Non vérifié : une session interactive (comportement attendu identique), plusieurs
   observateurs sur la même clé, et le rechargement à chaud du mod central.
