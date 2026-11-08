@@ -141,7 +141,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     laissée sur son flux.
   - **Ni un `/clear` ni un rechargement ne coupent un abonnement.** La famille sert
     aussi de registre au mod central : elle survit à son propre rechargement, et il
-    la réécrit depuis sa mémoire après un `/clear`, qui la vide. Un consommateur
+    la réécrit depuis sa mémoire après un `/clear`, qui la vide. Comme l'API plugin
+    ne liste pas les membres d'une famille, une clé `subscribed` de son état donne
+    les identifiants gardés, qu'il relit après un rechargement. Un consommateur
     rechargé s'abonne à nouveau sous les mêmes noms et retrouve ses abonnements. Un
     nom qu'il n'utilise plus reste abonné jusqu'à la fin du processus : le mod
     central ne voit pas le rechargement d'un autre mod (voir « Ce que peuvent les
