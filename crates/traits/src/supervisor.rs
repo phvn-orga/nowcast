@@ -5,6 +5,34 @@ use nowcast_types::{ApiError, ApiErrorCode, BrickName, Event, QualifiedFlowId, S
 
 use crate::{AnchorId, UnknownFlow};
 
+/// Where a brick is in its life (contract section 4), as
+/// [`Supervisor::bricks`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrickState {
+    /// Launched, waiting for `ready`.
+    Starting,
+    /// Ready, its grace period included.
+    Running,
+    /// Being stopped.
+    Stopping,
+    /// Crashed, waiting to be relaunched.
+    Waiting,
+    /// Given up on after too many crashes in a row, until a subscription
+    /// relaunches it.
+    GivenUp,
+}
+
+/// A brick the supervisor looks after, as [`Supervisor::bricks`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrickSummary {
+    pub name: BrickName,
+    pub state: BrickState,
+    /// Its process's, `None` without a process or when unknown.
+    pub pid: Option<u32>,
+    /// Its crashes in a row, the ones the restart limit bounds.
+    pub crashes: u32,
+}
+
 /// A brick cannot serve for now: its process could not be launched, or did
 /// not answer `hello` with `ready` within [`nowcast_types::READY_TIMEOUT`]
 /// and was stopped. The client gets `503` `brick_unavailable`.
@@ -149,6 +177,10 @@ pub trait Supervisor: Send + Sync + 'static {
     /// The subscription kind the brick serves `flow` for, `None` if it serves
     /// no such flow. Two kinds mapped to one flow keep the first.
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String>;
+
+    /// Every brick with a process, waiting to be relaunched or given up on,
+    /// by name. Any other brick is stopped, and left out.
+    fn bricks(&self) -> Vec<BrickSummary>;
 
     /// Relays an input to the brick serving `flow`. `detail` is JSON bytes,
     /// already validated against the schema of `data_type`. Inputs are sent

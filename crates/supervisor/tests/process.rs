@@ -664,3 +664,22 @@ async fn an_empty_command_is_refused() {
     let error = ProcessLauncher.launch(&declaration).err().expect("refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[tokio::test]
+async fn the_launcher_tells_the_pid_of_the_process_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pid");
+    let mut declaration = shell(r#"echo $$ > "$0"; exec sleep 1000"#, dir.path());
+    declaration
+        .command
+        .push(file.to_string_lossy().into_owned());
+    let mut connection = ProcessLauncher.launch(&declaration).unwrap();
+    written(&file).await;
+    let written: u32 = std::fs::read_to_string(&file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(connection.process.pid(), Some(written));
+    connection.process.kill();
+}

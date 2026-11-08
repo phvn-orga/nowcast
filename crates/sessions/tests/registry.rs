@@ -93,6 +93,14 @@ impl Router for Spy {
         self.router.subscribers(flow)
     }
 
+    fn flows(&self) -> Vec<nowcast_traits::FlowSummary> {
+        self.router.flows()
+    }
+
+    fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)> {
+        self.router.subscriptions(anchor)
+    }
+
     fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId> {
         self.router.empty_flows()
     }

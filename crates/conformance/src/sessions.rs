@@ -36,6 +36,19 @@ pub fn declaring_again_replaces_the_session<S: SessionsSubject>() {
     assert_eq!(sessions.current(A), Some(SessionId::new("two")));
 }
 
+/// `GET /v1/status` lists every anchor's current session, by anchor.
+pub fn the_declared_sessions_are_listed<S: SessionsSubject>() {
+    let sessions = S::new();
+    assert_eq!(sessions.declared(), vec![]);
+    sessions.declare(B, SessionId::new("two"));
+    sessions.declare(A, SessionId::new("one"));
+    sessions.declare(A, SessionId::new("three"));
+    assert_eq!(
+        sessions.declared(),
+        vec![(A, SessionId::new("three")), (B, SessionId::new("two"))]
+    );
+}
+
 /// Runs the session rules of contract section 3.
 #[macro_export]
 macro_rules! sessions_suite {
@@ -51,6 +64,7 @@ macro_rules! sessions_suite {
                     no_session_before_declaring,
                     declaring_sets_the_anchors_session,
                     declaring_again_replaces_the_session,
+                    the_declared_sessions_are_listed,
                 ]
             );
         }

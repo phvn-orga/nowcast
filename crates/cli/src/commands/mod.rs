@@ -5,12 +5,14 @@ pub mod bricks;
 mod get;
 mod input;
 mod refresh;
+mod status;
 mod subscribe;
 mod watch;
 
 pub use get::get;
 pub use input::input;
 pub use refresh::refresh;
+pub use status::status;
 pub use subscribe::subscribe;
 pub use watch::watch;
 

@@ -27,6 +27,8 @@ pub use discovery::{
     BrickDeclaration, ClientKind, Discovery, DiscoveryChange, SubscriptionKind, TypeDeclaration,
 };
 pub use identity::Identity;
-pub use router::{FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
+pub use router::{FLOW_HISTORY, FlowSummary, History, Router, UnknownFlow, UnknownSubscription};
 pub use sessions::Sessions;
-pub use supervisor::{BrickUnavailable, InputError, ResolveError, Resolved, Supervisor};
+pub use supervisor::{
+    BrickState, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved, Supervisor,
+};

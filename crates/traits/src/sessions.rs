@@ -17,4 +17,7 @@ pub trait Sessions: Send + Sync + 'static {
     /// `None` until the anchor declares a session: any request but the
     /// declaration is then refused with `session_required`.
     fn current(&self, anchor: AnchorId) -> Option<SessionId>;
+
+    /// Every anchor with a declared session, by increasing anchor id.
+    fn declared(&self) -> Vec<(AnchorId, SessionId)>;
 }

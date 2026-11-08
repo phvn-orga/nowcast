@@ -47,6 +47,8 @@ systemctl --user enable --now nowcast.socket
 
 `nowcast daemon` also runs by hand, in the foreground, for a test. `nowcast daemon --help` lists the variables it reads.
 
+`nowcast status` tells what runs: the service's version beside the installed one, its bricks, sessions and flows. After an upgrade, the running service keeps the old version until it restarts (`systemctl --user stop nowcast.service`, and the socket starts the new one on the next connection).
+
 ## Bricks
 
 A brick runs only once enabled, and only while something subscribes to it. The bricks this repository ships are built into the binary and enabled by name:

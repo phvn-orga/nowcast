@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use nowcast_types::{BrickName, FlowId, QualifiedFlowId};
 
 use crate::{
-    AnchorId, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    AnchorId, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved, Router,
+    Supervisor, UnknownFlow,
 };
 
 #[derive(Default)]
@@ -14,6 +15,7 @@ struct State {
     resolved: HashMap<QualifiedFlowId, String>,
     refreshes: Vec<QualifiedFlowId>,
     inputs: Vec<(QualifiedFlowId, String, Vec<u8>)>,
+    bricks: Vec<BrickSummary>,
 }
 
 /// Resolves `<brick>/<kind>:<params>` without any brick, unless the test set
@@ -45,6 +47,11 @@ impl FakeSupervisor {
             message: message.into(),
         };
         self.state.lock().unwrap().failures.insert(brick, error);
+    }
+
+    /// What [`Supervisor::bricks`] answers from now on.
+    pub fn set_bricks(&self, bricks: Vec<BrickSummary>) {
+        self.state.lock().unwrap().bricks = bricks;
     }
 
     /// The flows a refresh was asked for, in order.
@@ -95,6 +102,10 @@ impl Supervisor for FakeSupervisor {
 
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
         self.state.lock().unwrap().resolved.get(flow).cloned()
+    }
+
+    fn bricks(&self) -> Vec<BrickSummary> {
+        self.state.lock().unwrap().bricks.clone()
     }
 
     fn input(

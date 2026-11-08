@@ -59,6 +59,15 @@ impl Sessions for SessionRegistry {
     fn current(&self, anchor: AnchorId) -> Option<SessionId> {
         lock(&self.sessions).get(&anchor).cloned()
     }
+
+    fn declared(&self) -> Vec<(AnchorId, SessionId)> {
+        let mut declared: Vec<_> = lock(&self.sessions)
+            .iter()
+            .map(|(&anchor, session)| (anchor, session.clone()))
+            .collect();
+        declared.sort_by_key(|&(anchor, _)| anchor);
+        declared
+    }
 }
 
 fn lock(sessions: &Map) -> MutexGuard<'_, HashMap<AnchorId, SessionId>> {

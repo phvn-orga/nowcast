@@ -1,5 +1,6 @@
 //! Accepts connections, identifies their anchor, and answers the routes.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::os::fd::AsFd;
 use std::sync::Arc;
@@ -14,7 +15,9 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use nowcast_traits::{AnchorId, Discovery, Identity, InputError, Router, Sessions, Supervisor};
+use nowcast_traits::{
+    AnchorId, BrickState, Discovery, Identity, InputError, Router, Sessions, Supervisor,
+};
 use nowcast_types::{
     ApiError, ApiErrorCode, BrickName, EventId, QualifiedFlowId, SessionId, SubscriptionId,
 };
@@ -209,13 +212,14 @@ where
             HttpError::internal(format!("cannot identify the connected process: {e}"))
         })?;
         // What the service says of itself belongs to no session.
-        if !matches!(route, Route::Session | Route::Service)
+        if !matches!(route, Route::Session | Route::Service | Route::Status)
             && self.sessions.current(anchor).is_none()
         {
             return Err(HttpError::session_required());
         }
         match route {
-            Route::Service => service(self.started_at),
+            Route::Service => Ok(json(StatusCode::OK, service(self.started_at)?.to_string())),
+            Route::Status => self.status(),
             Route::Session => {
                 let DeclareSession { id } = read_json(body).await?;
                 if id.is_empty() {
@@ -250,6 +254,82 @@ where
             Route::Input(flow) => self.input(anchor, &flow_id(flow)?, body).await,
             Route::Stream => self.stream(anchor, &parts.headers),
         }
+    }
+
+    /// The whole state, read from each module in turn: the bricks enabled or
+    /// still running, every declared session with its subscriptions, and the
+    /// flows with a subscriber.
+    fn status(&self) -> Result<Response<Body>, HttpError> {
+        let mut bricks: BTreeMap<String, Value> = self
+            .discovery
+            .bricks()
+            .iter()
+            .map(|brick| {
+                let stopped = serde_json::json!({
+                    "name": brick.name.as_str(),
+                    "state": "stopped",
+                    "pid": null,
+                    "crashes": 0,
+                });
+                (brick.name.to_string(), stopped)
+            })
+            .collect();
+        for brick in self.supervisor.bricks() {
+            let state = match brick.state {
+                BrickState::Starting => "starting",
+                BrickState::Running => "running",
+                BrickState::Stopping => "stopping",
+                BrickState::Waiting => "waiting",
+                BrickState::GivenUp => "given_up",
+            };
+            let summary = serde_json::json!({
+                "name": brick.name.as_str(),
+                "state": state,
+                "pid": brick.pid,
+                "crashes": brick.crashes,
+            });
+            bricks.insert(brick.name.to_string(), summary);
+        }
+        let sessions: Vec<Value> = self
+            .sessions
+            .declared()
+            .into_iter()
+            .map(|(anchor, session)| {
+                let subscriptions: Vec<Value> = self
+                    .router
+                    .subscriptions(anchor)
+                    .into_iter()
+                    .map(|(id, flow)| {
+                        serde_json::json!({ "id": id.as_str(), "flow": flow.to_string() })
+                    })
+                    .collect();
+                serde_json::json!({ "id": session.as_str(), "subscriptions": subscriptions })
+            })
+            .collect();
+        let mut flows = Vec::new();
+        for flow in self.router.flows() {
+            if flow.subscribers == 0 {
+                continue;
+            }
+            let last_event = match flow.last {
+                Some((id, time)) => {
+                    serde_json::json!({ "id": id.to_string(), "time": timestamp(time)? })
+                }
+                None => Value::Null,
+            };
+            flows.push(serde_json::json!({
+                "id": flow.flow.to_string(),
+                "subscribers": flow.subscribers,
+                "last_event": last_event,
+            }));
+        }
+        let body = serde_json::json!({
+            "service": service(self.started_at)?,
+            "bricks": bricks.into_values().collect::<Vec<_>>(),
+            "sessions": sessions,
+            "flows": flows,
+        });
+        Ok(json(StatusCode::OK, body.to_string()))
     }
 
     /// Relays a subscriber's input to the flow's brick, once checked against
@@ -455,16 +535,20 @@ async fn read_body(body: Incoming) -> Result<Bytes, HttpError> {
 /// What the service says of itself: the version of the binary running it,
 /// when it started, and its own `PATH`, the one bricks are looked up in
 /// (`null` when unset or not UTF-8).
-fn service(started_at: SystemTime) -> Result<Response<Body>, HttpError> {
-    let started_at = jiff::Timestamp::try_from(started_at)
-        .map_err(|e| HttpError::internal(format!("the start time is out of range: {e}")))?;
+fn service(started_at: SystemTime) -> Result<Value, HttpError> {
     let path = std::env::var("PATH").ok();
-    let body = serde_json::json!({
+    Ok(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "started_at": started_at.to_string(),
+        "started_at": timestamp(started_at)?,
         "path": path,
-    });
-    Ok(json(StatusCode::OK, body.to_string()))
+    }))
+}
+
+/// `time` in RFC 3339, UTC.
+fn timestamp(time: SystemTime) -> Result<String, HttpError> {
+    jiff::Timestamp::try_from(time)
+        .map(|t| t.to_string())
+        .map_err(|e| HttpError::internal(format!("a time out of range: {e}")))
 }
 
 fn empty(status: StatusCode) -> Response<Body> {

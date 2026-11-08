@@ -12,6 +12,9 @@ pub trait BrickProcess: Send + 'static {
 
     /// Sends `SIGKILL`.
     fn kill(&mut self);
+
+    /// The process id, `None` when unknown.
+    fn pid(&self) -> Option<u32>;
 }
 
 /// A running brick, seen as protocol messages.

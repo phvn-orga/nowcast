@@ -1,10 +1,22 @@
 use std::fmt;
+use std::time::SystemTime;
 
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
 
 use crate::AnchorId;
+
+/// A flow as [`Router::flows`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowSummary {
+    pub flow: QualifiedFlowId,
+    /// Its subscriptions, from every anchor, as [`Router::subscribers`] counts them.
+    pub subscribers: usize,
+    /// The id and time of its last kept event, `None` if it has published
+    /// nothing yet.
+    pub last: Option<(EventId, SystemTime)>,
+}
 
 /// The flow is unknown to the router, or the anchor is not subscribed to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +130,14 @@ pub trait Router: Send + Sync + 'static {
 
     /// How many subscriptions `flow` has, from every anchor.
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize;
+
+    /// Every flow the router holds, by flow id: those left without a
+    /// subscriber included, until they are ended.
+    fn flows(&self) -> Vec<FlowSummary>;
+
+    /// The subscriptions of `anchor` with their flow, by flow then
+    /// subscription id; none for an anchor the router does not know.
+    fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)>;
 
     /// Receives each flow whose last subscription goes away, at that moment.
     fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId>;

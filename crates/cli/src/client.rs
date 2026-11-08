@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -75,6 +76,31 @@ impl Client {
                 "a service description without its path: {body}"
             ))),
         }
+    }
+
+    /// `GET /v1/status`, which needs no session; `None` when nothing listens
+    /// on the socket, the service being stopped.
+    pub async fn status(&self) -> Result<Option<Value>, CliError> {
+        // Tried apart from the request, so that a stopped service is told
+        // from a broken one by the error's kind rather than its text.
+        if let Err(e) = UnixStream::connect(&self.socket).await
+            && matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            )
+        {
+            return Ok(None);
+        }
+        let reply = self.call(Method::GET, "/v1/status", None).await?;
+        if reply.status == StatusCode::NOT_FOUND {
+            return Err(CliError::Api {
+                code: "service_too_old".into(),
+                message: "the running service predates `nowcast status`: restart it to run \
+                          the installed version"
+                    .into(),
+            });
+        }
+        reply.expect(StatusCode::OK)?.json().map(Some)
     }
 
     async fn send(
