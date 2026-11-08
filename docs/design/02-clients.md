@@ -138,9 +138,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     perdu plus tôt, il l'est après le délai des tentatives, doublé à chaque perte.
     Sans cela, une brique que le service abandonne après ses relances serait
     relancée aussitôt, sans fin. Une erreur définitive à ce moment laisse
-    l'abonnement en échec, avec sa raison, sans nouvelle tentative de lui-même. Un `subscribe` du même nom et de
-    la même requête le tente à nouveau : un consommateur rechargé après la
-    réactivation de sa brique le retrouve ainsi.
+    l'abonnement en échec, avec sa raison, sans nouvelle tentative de lui-même. Un
+    `subscribe` du même nom et de la même requête le tente à nouveau : un
+    consommateur rechargé après la réactivation de sa brique le retrouve ainsi.
   - **L'état dit où en est chaque abonnement** : une famille `subscriptions`, indexée
     par `<mod>/<nom>`, avec son statut (`active`, `retrying` ou `failed`), la raison
     d'un échec et son flux une fois connu. L'identifiant étant déterministe, un
