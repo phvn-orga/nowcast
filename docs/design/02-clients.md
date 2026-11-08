@@ -47,8 +47,19 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   valeur, en un appel ; avec `--after <id>`, l'historique après cet identifiant), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
   immédiat, rien d'affiché en cas de succès), `nowcast input <flux>` (envoie le détail
   JSON lu sur l'entrée standard), `nowcast bricks enable <nom>` et
-  `nowcast bricks disable <nom>` (activer ou désactiver une brique). La reconnexion et la conduite à tenir
+  `nowcast bricks disable <nom>` (activer ou désactiver une brique), `nowcast status`
+  (ce qui tourne, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
+- **`nowcast status` dit ce qui tourne, et à quelle version.** Il affiche, lisible
+  par défaut et en JSON sous `--json`, l'état que rend `GET /v1/status`
+  (`03-contrats.md` section 3) : la version du service en marche à côté de la
+  sienne, celle du binaire installé, signalées quand elles diffèrent ; depuis quand
+  le service tourne ; les briques activées et celles lancées ; les sessions
+  déclarées et leurs abonnements ; les flux actifs. Il ne réveille pas un service
+  arrêté : quand systemd tient le socket (`nowcast.socket` actif) sans que
+  `nowcast.service` tourne, s'y connecter le démarrerait, et status le dit arrêté
+  sans se connecter. Sans systemd, ou sans unité socket active, il se connecte
+  directement, et un socket sans réponse veut dire arrêté.
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
   après cet identifiant : chaque événement gardé depuis, plutôt que toutes les
   dernières valeurs.
@@ -81,16 +92,18 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   fois connu (voir plus bas). Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
 - **Le mod central refuse un service trop ancien.** Il déclare la plus ancienne
-  version du service qu'il accepte, et lit celle de `nowcast --version` avant tout
-  échange avec le service : avant de déclarer la session, puis avant chaque
-  lancement de `watch`. Plus ancienne, rien ne part vers le service : le flux
-  reste arrêté (`stopped`), son erreur dit les deux versions, et chaque requête de
-  `$.nowcast` répond `service_too_old`, un abonnement restant en attente
-  (`retrying`). Le mod relit la version à chaque relance de `watch`, si bien
-  qu'une mise à jour en cours de session est prise. Limite : le service déjà
-  lancé reste sur l'ancienne version jusqu'à son redémarrage, au plus tard une
-  minute après que plus aucune session ne le tient. Faire annoncer sa version par
-  le service lui-même est écarté pour l'instant.
+  version du service qu'il accepte, et lit celle du service en marche
+  (`GET /v1/service`, `03-contrats.md` section 3) avant tout autre échange avec
+  lui : avant de déclarer la session, puis avant chaque lancement de `watch`. Un
+  service antérieur à ce champ ne l'annonce pas : le mod lit alors celle de
+  `nowcast --version`, le binaire installé. Plus ancienne, rien d'autre ne part
+  vers le service : le flux reste arrêté (`stopped`), son erreur dit les deux
+  versions, et chaque requête de `$.nowcast` répond `service_too_old`, un
+  abonnement restant en attente (`retrying`). Le mod relit la version à chaque
+  relance de `watch`, si bien qu'un redémarrage du service en cours de session est
+  pris. Lire le binaire installé ne suffisait pas : après une mise à jour, le
+  service déjà lancé garde l'ancien binaire jusqu'à son redémarrage, et ne s'arrête
+  pas seul tant qu'une session le tient.
 - **Le mod central envoie les mesures de sa session** à la brique claude-code, quand
   elle est activée : il s'abonne au flux de sa session, y envoie une entrée après
   chaque requête au modèle et à chaque `session.measure`, et y relit ce que la brique
