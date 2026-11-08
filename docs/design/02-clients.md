@@ -80,6 +80,14 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   s'abonne suit son abonnement dans l'état du mod central, qui lui donne le flux une
   fois connu (voir plus bas). Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
+- **Le mod central refuse un service trop ancien.** Il déclare la plus ancienne
+  version du service qu'il accepte, et lit celle de `nowcast --version` avant
+  chaque lancement de `watch`. Plus ancienne, le flux reste arrêté (`stopped`) et
+  son erreur dit les deux versions ; le mod relit la version à chaque relance, si
+  bien qu'une mise à jour en cours de session est prise. Limite : le service déjà
+  lancé reste sur l'ancienne version jusqu'à son redémarrage, au plus tard une
+  minute après que plus aucune session ne le tient. Faire annoncer sa version par
+  le service lui-même est écarté pour l'instant.
 - **Le mod central envoie les mesures de sa session** à la brique claude-code, quand
   elle est activée : il s'abonne au flux de sa session, y envoie une entrée après
   chaque requête au modèle et à chaque `session.measure`, et y relit ce que la brique

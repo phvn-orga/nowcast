@@ -140,6 +140,19 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
     reste publiée ; les utilisateurs restent sur la version précédente.
   - **Le workflow ouvre lui-même la PR de formule**, ce que l'organisation doit
     autoriser à GitHub Actions.
+- **Le plugin Claude Code a sa propre version**, en semver, indépendante de celle du
+  service : les deux n'évoluent pas ensemble. Elle est écrite dans son
+  `plugin.json`, et le mod d'exemple a la sienne. Claude Code ne livre un plugin
+  d'une marketplace git qu'à un changement de cette chaîne : une PR qui la monte
+  sort donc le plugin, une fois mergée sur `main`. Une version n'est pas une PR :
+  plusieurs PR peuvent préparer un lot avant qu'une version le sorte.
+  - **La compatibilité avec le service se déclare dans le mod** : la plus ancienne
+    version du service qu'il accepte (`02-clients.md`). La PR qui fait dépendre le
+    mod d'une nouveauté du service la monte ; son historique dit avec quel service
+    marche chaque version du plugin.
+  - **Limite** : la marketplace se lit sur `main`. Une première installation entre
+    deux versions prend le code de `main` sous la dernière version, lot en cours
+    compris. Une mise à jour, elle, attend la version suivante.
 
 ## Limite assumée de la sécurité
 
