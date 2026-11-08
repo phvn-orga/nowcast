@@ -156,6 +156,7 @@ for (const [status, code] of [
   [404, 'unknown_brick'],
   [404, 'unknown_kind'],
   [400, 'invalid_params'],
+  [400, 'invalid_request'],
 ] as const) {
   test(`${code} fails, and nothing is kept nor tried again`, plugins, async ($, on) => {
     const w = world(on, { answer: service({ 'POST /v1/subscriptions': refused(status, code, 'nope') }) })
@@ -292,6 +293,9 @@ function restartable() {
       known = new Set()
       brick = false
     },
+    enableBrick: () => {
+      brick = true
+    },
   }
 }
 
@@ -406,10 +410,29 @@ test('a brick removed leaves its subscriptions failed, until unsubscribed', plug
   })
   await w.clock.advance(120_000)
   expect(posts(w.requests).length).toBe(2)
-  // Asked again as it was, it answers where it stands.
-  expect(await call($, 'subscribe', PR)).toMatchObject({ ok: true, status: 'failed' })
   expect(await call($, 'unsubscribe', { name: 'pr' })).toEqual({ ok: true })
   expect(w.subscribed()).toEqual([])
+})
+
+test('a failed subscription is tried again when its mod asks for it again', plugins, async ($, on) => {
+  const svc = restartable()
+  const w = world(on, { answer: svc.answer })
+  await $.session.start(START)
+  await w.clock.settle()
+  await call($, 'subscribe', PR)
+  svc.removeBrick()
+  w.child().event('flow-ended', { flow: FLOW })
+  await w.clock.settle()
+
+  // Still removed: one more attempt, failed again, and kept.
+  expect(await call($, 'subscribe', PR)).toMatchObject({ ok: true, status: 'failed', error: { code: 'unknown_brick' } })
+  expect(posts(w.requests).length).toBe(3)
+  expect(w.subscribed()).toEqual([ID])
+
+  // The brick enabled again, the mod reloaded subscribes again and gets it back.
+  svc.enableBrick()
+  expect(await call($, 'subscribe', PR)).toEqual({ ok: true, subscription: ID, status: 'active', error: null, flow: FLOW })
+  expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-2' })
 })
 
 test('after a /clear, the subscriptions are written again into the new state', plugins, async ($, on) => {

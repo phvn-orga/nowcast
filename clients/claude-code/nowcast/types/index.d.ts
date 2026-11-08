@@ -75,8 +75,9 @@ export type NowcastSubscription = {
    * `active` while the service serves it; `retrying` while the service is
    * out of reach or refuses it for now, tried again after 1 s, doubled up to
    * 60 s, and at once when the stream comes back; `failed` when the service
-   * refused it for good after it was kept (the brick removed, say), until it
-   * is unsubscribed.
+   * refused it for good after it was kept (the brick removed, say), with no
+   * attempt of its own: a `subscribe` with the same name and request tries
+   * it again.
    */
   status: 'active' | 'retrying' | 'failed'
   /** Why it is retrying or failed, as `NowcastFailure` says it; null while active. */
@@ -133,7 +134,8 @@ export type Nowcast = {
    *
    * Only a request that can never succeed fails, and nothing is kept for it:
    * `unknown_brick` (a brick not enabled answers it too: enable it, then
-   * reload the mod), `unknown_kind`, `invalid_params`, or `invalid_name`.
+   * reload the mod), `unknown_kind`, `invalid_params`, `invalid_request` (a
+   * malformed body), or `invalid_name`.
    * Any other failure answers the subscription `retrying`. The flow's last
    * value, once the service gives it, is written to the state's `flows`.
    */

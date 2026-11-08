@@ -15,7 +15,7 @@ const SUBSCRIPTIONS = { plugin: 'nowcast', key: 'subscriptions' } as const
 const SUBSCRIBED = { plugin: 'nowcast', key: 'subscribed' } as const
 
 /** The failures no later attempt can turn into a success. */
-const DEFINITIVE = new Set(['unknown_brick', 'unknown_kind', 'invalid_params'])
+const DEFINITIVE = new Set(['unknown_brick', 'unknown_kind', 'invalid_params', 'invalid_request'])
 
 /** Delay before trying a refused subscription again, doubled up to the max. */
 const FIRST_RETRY_MS = 1_000
@@ -49,7 +49,16 @@ export function subscribeFor(
   const wanted = { brick: asked.brick, kind: asked.kind, params: asked.params }
   return serial(id, async () => {
     const held = entries.get(id)
-    if (held !== undefined && same(held.wanted, wanted)) return answer(held)
+    if (held !== undefined && same(held.wanted, wanted)) {
+      // Left failed, it is tried again only when asked for again: a mod
+      // reloaded once its brick is back gets it back.
+      if (held.value.status === 'failed') {
+        held.refused = 0
+        const refused = await attempt($, held)
+        if (refused !== null) await set($, held, { status: 'failed', error: reason(refused), service: null })
+      }
+      return answer(held)
+    }
     if (held !== undefined) await drop($, held)
     const entry: Entry = {
       id,
