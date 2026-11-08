@@ -21,8 +21,9 @@ const times = (n: number) => ({ input: 10 * n, output: 20 * n, cache_creation: 3
 /**
  * The engine's answers the measures read, beneath the mod. Each request
  * answers `usage`; null makes the main thread's fail with no response.
+ * `withEffort` false is a model that takes no effort.
  */
-function engine(on: On, usage: typeof USAGE | null = USAGE) {
+function engine(on: On, usage: typeof USAGE | null = USAGE, withEffort = true) {
   on('session.root', () => ({ value: '/project' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
@@ -36,20 +37,21 @@ function engine(on: On, usage: typeof USAGE | null = USAGE) {
       usage,
     } as never
   })
-  // A fork runs at the effort it names, else at the session's.
+  // A fork runs at the effort it names, else at the session's; a model that
+  // takes none is sent none.
   on('model.fork', (_, e) => ({
     value:
       usage === null
         ? ({ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: ZERO } as never)
-        : { isAnswered: true, text: '', usage, effort: e.effort ?? 'high' },
+        : { isAnswered: true, text: '', usage, effort: withEffort ? (e.effort ?? 'high') : undefined },
   }))
   on('model.complete', () => ({ value: { isAnswered: true, text: '', usage: USAGE } }))
   on('session.compact', (_, e) => ({ messages: e.messages, usage: USAGE }))
 }
 
-/** One request of the main thread, at `high`. */
-async function step($: Engine) {
-  for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'm', effort: 'high' } as never)) {
+/** One request of the main thread, at `effort`: null on a model that takes none. */
+async function step($: Engine, effort: 'high' | null = 'high') {
+  for await (const _ of $.turn.step({ turnId: 't', index: 0, model: 'm', effort: effort ?? undefined } as never)) {
     // The step's pieces: none here.
   }
 }
@@ -185,6 +187,39 @@ test("a request that failed leaves the cache's time as it was", plugins, async (
   const measures = await sent(w)
   expect(measures?.tokens).toEqual(times(0))
   expect(measures?.last_request_at).toBe(undefined)
+})
+
+test(
+  'on a model that takes no effort, a fork naming one is the main thread\'s request',
+  { ...plugins, timeoutMs: 10_000 },
+  async ($, on) => {
+    const w = world(on, { answer: service(true) })
+    engine(on, USAGE, false)
+    await $.session.start(START)
+    await w.clock.settle()
+    // At `high`, then on a model without effort (`/model`).
+    await step($, 'high')
+    await step($, null)
+
+    await w.clock.advance(60_000)
+    await model($, 'fork', { prompt: 'Shorter.', effort: 'high' })
+    expect((await sent(w))?.last_request_at).toBe(at(1_060_000))
+  },
+)
+
+test("a mod's fork does not wait for the transcripts' count", plugins, async ($, on) => {
+  const w = world(on, { answer: service(true), env: { XDG_RUNTIME_DIR: '/run/user/1000', HOME: '/home/u' } })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  // The transcripts are still being read: the fork goes on all the same.
+  await model($, 'fork', { prompt: 'Keep warm.' })
+  await w.clock.settle()
+  const cat = w.children.find(c => c.argv[0] === 'sh')
+  cat?.stdout(`${assistant('a', { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 })}\n`)
+  cat?.exit(0)
+  expect((await sent(w))?.tokens).toEqual({ input: 11, output: 22, cache_creation: 33, cache_read: 44 })
 })
 
 test("a mod's completion and a compaction's summary count in the tokens, and leave the cache's time", plugins, async ($, on) => {

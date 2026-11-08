@@ -60,6 +60,12 @@ type Measured = {
   rateLimits?: Array<{ kind: string; percentUsed: number; resetsAt?: string }>
   cost?: number
   effort?: string | number
+  /**
+   * The effort the main thread's last request carried, none included (a
+   * model without effort); absent until one is seen. A fork at it is the
+   * same request.
+   */
+  stepEffort?: { value: string | number | undefined }
   lastRequestAt?: string
   cacheTtl?: '5m' | '1h'
   scheduled: boolean
@@ -97,7 +103,13 @@ export function registerMeasures(on: On): void {
   // its cache when a response read or wrote it.
   on('turn.step', async function* ($, e, next) {
     const request = await started($)
-    if (request !== undefined && e.agentId === undefined && e.effort !== undefined) request.m.effort = e.effort
+    if (request !== undefined) {
+      if (e.agentId === undefined) {
+        if (e.effort !== undefined) request.m.effort = e.effort
+        request.m.stepEffort = { value: e.effort }
+      }
+      await request.m.seeding.catch(() => undefined)
+    }
     const result = yield* next(e)
     if (request !== undefined) count($, request, result.usage, e.agentId === undefined)
     return result
@@ -113,7 +125,8 @@ export function registerMeasures(on: On): void {
     const answer = await next(e)
     const result = answer.value
     if (request !== undefined && result !== undefined && 'usage' in result) {
-      const atMainEffort = e.effort === undefined || result.effort === request.m.effort
+      const main = request.m.stepEffort
+      const atMainEffort = e.effort === undefined || (main !== undefined && result.effort === main.value)
       count($, request, result.usage, atMainEffort)
     }
     return answer
@@ -166,10 +179,11 @@ async function measured($: $): Promise<Measured> {
 }
 
 /**
- * Adds what the transcripts count to the tokens. Requests wait for it
- * (`turn.step`), so that a response is never both read there and counted
- * by this mod; a transcript that takes longer than `SEED_MS` to read is
- * left out.
+ * Adds what the transcripts count to the tokens. The session's requests wait
+ * for it (`turn.step`), so that a response is never both read there and
+ * counted by this mod; the mods' forks and completions and the compactions'
+ * summaries are never written there, and do not wait. A transcript that
+ * takes longer than `SEED_MS` to read is left out.
  */
 async function seed($: $, m: Measured): Promise<void> {
   const found = await Promise.race([
@@ -184,17 +198,12 @@ async function seed($: $, m: Measured): Promise<void> {
 /** A request to the model about to go: the session's measures, and when. */
 type Started = { m: Measured; at: string }
 
-/**
- * The session's measures before a request, once the transcripts' count is
- * in (see `seed`); undefined when the session cannot be measured.
- */
+/** The session's measures before a request; undefined when the session cannot be measured. */
 async function started($: $): Promise<Started | undefined> {
   let request: Started | undefined
   await quietly($, async () => {
     const m = await measured($)
-    const at = new Date(await $.clock.now()).toISOString()
-    await m.seeding
-    request = { m, at }
+    request = { m, at: new Date(await $.clock.now()).toISOString() }
   })
   return request
 }
