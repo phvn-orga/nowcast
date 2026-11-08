@@ -302,6 +302,26 @@ async fn a_program_that_is_not_executable_says_so() {
     );
 }
 
+#[tokio::test]
+async fn a_program_whose_interpreter_is_missing_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("brick").to_string_lossy().into_owned();
+    std::fs::write(&program, "#!/nonexistent/interpreter\n").unwrap();
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let declaration = probe::declaration(vec![program.clone()], dir.path().to_owned());
+    assert_eq!(
+        launch_failure(declaration, dir).await,
+        unavailable_because(format!(
+            "program {program:?} cannot be run: the interpreter it names \
+             (#! line or dynamic loader) is missing"
+        ))
+    );
+}
+
 /// A brick running `script` with `sh`, a program looked up in `PATH`.
 fn shell(script: &str, dir: &Path) -> BrickDeclaration {
     probe::declaration(

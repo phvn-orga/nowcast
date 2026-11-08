@@ -7,15 +7,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use nowcast_discovery::{DiscoveryConfig, load_manifest, native_dir_from_env, write_native};
+use nowcast_supervisor::SELF;
 use nowcast_types::BrickName;
 
 use crate::client::Client;
 use crate::error::CliError;
 use crate::native;
-
-/// The program name the service runs as its own executable, whatever the
-/// `PATH`: never looked up.
-const SELF: &str = "nowcast";
 
 /// Enables `brick`: a native brick's name, or the path of any declaration
 /// file (one holding a `/` or ending in `.toml`). With `service`, its program
@@ -107,17 +104,13 @@ enum Lookup {
     NotExecutable(PathBuf),
 }
 
-/// Looks `program` up in `path` as the launch will: in order, an empty entry
-/// standing for `dir`, the brick's working directory.
+/// Looks `program` up in `path` as the launch will: in order, a relative
+/// entry (the empty one included) standing for a directory under `dir`, the
+/// brick's working directory.
 fn find_program(program: &str, path: &str, dir: &Path) -> Lookup {
     let mut first = None;
     for entry in std::env::split_paths(path) {
-        let entry = if entry.as_os_str().is_empty() {
-            dir.to_owned()
-        } else {
-            entry
-        };
-        let candidate = entry.join(program);
+        let candidate = dir.join(entry).join(program);
         match std::fs::metadata(&candidate) {
             Ok(meta) if meta.is_file() && meta.permissions().mode() & 0o111 != 0 => {
                 return Lookup::Found;
@@ -186,5 +179,13 @@ mod tests {
             find_program("tool", "/nonexistent", root.path()),
             Lookup::Missing
         );
+    }
+
+    #[test]
+    fn a_relative_entry_is_under_the_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("bin")).unwrap();
+        file(&root.path().join("bin/tool"), 0o755);
+        assert_eq!(find_program("tool", "bin", root.path()), Lookup::Found);
     }
 }

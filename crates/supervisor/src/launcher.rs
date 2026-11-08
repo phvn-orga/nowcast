@@ -133,16 +133,29 @@ fn why_not_started(e: io::Error, program: &str, brick: &BrickDeclaration) -> io:
         format!("cannot run in {}: {e}", brick.dir.display())
     } else {
         match e.kind() {
-            io::ErrorKind::NotFound if bare => {
-                let path = match brick.env.get("PATH") {
+            io::ErrorKind::NotFound => {
+                let path = bare.then(|| match brick.env.get("PATH") {
                     Some(path) => path.clone(),
                     None => std::env::var_os("PATH")
                         .map(|path| path.to_string_lossy().into_owned())
                         .unwrap_or_default(),
+                });
+                // A program that exists fails the same way when what runs it
+                // (its #! line, or its dynamic loader) is missing.
+                let exists = match &path {
+                    Some(path) => std::env::split_paths(path)
+                        .any(|entry| brick.dir.join(entry).join(program).is_file()),
+                    None => program.contains('/') && brick.dir.join(program).is_file(),
                 };
-                format!("program {program:?} not found in PATH {path}")
+                match path {
+                    _ if exists => format!(
+                        "program {program:?} cannot be run: the interpreter it names \
+                         (#! line or dynamic loader) is missing"
+                    ),
+                    Some(path) => format!("program {program:?} not found in PATH {path}"),
+                    None => format!("program {program:?} not found"),
+                }
             }
-            io::ErrorKind::NotFound => format!("program {program:?} not found"),
             io::ErrorKind::PermissionDenied => format!("program {program:?} is not executable"),
             _ => format!("cannot run program {program:?}: {e}"),
         }

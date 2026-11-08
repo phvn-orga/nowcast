@@ -1036,6 +1036,7 @@ dependencies = [
  "nowcast-conformance",
  "nowcast-daemon",
  "nowcast-discovery",
+ "nowcast-supervisor",
  "nowcast-types",
  "serde_json",
  "tempfile",
