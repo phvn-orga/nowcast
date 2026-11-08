@@ -280,6 +280,7 @@ where
                 BrickState::Running => "running",
                 BrickState::Stopping => "stopping",
                 BrickState::Waiting => "waiting",
+                BrickState::GivenUp => "given_up",
             };
             let summary = serde_json::json!({
                 "name": brick.name.as_str(),

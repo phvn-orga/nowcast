@@ -151,6 +151,8 @@ struct Brick {
     requests: HashMap<RequestId, Request>,
     /// Crashes in a row, the one being handled included.
     crashes: u32,
+    /// Set when too many crashes in a row ended its flows.
+    gave_up: bool,
     ready_at: Option<Instant>,
     /// Why the last launch failed, until the next one: what subscriptions
     /// failing meanwhile tell the client.
@@ -161,6 +163,9 @@ struct Brick {
 pub(crate) struct State {
     config: Config,
     bricks: HashMap<BrickName, Brick>,
+    /// The bricks given up on after too many crashes in a row, with their
+    /// count, until a subscription relaunches them or discovery drops them.
+    given_up: HashMap<BrickName, u32>,
     stamps: u64,
     effects: Vec<Effect>,
     /// Set by [`State::shutdown`], never cleared: no brick launches again.
@@ -172,6 +177,7 @@ impl State {
         Self {
             config,
             bricks: HashMap::new(),
+            given_up: HashMap::new(),
             stamps: 0,
             effects: Vec::new(),
             closing: false,
@@ -211,6 +217,9 @@ impl State {
         };
         transition(entry, &mut ctx);
         if entry.phase == Phase::Idle {
+            if entry.gave_up {
+                self.given_up.insert(brick.clone(), entry.crashes);
+            }
             self.bricks.remove(brick);
         }
     }
@@ -239,6 +248,8 @@ impl State {
             params: params.to_vec(),
             reply,
         };
+        // Relaunched afresh, with all its restarts.
+        self.given_up.remove(brick);
         self.bricks
             .entry(brick.clone())
             .or_insert_with(|| Brick::new(brick.clone()));
@@ -306,6 +317,7 @@ impl State {
 
     /// Discovery no longer holds the brick.
     pub(crate) fn removed(&mut self, brick: &BrickName, router: &dyn Router) {
+        self.given_up.remove(brick);
         self.with(brick, router, |b, ctx| b.removed(ctx));
     }
 
@@ -344,7 +356,7 @@ impl State {
         Ok(())
     }
 
-    /// Every brick not idle, by name.
+    /// Every brick not idle, and every brick given up on, by name.
     pub(crate) fn bricks(&self) -> Vec<BrickSummary> {
         let mut bricks: Vec<_> = self
             .bricks
@@ -364,6 +376,12 @@ impl State {
                     crashes: brick.crashes,
                 })
             })
+            .chain(self.given_up.iter().map(|(name, &crashes)| BrickSummary {
+                name: name.clone(),
+                state: BrickState::GivenUp,
+                pid: None,
+                crashes,
+            }))
             .collect();
         bricks.sort_by(|a, b| a.name.cmp(&b.name));
         bricks
@@ -418,6 +436,7 @@ impl Brick {
             queue: Vec::new(),
             requests: HashMap::new(),
             crashes: 0,
+            gave_up: false,
             ready_at: None,
             launch_error: None,
         }
@@ -657,6 +676,7 @@ impl Brick {
                 crashes = self.crashes,
                 "giving up on the brick: its flows end"
             );
+            self.gave_up = true;
             for flow in mem::take(&mut self.flows).into_keys() {
                 self.lose(&flow, "the brick keeps crashing, giving up on it", ctx);
             }
@@ -1180,9 +1200,47 @@ mod tests {
         f.message(generation, BrickMessage::Ready);
         f.state.exited(&probe::name(), generation, &f.router);
         assert!(f.state.names().is_empty(), "given up");
+        assert_eq!(f.state.bricks(), [given_up(2)], "the give-up is told");
 
         let (generation, _brick) = f.running();
+        assert_eq!(f.state.bricks()[0].state, BrickState::Running);
+        assert_eq!(f.state.bricks()[0].crashes, 0);
         f.state.exited(&probe::name(), generation, &f.router);
         assert_eq!(f.phase(), Phase::Backoff, "relaunched, not given up");
+    }
+
+    #[test]
+    fn a_brick_given_up_on_is_forgotten_once_removed() {
+        let mut f = fixture(Config {
+            max_restarts: 0,
+            ..Config::default()
+        });
+        let (generation, _brick) = f.running();
+        f.state.exited(&probe::name(), generation, &f.router);
+        assert_eq!(f.state.bricks(), [given_up(1)]);
+        f.state.removed(&probe::name(), &f.router);
+        assert_eq!(f.state.bricks(), []);
+    }
+
+    #[test]
+    fn a_crash_without_subscribers_is_not_told_given_up() {
+        let mut f = fixture(Config {
+            max_restarts: 0,
+            ..Config::default()
+        });
+        let (generation, _brick) = f.running();
+        f.router.remove_anchor(A);
+        f.state.emptied(&qualified("a"), &f.router);
+        f.state.exited(&probe::name(), generation, &f.router);
+        assert_eq!(f.state.bricks(), [], "stopped, not given up");
+    }
+
+    fn given_up(crashes: u32) -> BrickSummary {
+        BrickSummary {
+            name: probe::name(),
+            state: BrickState::GivenUp,
+            pid: None,
+            crashes,
+        }
     }
 }

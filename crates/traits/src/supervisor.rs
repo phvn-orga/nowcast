@@ -17,6 +17,9 @@ pub enum BrickState {
     Stopping,
     /// Crashed, waiting to be relaunched.
     Waiting,
+    /// Given up on after too many crashes in a row, until a subscription
+    /// relaunches it.
+    GivenUp,
 }
 
 /// A brick the supervisor looks after, as [`Supervisor::bricks`] reports it.
@@ -175,8 +178,8 @@ pub trait Supervisor: Send + Sync + 'static {
     /// no such flow. Two kinds mapped to one flow keep the first.
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String>;
 
-    /// Every brick with a process or waiting to be relaunched, by name. A
-    /// brick with neither is stopped, and left out.
+    /// Every brick with a process, waiting to be relaunched or given up on,
+    /// by name. Any other brick is stopped, and left out.
     fn bricks(&self) -> Vec<BrickSummary>;
 
     /// Relays an input to the brick serving `flow`. `detail` is JSON bytes,

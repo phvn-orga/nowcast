@@ -295,6 +295,12 @@ fn the_status_tells_the_whole_state_without_a_session() {
         // A brick still running once disabled is listed too.
         harness.supervisor.set_bricks(vec![
             BrickSummary {
+                name: BrickName::new("broken").unwrap(),
+                state: BrickState::GivenUp,
+                pid: None,
+                crashes: 9,
+            },
+            BrickSummary {
                 name: BrickName::new("gone").unwrap(),
                 state: BrickState::Stopping,
                 pid: Some(7),
@@ -316,6 +322,7 @@ fn the_status_tells_the_whole_state_without_a_session() {
             json!({
                 "service": service,
                 "bricks": [
+                    { "name": "broken", "state": "given_up", "pid": null, "crashes": 9 },
                     { "name": "gone", "state": "stopping", "pid": 7, "crashes": 0 },
                     { "name": probe::NAME, "state": "running", "pid": 42, "crashes": 1 },
                 ],
