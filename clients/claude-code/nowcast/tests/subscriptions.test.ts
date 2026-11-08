@@ -330,6 +330,8 @@ test('after the stream comes back, a subscription the service forgot is made aga
   await $.session.start(START)
   await w.clock.settle()
   await call($, 'subscribe', PR)
+  // Active a minute: taken again at once.
+  await w.clock.advance(60_000)
 
   svc.restart()
   w.child().retrying('the service closed the stream')
@@ -368,7 +370,7 @@ test('once `watch` is started again, forgotten subscriptions are made again', pl
   await call($, 'subscribe', PR)
   // The value the subscription answered, which the stream also sends.
   w.child().event('update', update(FLOW, '1', { number: 1 }))
-  await w.clock.settle()
+  await w.clock.advance(60_000)
 
   svc.restart()
   w.child().exit(1)
@@ -409,6 +411,8 @@ test('a flow that ends is checked, and its subscription made again', plugins, as
   svc.restart()
   w.child().event('flow-ended', { flow: FLOW })
   await w.clock.settle()
+  expect(w.subscription(ID)).toMatchObject({ status: 'retrying', error: { code: 'lost' }, service: null })
+  await w.clock.advance(1_000)
 
   expect(svc.known()).toEqual(['s-2'])
   expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-2' })
@@ -424,7 +428,7 @@ test('a brick removed leaves its subscriptions failed, until unsubscribed', plug
 
   svc.removeBrick()
   w.child().event('flow-ended', { flow: FLOW })
-  await w.clock.settle()
+  await w.clock.advance(1_000)
 
   expect(w.subscription(ID)).toEqual({
     ...WANTED,
@@ -447,7 +451,7 @@ test('a failed subscription is tried again when its mod asks for it again', plug
   await call($, 'subscribe', PR)
   svc.removeBrick()
   w.child().event('flow-ended', { flow: FLOW })
-  await w.clock.settle()
+  await w.clock.advance(1_000)
 
   // Still removed: one more attempt, failed again, and kept.
   expect(await call($, 'subscribe', PR)).toMatchObject({ ok: true, status: 'failed', error: { code: 'unknown_brick' } })
@@ -458,6 +462,75 @@ test('a failed subscription is tried again when its mod asks for it again', plug
   svc.enableBrick()
   expect(await call($, 'subscribe', PR)).toEqual({ ok: true, subscription: ID, status: 'active', error: null, flow: FLOW })
   expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-2' })
+})
+
+test('a subscription lost soon after it turned active is taken again later each time', plugins, async ($, on) => {
+  const svc = restartable()
+  const w = world(on, { answer: svc.answer })
+  await $.session.start(START)
+  await w.clock.settle()
+  await call($, 'subscribe', PR)
+  const lose = async () => {
+    svc.restart()
+    w.child().event('flow-ended', { flow: FLOW })
+    await w.clock.settle()
+  }
+
+  // As a brick the service gives up on: lost, taken again after 1 s, then 2 s.
+  await lose()
+  expect(posts(w.requests).length).toBe(1)
+  await w.clock.advance(1_000)
+  expect(posts(w.requests).length).toBe(2)
+  await lose()
+  await w.clock.advance(1_999)
+  expect(posts(w.requests).length).toBe(2)
+  await w.clock.advance(1)
+  expect(posts(w.requests).length).toBe(3)
+})
+
+test('a subscription lost after a minute active is taken again at once', plugins, async ($, on) => {
+  const svc = restartable()
+  const w = world(on, { answer: svc.answer })
+  await $.session.start(START)
+  await w.clock.settle()
+  await call($, 'subscribe', PR)
+
+  await w.clock.advance(60_000)
+  svc.restart()
+  w.child().event('flow-ended', { flow: FLOW })
+  await w.clock.settle()
+  expect(posts(w.requests).length).toBe(2)
+  expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-2' })
+})
+
+test('an unsubscribe the service missed is sent again when the stream comes back', plugins, async ($, on) => {
+  let down = false
+  const w = world(on, {
+    answer: service({
+      'POST /v1/subscriptions': subscribed('s-1'),
+      'DELETE /v1/subscriptions/s-1': () => (down ? 'connection refused' : { status: 204 }),
+    }),
+  })
+  await $.session.start(START)
+  await w.clock.settle()
+  await call($, 'subscribe', PR)
+
+  down = true
+  expect(await call($, 'unsubscribe', { name: 'pr' })).toEqual({ ok: true })
+  expect(w.subscription(ID)).toBeNull()
+
+  down = false
+  w.child().retrying('lost')
+  w.child().connected()
+  await w.clock.settle()
+  const deletes = () => w.requests.filter(r => r.method === 'DELETE').length
+  expect(deletes()).toBe(2)
+
+  // Delivered: not sent a third time.
+  w.child().retrying('lost')
+  w.child().connected()
+  await w.clock.settle()
+  expect(deletes()).toBe(2)
 })
 
 test('after a /clear, the subscriptions are written again into the new state', plugins, async ($, on) => {
@@ -496,7 +569,8 @@ test('a reloaded mod takes back the subscriptions its state holds', plugins, asy
   await $.session.start(START)
   await w.clock.settle()
   w.child().connected()
-  await w.clock.settle()
+  // Its time active is unknown: taken again after the first delay.
+  await w.clock.advance(1_000)
 
   expect(svc.known()).toEqual(['s-1'])
   expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-1' })

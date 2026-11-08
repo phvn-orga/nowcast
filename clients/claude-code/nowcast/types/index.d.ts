@@ -80,7 +80,10 @@ export type NowcastSubscription = {
    * it again.
    */
   status: 'active' | 'retrying' | 'failed'
-  /** Why it is retrying or failed, as `NowcastFailure` says it; null while active. */
+  /**
+   * Why it is retrying or failed, as `NowcastFailure` says it, or `lost`
+   * when the service no longer served it; null while active.
+   */
   error: { code: string; message: string } | null
   /**
    * The flow id, the member of the state's `flows`; null until the service
@@ -142,7 +145,8 @@ export type Nowcast = {
   subscribe(request: NowcastSubscribeRequest): Promise<NowcastSubscribed | NowcastFailure>
   /**
    * Ends the calling mod's subscription `name`; a name it does not hold
-   * answers `ok` as well.
+   * answers `ok` as well. A delete the service does not receive is sent
+   * again each time the stream comes back.
    */
   unsubscribe(request: { name: string }): Promise<NowcastDone | NowcastFailure>
   /** `POST /v1/flows/{flow}/refresh`: the brick publishes again once it has read. */
