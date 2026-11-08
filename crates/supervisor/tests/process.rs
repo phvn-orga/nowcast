@@ -185,7 +185,9 @@ async fn a_test_brick_never_ready_fails_the_subscription_with_the_timeout_error(
     let start = Instant::now();
     assert_eq!(
         harness.resolve("a").await,
-        Err(ResolveError::Unavailable(BrickUnavailable(probe::name())))
+        Err(ResolveError::Unavailable(BrickUnavailable::new(
+            probe::name()
+        )))
     );
     assert!(start.elapsed() >= config.ready_timeout);
     exited(harness.launched().await).await;
@@ -245,18 +247,78 @@ async fn after_a_crash_flows_keep_their_ids_and_receive_values_again() {
     }
 }
 
-#[tokio::test]
-async fn a_brick_that_cannot_be_launched_is_unavailable() {
-    let dir = tempfile::tempdir().unwrap();
+/// What a subscription to a brick launched from `declaration`, in `dir`,
+/// fails with.
+async fn launch_failure(declaration: BrickDeclaration, dir: TempDir) -> ResolveError {
     let control = Control::bind(dir.path().join("control.sock")).unwrap();
-    let declaration = probe::declaration(
-        vec![dir.path().join("missing").to_string_lossy().into_owned()],
+    let harness = Harness::with(declaration, fast(), control, dir);
+    harness.resolve("a").await.unwrap_err()
+}
+
+fn unavailable_because(cause: String) -> ResolveError {
+    ResolveError::Unavailable(BrickUnavailable {
+        brick: probe::name(),
+        cause: Some(cause),
+    })
+}
+
+#[tokio::test]
+async fn a_brick_that_cannot_be_launched_is_unavailable_with_the_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing").to_string_lossy().into_owned();
+    let declaration = probe::declaration(vec![missing.clone()], dir.path().to_owned());
+    assert_eq!(
+        launch_failure(declaration, dir).await,
+        unavailable_because(format!("program {missing:?} not found"))
+    );
+}
+
+#[tokio::test]
+async fn a_program_missing_from_the_path_names_the_path_searched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().into_owned();
+    let mut declaration = probe::declaration(
+        vec!["nowcast-no-such-program".into()],
         dir.path().to_owned(),
     );
-    let harness = Harness::with(declaration, fast(), control, dir);
+    declaration.env.insert("PATH".into(), path.clone());
     assert_eq!(
-        harness.resolve("a").await,
-        Err(ResolveError::Unavailable(BrickUnavailable(probe::name())))
+        launch_failure(declaration, dir).await,
+        unavailable_because(format!(
+            "program \"nowcast-no-such-program\" not found in PATH {path}"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_program_that_is_not_executable_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("brick").to_string_lossy().into_owned();
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    let declaration = probe::declaration(vec![program.clone()], dir.path().to_owned());
+    assert_eq!(
+        launch_failure(declaration, dir).await,
+        unavailable_because(format!("program {program:?} is not executable"))
+    );
+}
+
+#[tokio::test]
+async fn a_program_whose_interpreter_is_missing_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("brick").to_string_lossy().into_owned();
+    std::fs::write(&program, "#!/nonexistent/interpreter\n").unwrap();
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let declaration = probe::declaration(vec![program.clone()], dir.path().to_owned());
+    assert_eq!(
+        launch_failure(declaration, dir).await,
+        unavailable_because(format!(
+            "program {program:?} cannot be run: the interpreter it names \
+             (#! line or dynamic loader) is missing"
+        ))
     );
 }
 
@@ -490,7 +552,9 @@ async fn shutdown_kills_a_brick_that_ignores_shutdown_and_sigterm() {
     let (resolved, ()) = tokio::join!(harness.resolve("a"), stopped);
     assert_eq!(
         resolved,
-        Err(ResolveError::Unavailable(BrickUnavailable(probe::name())))
+        Err(ResolveError::Unavailable(BrickUnavailable::new(
+            probe::name()
+        )))
     );
 }
 

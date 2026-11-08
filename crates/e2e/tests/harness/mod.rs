@@ -161,15 +161,25 @@ impl Service {
     /// Enables a brick with `nowcast bricks enable`, in the daemon's
     /// configuration and data directories.
     pub async fn enable(&self, brick: &str) {
+        let ran = self.bricks(&["enable", brick]).await;
+        assert_eq!(ran.status, Some(0), "{ran:?}");
+    }
+
+    /// Runs `nowcast bricks` with `args`, in the daemon's configuration and
+    /// data directories, the daemon at hand.
+    pub async fn bricks(&self, args: &[&str]) -> Ran {
         let output = Command::new(cli_binary())
-            .args(["bricks", "enable", brick])
+            .arg("bricks")
+            .args(args)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("HOME", self.root.path())
+            .env("XDG_RUNTIME_DIR", self.runtime())
             .env_remove("XDG_DATA_HOME")
+            .env_remove("NOWCAST_SOCKET")
             .output()
             .await
             .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        Ran::from(output)
     }
 
     fn runtime(&self) -> PathBuf {

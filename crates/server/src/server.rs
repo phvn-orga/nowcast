@@ -206,10 +206,14 @@ where
         let anchor = anchor.map_err(|e| {
             HttpError::internal(format!("cannot identify the connected process: {e}"))
         })?;
-        if route != Route::Session && self.sessions.current(anchor).is_none() {
+        // What the service says of itself belongs to no session.
+        if !matches!(route, Route::Session | Route::Service)
+            && self.sessions.current(anchor).is_none()
+        {
             return Err(HttpError::session_required());
         }
         match route {
+            Route::Service => Ok(service()),
             Route::Session => {
                 let DeclareSession { id } = read_json(body).await?;
                 if id.is_empty() {
@@ -444,6 +448,16 @@ async fn read_body(body: Incoming) -> Result<Bytes, HttpError> {
             }
         })?
         .to_bytes())
+}
+
+/// The service's own `PATH`, the one bricks are looked up in: `null` when
+/// unset or not UTF-8.
+fn service() -> Response<Body> {
+    let path = std::env::var("PATH").ok();
+    json(
+        StatusCode::OK,
+        serde_json::json!({ "path": path }).to_string(),
+    )
 }
 
 fn empty(status: StatusCode) -> Response<Body> {

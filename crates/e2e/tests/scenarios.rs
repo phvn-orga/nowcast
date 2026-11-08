@@ -399,3 +399,62 @@ async fn the_tool_from_a_plain_shell_is_its_own_anchor() {
     let (got, _) = service.run_from_shell(&["--json", "get", "probe/a"]).await;
     assert_eq!(got.error_code(), "unknown_flow");
 }
+
+/// A copy of the test brick's declaration, named `name`, whose program is a
+/// bare name the daemon's `PATH` does not hold.
+fn declaration_without_program(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = nowcast_test_brick::manifest();
+    let text = std::fs::read_to_string(&source).unwrap();
+    let text = text
+        .replace(r#"name = "probe""#, &format!("name = {name:?}"))
+        .replace(
+            r#"["nowcast-test-brick"]"#,
+            r#"["nowcast-no-such-program"]"#,
+        );
+    let schemas = dir.path().join("schemas");
+    std::fs::create_dir(&schemas).unwrap();
+    for entry in std::fs::read_dir(source.parent().unwrap().join("schemas")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), schemas.join(entry.file_name())).unwrap();
+    }
+    let path = dir.path().join("brick.toml");
+    std::fs::write(&path, text).unwrap();
+    (dir, path)
+}
+
+/// Enabling a brick whose program the daemon cannot find is refused; forced,
+/// its subscriptions fail with the cause.
+#[tokio::test]
+async fn a_program_missing_from_the_daemons_path_is_refused_then_reported() {
+    let service = Service::start().await;
+    let (_dir, declaration) = declaration_without_program("lost");
+    let declaration = declaration.to_str().unwrap();
+
+    let refused = service.bricks(&["enable", declaration]).await;
+    assert_eq!(refused.status, Some(2), "{refused:?}");
+    assert!(
+        refused
+            .stderr
+            .contains(r#"program "nowcast-no-such-program" not found in the service's PATH"#),
+        "{refused:?}"
+    );
+
+    let forced = service.bricks(&["enable", "--force", declaration]).await;
+    assert_eq!(forced.status, Some(0), "{forced:?}");
+    let error = wait_for("the brick is known", async || {
+        let ran = service
+            .run(&["--json", "subscribe", "lost", "item", &params("a")])
+            .await;
+        (ran.error_code() == "brick_unavailable").then_some(ran)
+    })
+    .await;
+    let error: Value = serde_json::from_str(&error.stderr).unwrap();
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            r#"brick lost cannot be launched: program "nowcast-no-such-program" not found in PATH "#
+        ),
+        "{message}"
+    );
+}

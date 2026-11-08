@@ -226,9 +226,9 @@ pub async fn a_brick_missing_ready_is_unavailable<S: SupervisorSubject>() {
     let result = flow_of(pending).await;
     assert_eq!(
         result,
-        Err(ResolveError::Unavailable(nowcast_traits::BrickUnavailable(
-            probe::name()
-        )))
+        Err(ResolveError::Unavailable(
+            nowcast_traits::BrickUnavailable::new(probe::name())
+        ))
     );
     assert!(start.elapsed() >= READY_TIMEOUT);
     stopped(&mut brick).await;
@@ -423,7 +423,9 @@ pub async fn input_is_relayed<S: SupervisorSubject>() {
         world
             .supervisor
             .input(&qualified("a"), probe::INPUT_TYPE, b"{}".to_vec()),
-        Err(InputError::Unavailable(BrickUnavailable(probe::name())))
+        Err(InputError::Unavailable(
+            BrickUnavailable::new(probe::name())
+        ))
     );
 }
 

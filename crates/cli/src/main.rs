@@ -35,7 +35,10 @@ fn main() -> ExitCode {
         Command::Brick { name } => return brick(name),
         Command::Bricks { action } => {
             let result = match action {
-                BricksAction::Enable { brick } => commands::bricks::enable(brick),
+                BricksAction::Enable { brick, force } => {
+                    let service = (!force).then(|| client(&cli));
+                    commands::bricks::enable(brick, service)
+                }
                 BricksAction::Disable { brick } => commands::bricks::disable(brick),
             };
             return match result {
@@ -87,10 +90,15 @@ fn brick(name: &str) -> ExitCode {
     }
 }
 
+/// A client of the service the options and environment designate.
+fn client(cli: &Cli) -> Result<Client, CliError> {
+    let socket = config::socket_path(cli.socket.clone(), std::env::var_os("XDG_RUNTIME_DIR"))?;
+    let session = config::session_id(cli.session.clone(), std::process::id())?;
+    Ok(Client::new(socket, session))
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let socket = config::socket_path(cli.socket, std::env::var_os("XDG_RUNTIME_DIR"))?;
-    let session = config::session_id(cli.session, std::process::id())?;
-    let client = Client::new(socket, session);
+    let client = client(&cli)?;
     let mut out = io::stdout().lock();
     let mut err = io::stderr();
     match cli.command {

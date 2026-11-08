@@ -5,15 +5,29 @@ use nowcast_types::{ApiError, ApiErrorCode, BrickName, Event, QualifiedFlowId, S
 
 use crate::{AnchorId, UnknownFlow};
 
-/// A brick did not answer `hello` with `ready` within
-/// [`nowcast_types::READY_TIMEOUT`]. It is stopped, and the client gets `503`
-/// `brick_unavailable`.
+/// A brick cannot serve for now: its process could not be launched, or did
+/// not answer `hello` with `ready` within [`nowcast_types::READY_TIMEOUT`]
+/// and was stopped. The client gets `503` `brick_unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrickUnavailable(pub BrickName);
+pub struct BrickUnavailable {
+    pub brick: BrickName,
+    /// Why its last launch failed, when it did: `program "node" not found in
+    /// PATH /usr/bin:/bin`.
+    pub cause: Option<String>,
+}
+
+impl BrickUnavailable {
+    pub fn new(brick: BrickName) -> Self {
+        Self { brick, cause: None }
+    }
+}
 
 impl fmt::Display for BrickUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "brick {} did not answer in time", self.0)
+        match &self.cause {
+            Some(cause) => write!(f, "brick {} cannot be launched: {cause}", self.brick),
+            None => write!(f, "brick {} did not answer in time", self.brick),
+        }
     }
 }
 

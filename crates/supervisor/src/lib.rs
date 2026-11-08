@@ -10,7 +10,8 @@
 //! - **Launch** at the first subscription, from the declaration's command. The
 //!   service sends `hello` and waits for `ready`. Without it in time, the brick
 //!   is stopped and every subscription waiting on it fails with
-//!   [`nowcast_traits::BrickUnavailable`]. Subscriptions arriving meanwhile
+//!   [`nowcast_traits::BrickUnavailable`]. A process that cannot be started
+//!   fails them the same way, with the cause. Subscriptions arriving meanwhile
 //!   wait for the same launch.
 //! - **Subscriptions**: each one is a `subscribe`, answered with the flow,
 //!   prefixed with the brick's name, or with `error`. On the answer, the

@@ -13,6 +13,8 @@ use crate::error::HttpError;
 pub(crate) enum Route<'a> {
     /// `PUT /v1/session`
     Session,
+    /// `GET /v1/service`
+    Service,
     /// `POST /v1/subscriptions`
     Subscribe,
     /// `DELETE /v1/subscriptions/{subscription}`
@@ -39,6 +41,7 @@ impl<'a> Route<'a> {
             .collect();
         let (route, allowed) = match segments.as_slice() {
             ["session"] => (Self::Session, Method::PUT),
+            ["service"] => (Self::Service, Method::GET),
             ["subscriptions"] => (Self::Subscribe, Method::POST),
             ["subscriptions", id] => (Self::Unsubscribe(id), Method::DELETE),
             ["flows", flow] => (Self::Flow(flow), Method::GET),
@@ -143,6 +146,7 @@ mod tests {
     #[test]
     fn every_route_parses() {
         assert_eq!(parse(Method::PUT, "/v1/session"), Ok(Route::Session));
+        assert_eq!(parse(Method::GET, "/v1/service"), Ok(Route::Service));
         assert_eq!(
             parse(Method::POST, "/v1/subscriptions"),
             Ok(Route::Subscribe)

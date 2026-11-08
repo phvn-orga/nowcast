@@ -34,7 +34,7 @@ impl FakeSupervisor {
 
     /// The brick misses its `ready` timeout from now on.
     pub fn set_unavailable(&self, brick: BrickName) {
-        let error = ResolveError::Unavailable(BrickUnavailable(brick.clone()));
+        let error = ResolveError::Unavailable(BrickUnavailable::new(brick.clone()));
         self.state.lock().unwrap().failures.insert(brick, error);
     }
 
