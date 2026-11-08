@@ -1,6 +1,7 @@
-// The oldest service this mod accepts, and how the version `nowcast
-// --version` prints compares to it (`00-cadrage.md` and `02-clients.md` on
-// the design branch). Read without touching the engine.
+// The oldest service this mod accepts, and how the service's version, as
+// `GET /v1/service` tells it or `nowcast --version` prints it, compares to it
+// (`00-cadrage.md` and `02-clients.md` on the design branch). Read without
+// touching the engine.
 
 /**
  * The oldest version of the service this mod accepts. The change that makes
@@ -14,6 +15,11 @@ const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.
 export function printedVersion(stdout: string): string | null {
   const match = /^nowcast (\S+)$/.exec(stdout.trim())
   return match?.[1] !== undefined && SEMVER.test(match[1]) ? match[1] : null
+}
+
+/** Whether `text` is a semver version, as `0.1.0-alpha.2`. */
+export function isVersion(text: string): boolean {
+  return SEMVER.test(text)
 }
 
 /** Whether `version` comes before `than` in semver precedence. */

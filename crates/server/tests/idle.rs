@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -58,6 +58,7 @@ fn serve(listener: UnixListener, socket: PathBuf, dir: TempDir, idle: Duration) 
         discovery,
         identity: Arc::new(FakeIdentity::new()),
         sessions: Arc::new(FakeSessions::new()),
+        started_at: SystemTime::now(),
         validators: Default::default(),
     };
     let task = tokio::spawn(server.serve_until_idle(listener, idle));
@@ -283,6 +284,7 @@ async fn serve_runs_whatever_the_idle_time() {
         discovery: Arc::new(FakeDiscovery::new()),
         identity: Arc::new(FakeIdentity::new()),
         sessions: Arc::new(FakeSessions::new()),
+        started_at: SystemTime::now(),
         validators: Default::default(),
     };
     let task = tokio::spawn(server.serve(listener));

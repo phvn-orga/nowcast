@@ -5,7 +5,7 @@
 // subscriptions themselves are kept by `subscriptions.ts`.
 
 import type { EngineInterface } from 'claude-code'
-import { OLDEST_SERVICE, isOlder, printedVersion } from './version'
+import { OLDEST_SERVICE, isOlder, isVersion, printedVersion } from './version'
 import type {
   Nowcast,
   NowcastDone,
@@ -119,20 +119,38 @@ export async function history($: $, flow: string, after: string): Promise<Nowcas
 let verdict: Promise<string | null> | undefined
 
 /**
- * Reads `nowcast --version` again: why the service is too old for this mod,
- * or null. Until the next reading, every request goes by this one.
+ * Reads the service's version again: why the service is too old for this
+ * mod, or null. Until the next reading, every request goes by this one.
  */
 export function checkService($: $): Promise<string | null> {
   verdict = tooOld($)
   return verdict
 }
 
-/** A version that cannot be read is let through: what fails next says why. */
+/**
+ * The running service's version, from `GET /v1/service`. A service that does
+ * not tell it, older than the field or out of reach, falls back on the
+ * installed binary's, `nowcast --version`. A version that cannot be read is
+ * let through: what fails next says why.
+ */
 async function tooOld($: $): Promise<string | null> {
+  const running = await runningVersion($)
+  if (running !== null) {
+    if (!isOlder(running, OLDEST_SERVICE)) return null
+    return `the running ${CLI} service is ${running}, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and restart the service`
+  }
   const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 }).catch(() => null)
   const version = ran?.exitCode === 0 ? printedVersion(ran.stdout) : null
   if (version === null || !isOlder(version, OLDEST_SERVICE)) return null
   return `${CLI} ${version} is older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it`
+}
+
+/** The `version` `GET /v1/service` answers, or null when it tells none. */
+async function runningVersion($: $): Promise<string | null> {
+  const answer = await send($, 'GET', '/v1/service', undefined)
+  if ('code' in answer || answer.status !== 200) return null
+  const body = parse(answer.text)
+  return isObject(body) && typeof body.version === 'string' && isVersion(body.version) ? body.version : null
 }
 
 /**

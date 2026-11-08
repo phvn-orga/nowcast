@@ -29,7 +29,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use nowcast_discovery::{
     DiscoveryConfig, FsDiscovery, NativeFiles, native_dir_from_env, refresh_natives,
@@ -204,6 +204,7 @@ async fn serve(
         discovery,
         identity,
         sessions,
+        started_at: SystemTime::now(),
         validators: Default::default(),
     };
     let serving = async move {
