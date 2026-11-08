@@ -54,7 +54,17 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.id === id && e.value !== null) {
       if (e.value.flow !== null) flow = e.value.flow
-      if (e.value.status !== 'active') $.ui.status(`nowcast example: ${e.value.status}, ${e.value.error?.message ?? ''}`)
+      if (e.value.status !== 'active') {
+        $.ui.status(`nowcast example: ${e.value.status}, ${e.value.error?.message ?? ''}`)
+      } else if (e.value.flow !== null) {
+        // Active again: the flow's value replaces the wait, even when no new
+        // value comes to write it.
+        const active = e.value.flow
+        void $.state
+          .get({ plugin: 'nowcast', key: 'flows', id: active })
+          .then(({ value }) => $.ui.status(describe(value ?? { last: null, error: null, ended: false })))
+          .catch(() => undefined)
+      }
     }
     return result
   })

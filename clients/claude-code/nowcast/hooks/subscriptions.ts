@@ -70,7 +70,10 @@ export function subscribeFor(
 }
 
 /** `$.nowcast.unsubscribe` from `owner`. */
-export function unsubscribeFor($: $, owner: string, name: string): Promise<NowcastDone | NowcastFailure> {
+export function unsubscribeFor($: $, owner: string, name: unknown): Promise<NowcastDone | NowcastFailure> {
+  if (typeof name !== 'string' || name === '') {
+    return Promise.resolve(failure('invalid_name', 'a subscription needs a name, a non-empty string'))
+  }
   const id = `${owner}/${name}`
   return serial(id, async () => {
     const held = entries.get(id)
@@ -110,14 +113,15 @@ export async function rewrite($: $): Promise<void> {
 
 /**
  * Takes back what the state holds, once this mod reloaded: its memory is
- * new, its state is not. What waits goes on when the stream opens.
+ * new, its state is not. What waits goes on when the stream opens. A
+ * subscription a mod took meanwhile is newer than the state's: it stays.
  */
 export async function restore($: $): Promise<void> {
-  if (entries.size > 0) return
   const { value: ids } = await $.state.get(SUBSCRIBED)
   for (const id of ids ?? []) {
+    if (entries.has(id)) continue
     const { value } = await $.state.get({ ...SUBSCRIPTIONS, id })
-    if (value === undefined || value === null) continue
+    if (value === undefined || value === null || entries.has(id)) continue
     const wanted = { brick: value.brick, kind: value.kind, params: value.params }
     entries.set(id, { id, wanted, value, refused: 0, attempt: 0 })
   }

@@ -171,6 +171,9 @@ test('a subscription without a name fails, and nothing is sent', plugins, async 
   const w = world(on)
   expect(await call($, 'subscribe', WANTED)).toMatchObject({ ok: false, status: null, code: 'invalid_name' })
   expect(await call($, 'subscribe', { ...WANTED, name: '' })).toMatchObject({ ok: false, code: 'invalid_name' })
+  // An unsubscribe without a name, as the former `{ subscription }` asked,
+  // ends nothing: it fails rather than answer `ok`.
+  expect(await call($, 'unsubscribe', { subscription: 's-1' })).toMatchObject({ ok: false, code: 'invalid_name' })
   expect(w.requests).toEqual([])
 })
 
@@ -451,4 +454,31 @@ test('a reloaded mod takes back the subscriptions its state holds', plugins, asy
   expect(w.subscription(ID)).toMatchObject({ status: 'active', service: 's-1' })
   expect(await call($, 'unsubscribe', { name: 'pr' })).toEqual({ ok: true })
   expect(svc.known()).toEqual([])
+})
+
+test('a subscription taken before the reloaded mod restores stays, and the others come back', plugins, async ($, on) => {
+  const svc = restartable()
+  const w = world(on, { answer: svc.answer })
+  on('state.get', { plugin: 'nowcast', key: 'subscribed' }, () => ({ value: { value: [ID, 'other/pr'], version: 1 } }))
+  on('state.get', { plugin: 'nowcast', key: 'subscriptions' }, (_, e) => ({
+    value:
+      e.id === ID || e.id === 'other/pr'
+        ? {
+            value: { ...WANTED, status: 'active', error: null, flow: FLOW, service: e.id === ID ? 's-0' : 's-9' },
+            version: 1,
+          }
+        : { value: undefined, version: 0 },
+  }))
+
+  // A mod subscribes before the reloaded mod has read its state back.
+  await call($, 'subscribe', PR)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  // The fresh subscription is the one kept, and the other one is back.
+  expect(await call($, 'unsubscribe', { name: 'pr' })).toEqual({ ok: true })
+  expect(svc.known()).toEqual([])
+  await call($, 'unsubscribe', { name: 'pr' }, 'call-other')
+  const deletes = w.requests.filter(r => r.method === 'DELETE').map(r => r.url.replace('http://nowcast', ''))
+  expect(deletes).toEqual(['/v1/subscriptions/s-1', '/v1/subscriptions/s-9'])
 })
