@@ -133,6 +133,8 @@ test('a measure subscribes the session to its flow, then sends what it measured'
       root: '/project',
       model: 'claude-opus-5-5',
       tokens: { input: 10, output: 20, cache_creation: 30, cache_read: 40 },
+      side_tokens: times(0),
+      side_since: new Date(1_000_000).toISOString(),
       context: MEASURE.context,
       effort: 'high',
       last_request_at: new Date(1_000_000).toISOString(),
@@ -153,6 +155,8 @@ test("a mod's fork counts in the tokens, and refreshes the main thread's cache",
   await model($, 'fork', { prompt: 'Keep warm.' })
   const measures = await sent(w)
   expect(measures?.tokens).toEqual(times(2))
+  // The transcripts do not hold the fork: it counts apart as well.
+  expect(measures?.side_tokens).toEqual(times(1))
   expect(measures?.last_request_at).toBe(at(1_060_000))
 })
 
@@ -234,6 +238,7 @@ test("a mod's completion and a compaction's summary count in the tokens, and lea
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Hi.', toolUses: [] }] } as never)
   const measures = await sent(w)
   expect(measures?.tokens).toEqual(times(3))
+  expect(measures?.side_tokens).toEqual(times(2))
   expect(measures?.last_request_at).toBe(at(1_000_000))
 })
 

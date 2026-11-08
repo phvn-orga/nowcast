@@ -16,7 +16,7 @@
     },
     "tokens": {
       "type": "object",
-      "description": "Tokens spent since the session began, by category: the main thread, its subagents, the mods' forks and completions, and the compactions' summaries.",
+      "description": "Tokens the session counts, by category: its transcripts', then every request it saw since the mod loaded (the main thread, its subagents, the mods' forks and completions, the compactions' summaries). The brick adds the earlier loads' side_tokens.",
       "properties": {
         "input": { "type": "integer" },
         "output": { "type": "integer" },
@@ -24,6 +24,17 @@
         "cache_read": { "type": "integer" }
       }
     },
+    "side_tokens": {
+      "type": "object",
+      "description": "The part of tokens the transcripts do not hold (forks, completions, compactions' summaries), counted since side_since.",
+      "properties": {
+        "input": { "type": "integer" },
+        "output": { "type": "integer" },
+        "cache_creation": { "type": "integer" },
+        "cache_read": { "type": "integer" }
+      }
+    },
+    "side_since": { "type": "string", "description": "When the mod loaded and began counting side_tokens, RFC 3339." },
     "last_request_at": { "type": "string", "description": "The last request that read or wrote the main thread's prompt cache, RFC 3339." },
     "cache_ttl": { "enum": ["5m", "1h", null], "description": "The lifetime of the main thread's prompt cache, when known." },
     "rate_limits": {

@@ -11,6 +11,9 @@
 //!   there and reads back its entry. The flow's release ends the session.
 //! - `sessions`, `sessions {id}`: the running sessions, or one.
 //!
+//! Each session measured is kept on disk under `$XDG_STATE_HOME` (see
+//! [`store`]), read back at start and dropped 30 days after its last measure.
+//!
 //! The token is read from `$HOME/.claude/.credentials.json` and never
 //! refreshed; the copy from `$HOME/.claude.json`. [`usage::API_VAR`] replaces
 //! the API's address, for tests.
@@ -18,6 +21,7 @@
 mod pacer;
 mod quotas;
 mod state;
+mod store;
 mod usage;
 
 use std::path::PathBuf;
@@ -152,6 +156,13 @@ async fn serve() -> ExitCode {
     let (fetched_tx, mut fetched) = unbounded_channel::<Fetched>();
     let (changed_tx, mut changed) = unbounded_channel::<()>();
     let mut state = State::default();
+    let kept = store::dir(
+        std::env::var_os("XDG_STATE_HOME"),
+        Some(home.clone().into()),
+    );
+    if let Some(dir) = &kept {
+        restore(&mut state, dir);
+    }
     let mut reader: Option<Reader> = None;
 
     loop {
@@ -167,6 +178,7 @@ async fn serve() -> ExitCode {
                 }
                 let refresh_quotas = matches!(&msg, ServiceMessage::Refresh { flow } if flow.as_str() == "quotas");
                 let out = state.on_service(msg, Timestamp::now());
+                save(&mut state, kept.as_deref());
                 if !send(&mut output, out).await {
                     return ExitCode::FAILURE;
                 }
@@ -245,6 +257,43 @@ async fn serve() -> ExitCode {
                     r.pacer.hurry(Instant::now());
                 }
             }
+        }
+    }
+}
+
+/// Takes back the sessions kept in `dir`, and removes the files that are not
+/// one or that expired.
+fn restore(state: &mut State, dir: &std::path::Path) {
+    let files = match store::load(dir) {
+        Ok(files) => files,
+        Err(e) => return log(format_args!("cannot read {}: {e}", dir.display())),
+    };
+    let now = Timestamp::now();
+    for (id, file) in files {
+        let taken = match &file {
+            Ok(value) => state.restore(&id, value, now),
+            Err(why) => {
+                log(format_args!("session {id}: unreadable file: {why}"));
+                false
+            }
+        };
+        if !taken && let Err(e) = store::remove(dir, &id) {
+            log(format_args!("session {id}: cannot remove its file: {e}"));
+        }
+    }
+}
+
+/// Writes the sessions that changed. Without a directory, or on a failure,
+/// the brick goes on in memory. A session whose id cannot name a file is
+/// kept in memory only.
+fn save(state: &mut State, dir: Option<&std::path::Path>) {
+    let changed = state.take_changed();
+    let Some(dir) = dir else { return };
+    for (id, file) in changed {
+        if store::storable(&id)
+            && let Err(e) = store::save(dir, &id, &file)
+        {
+            log(format_args!("session {id}: cannot save: {e}"));
         }
     }
 }

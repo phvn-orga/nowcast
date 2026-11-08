@@ -13,6 +13,11 @@
 // session, and the lifetime of the main thread's prompt cache, read from the
 // last response that wrote to it. An unreadable transcript only leaves them
 // out: the count starts at the load, and the brick assumes one hour.
+//
+// The mods' forks and completions and the compactions' summaries are not in
+// the transcripts: they are also counted apart, from this mod's load
+// (`side_tokens`, `side_since`). The brick keeps the counts of the earlier
+// loads and adds them, so a reload loses none.
 
 import type { EngineInterface, On } from 'claude-code'
 import { input } from './client'
@@ -50,6 +55,10 @@ type Measured = {
   /** The brick is not enabled: nothing is sent for this session. */
   off: boolean
   tokens: Tokens
+  /** The part of `tokens` the transcripts do not hold, since `since`. */
+  side: Tokens
+  /** When this mod began measuring the session. */
+  since: string
   /** The transcripts' count, which requests wait for: see `seed`. */
   seeding: Promise<void>
   context?: unknown
@@ -111,7 +120,7 @@ export function registerMeasures(on: On): void {
       await request.m.seeding.catch(() => undefined)
     }
     const result = yield* next(e)
-    if (request !== undefined) count($, request, result.usage, e.agentId === undefined)
+    if (request !== undefined) count($, request, result.usage, { refreshes: e.agentId === undefined, side: false })
     return result
   })
 
@@ -127,7 +136,7 @@ export function registerMeasures(on: On): void {
     if (request !== undefined && result !== undefined && 'usage' in result) {
       const main = request.m.stepEffort
       const atMainEffort = e.effort === undefined || (main !== undefined && result.effort === main.value)
-      count($, request, result.usage, atMainEffort)
+      count($, request, result.usage, { refreshes: atMainEffort, side: true })
     }
     return answer
   })
@@ -137,13 +146,15 @@ export function registerMeasures(on: On): void {
   on('model.complete', async ($, e, next) => {
     const request = await started($)
     const answer = await next(e)
-    if (request !== undefined && answer.value !== undefined) count($, request, answer.value.usage, false)
+    if (request !== undefined && answer.value !== undefined) {
+      count($, request, answer.value.usage, { refreshes: false, side: true })
+    }
     return answer
   })
   on('session.compact', async ($, e, next) => {
     const request = await started($)
     const result = await next(e)
-    if (request !== undefined && 'usage' in result) count($, request, result.usage, false)
+    if (request !== undefined && 'usage' in result) count($, request, result.usage, { refreshes: false, side: true })
     return result
   })
 
@@ -172,7 +183,18 @@ export function registerMeasures(on: On): void {
 async function measured($: $): Promise<Measured> {
   const id = await $.session.id()
   if (current?.id === id) return current
-  const m: Measured = { id, off: false, tokens: zero(), seeding: Promise.resolve(), scheduled: false }
+  const since = new Date(await $.clock.now()).toISOString()
+  // Another request may have started it meanwhile.
+  if (current?.id === id) return current
+  const m: Measured = {
+    id,
+    off: false,
+    tokens: zero(),
+    side: zero(),
+    since,
+    seeding: Promise.resolve(),
+    scheduled: false,
+  }
   current = m
   m.seeding = seed($, m)
   return m
@@ -209,13 +231,19 @@ async function started($: $): Promise<Started | undefined> {
 }
 
 /**
- * Adds a request's usage to the session's tokens. One that may refresh the
- * main thread's cache moves its time when the response read or wrote a
- * cache: a request that failed refreshed nothing. Requests overlap, so the
- * time only moves forward.
+ * Adds a request's usage to the session's tokens, and to `side` when the
+ * transcripts do not hold it. One that may refresh the main thread's cache
+ * moves its time when the response read or wrote a cache: a request that
+ * failed refreshed nothing. Requests overlap, so the time only moves forward.
  */
-function count($: $, { m, at }: Started, usage: Usage | null | undefined, refreshes: boolean): void {
+function count(
+  $: $,
+  { m, at }: Started,
+  usage: Usage | null | undefined,
+  { refreshes, side }: { refreshes: boolean; side: boolean },
+): void {
   add(m.tokens, usage)
+  if (side) add(m.side, usage)
   const cached = (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) > 0
   if (refreshes && cached && (m.lastRequestAt === undefined || at > m.lastRequestAt)) m.lastRequestAt = at
   schedule($, m)
@@ -275,6 +303,8 @@ async function detail($: $, m: Measured): Promise<Record<string, unknown>> {
     root: await $.session.root(),
     model: await $.session.model(),
     tokens: m.tokens,
+    side_tokens: m.side,
+    side_since: m.since,
   }
   if (m.context !== undefined) out.context = m.context
   if (m.effort !== undefined) out.effort = m.effort
