@@ -61,13 +61,10 @@ nowcast bricks enable claude-code
 
 A brick whose command starts with a bare program name (`node`, `python3`) finds that program in the `PATH` its declaration sets in `[run] env`, or else in the service's. Under systemd, the service's `PATH` is the user manager's (`systemctl --user show-environment`), which lacks the runtimes a version manager installs per user (fnm, nvm, mise, asdf). `nowcast bricks enable` refuses a brick whose program is missing from it (`--force` enables it anyway), and a subscription to such a brick fails with the cause.
 
-Extend the user manager's `PATH` with a file in `~/.config/environment.d/`, pointing at a directory that stays put: for fnm, its default alias rather than the per-shell `fnm_multishells` path. Name the file so that it sorts after the distribution's own, some of which set `PATH` outright (`/usr/lib/environment.d/99-environment.conf` on Ubuntu):
+Any way that gives the service the program's directory works. Point it at a directory that stays put: for fnm, its default alias (`~/.local/share/fnm/aliases/default/bin`), not the per-shell `fnm_multishells` path. Depending on who should see it:
 
-```sh
-mkdir -p ~/.config/environment.d
-echo 'PATH=$HOME/.local/share/fnm/aliases/default/bin:$PATH' > ~/.config/environment.d/999-nowcast.conf
-systemctl --user daemon-reload
-systemctl --user stop nowcast.service
-```
+- **Every user service**: a file in `~/.config/environment.d/`, such as `PATH=$HOME/.local/share/fnm/aliases/default/bin:$PATH`, then `systemctl --user daemon-reload`. Name the file so that it sorts after the distribution's own, some of which set `PATH` outright (`/usr/lib/environment.d/99-environment.conf` on Ubuntu): `999-nowcast.conf`, for example.
+- **The nowcast service alone**: a drop-in, through `systemctl --user edit nowcast.service`, with `Environment=PATH=…` under `[Service]`. systemd expands no variable there: write the whole `PATH`.
+- **One brick**: `PATH` in its declaration's `[run] env`, which replaces the service's, or an absolute path as the program.
 
-The reload gives the new `PATH` to the services started after it; once stopped, the service starts again with it on the next connection.
+A new `PATH` reaches the service once it starts again: `systemctl --user stop nowcast.service`, and the socket starts it on the next connection.
