@@ -1,9 +1,8 @@
-// The library other mods use: what answers the calls of the `$.nowcast` noun,
-// requests to the service over HTTP (subscribe, unsubscribe, refresh, input,
-// last value, history). It runs in this mod, so in Claude Code's own process, the parent of
-// the stream's `nowcast watch`: the service ties requests and stream to the
-// same anchor. Living beside the stream also lets it write a flow's last
-// value into the state, and subscribe again once a restarted service forgot.
+// Requests to the service over HTTP, behind the `$.nowcast` noun: subscribe,
+// unsubscribe, refresh, input, last value and history. They run in this mod,
+// so in Claude Code's own process, the parent of the stream's `nowcast
+// watch`: the service ties requests and stream to the same anchor. The
+// subscriptions themselves are kept by `subscriptions.ts`.
 
 import type { EngineInterface } from 'claude-code'
 import type {
@@ -14,13 +13,15 @@ import type {
   NowcastHistory,
   NowcastLast,
   NowcastSubscribeRequest,
-  NowcastSubscription,
 } from '../types'
 
 type $ = EngineInterface
 
-/** A subscription made through `$.nowcast`, kept to make it again. */
-type Kept = { request: NowcastSubscribeRequest; flow: string; current: string }
+/** What `POST /v1/subscriptions` asks for. */
+export type Wanted = Omit<NowcastSubscribeRequest, 'name'>
+
+/** What `POST /v1/subscriptions` answers. */
+export type Created = { ok: true; subscription: string; flow: string; last: NowcastEvent | null }
 
 /** An HTTP answer from the service. */
 type Answer = { status: number; text: string }
@@ -47,24 +48,34 @@ export const STUB: Nowcast = {
 
 const done = () => ({ ok: true as const })
 
-// The subscriptions made through `$.nowcast`, by the id `subscribe` first
-// gave, which is the one the mod holds; and the resubscription running.
-const kept = new Map<string, Kept>()
-let resubscribing: Promise<void> = Promise.resolve()
-
-/** `$.nowcast.subscribe`: the subscription is kept, to make it again. */
-export async function subscribeKept($: $, asked: NowcastSubscribeRequest): Promise<NowcastSubscription | NowcastFailure> {
-  const request = { brick: asked.brick, kind: asked.kind, params: asked.params }
-  const answer = await subscribe($, request)
-  if (answer.ok) kept.set(answer.subscription, { request, flow: answer.flow, current: answer.subscription })
-  return answer
+/** `POST /v1/subscriptions`. */
+export async function createSubscription($: $, wanted: Wanted): Promise<Created | NowcastFailure> {
+  const answer = await request($, 'POST', '/v1/subscriptions', wanted)
+  return expect(answer, 201, text => {
+    const body = parse(text)
+    if (!isObject(body) || typeof body.subscription !== 'string' || typeof body.flow !== 'string') return null
+    const last = isEvent(body.last) ? body.last : null
+    return { ok: true as const, subscription: body.subscription, flow: body.flow, last }
+  })
 }
 
-/** `$.nowcast.unsubscribe`, with the id first given or the current one. */
-export async function unsubscribe($: $, subscription: string): Promise<NowcastDone | NowcastFailure> {
-  const id = kept.get(subscription)?.current ?? subscription
-  kept.delete(subscription)
-  return expect(await request($, 'DELETE', `/v1/subscriptions/${encodeURIComponent(id)}`), 204, done)
+/**
+ * `DELETE /v1/subscriptions/{subscription}`, with the service's id. One the
+ * service no longer knows (`404`) is ended all the same.
+ */
+export async function deleteSubscription($: $, subscription: string): Promise<NowcastDone | NowcastFailure> {
+  const answer = await request($, 'DELETE', `/v1/subscriptions/${encodeURIComponent(subscription)}`)
+  if (!('code' in answer) && answer.status === 404) return done()
+  return expect(answer, 204, done)
+}
+
+/**
+ * Whether this process is still subscribed to `flow`: false only on the
+ * `404` that says so, true whenever the service cannot tell.
+ */
+export async function flowKnown($: $, flow: string): Promise<boolean> {
+  const answer = await request($, 'GET', `/v1/flows/${encodeURIComponent(flow)}`)
+  return 'code' in answer || answer.status !== 404
 }
 
 /** `$.nowcast.refresh`. */
@@ -96,60 +107,6 @@ export async function history($: $, flow: string, after: string): Promise<Nowcas
     const events = body.events
     if (!Array.isArray(events) || !events.every(isEvent)) return null
     return { ok: true as const, gap: body.gap, events }
-  })
-}
-
-/**
- * Subscribes again to every flow of a kept subscription that the service no
- * longer knows, as after a restart, one run at a time. Resolves to the last
- * values the new subscriptions answered.
- */
-export function resubscribe($: $): Promise<NowcastEvent[]> {
-  const run = resubscribing.then(() => subscribeAgain($))
-  resubscribing = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  return run.catch(error => {
-    log($, `cannot subscribe again: ${message(error)}`)
-    return []
-  })
-}
-
-async function subscribeAgain($: $): Promise<NowcastEvent[]> {
-  const lasts: NowcastEvent[] = []
-  const byFlow = new Map<string, Array<[string, Kept]>>()
-  for (const [first, entry] of kept) {
-    byFlow.set(entry.flow, [...(byFlow.get(entry.flow) ?? []), [first, entry]])
-  }
-  for (const [flow, entries] of byFlow) {
-    // `404` is the one answer saying this process is no longer subscribed.
-    const answer = await request($, 'GET', `/v1/flows/${encodeURIComponent(flow)}`)
-    if ('code' in answer || answer.status !== 404) continue
-    for (const [first, entry] of entries) {
-      const again = await subscribe($, entry.request)
-      if (!again.ok) {
-        log($, `cannot subscribe again to ${flow}: ${again.message}`)
-      } else if (kept.get(first) === entry) {
-        entry.current = again.subscription
-        if (again.last !== null) lasts.push(again.last)
-      } else {
-        // Unsubscribed while this ran: the new subscription is not wanted.
-        await request($, 'DELETE', `/v1/subscriptions/${encodeURIComponent(again.subscription)}`)
-      }
-    }
-  }
-  return lasts
-}
-
-/** `POST /v1/subscriptions`. */
-async function subscribe($: $, subscription: NowcastSubscribeRequest): Promise<NowcastSubscription | NowcastFailure> {
-  const answer = await request($, 'POST', '/v1/subscriptions', subscription)
-  return expect(answer, 201, text => {
-    const body = parse(text)
-    if (!isObject(body) || typeof body.subscription !== 'string' || typeof body.flow !== 'string') return null
-    const last = isEvent(body.last) ? body.last : null
-    return { ok: true as const, subscription: body.subscription, flow: body.flow, last }
   })
 }
 
@@ -246,10 +203,6 @@ function parse(text: string): unknown {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function log($: $, text: string): void {
-  $.ui.log(`nowcast: ${text}`, { to: 'debug' })
 }
 
 function message(error: unknown): string {

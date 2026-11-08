@@ -1,6 +1,6 @@
 // A sample mod built on the nowcast mod. It subscribes to one flow through
-// `$.nowcast`, follows that flow in the nowcast mod's state, shows its last
-// value in the status line, and adds a `/nowcast-refresh` command that asks
+// `$.nowcast`, follows its subscription and then the flow in the nowcast
+// mod's state, shows the flow's last value in the status line, and adds a `/nowcast-refresh` command that asks
 // the brick to publish again. Its manifest lists `nowcast` under
 // `dependencies`, which types `$.nowcast` and the nowcast mod's state here.
 //
@@ -14,8 +14,11 @@
 import type { Register } from 'claude-code'
 
 export const register: Register = on => {
-  const subscription = { brick: 'probe', kind: 'item', params: { id: 'nowcast-example' } }
-  // The flow subscribed to, once the service answered.
+  const subscription = { name: 'item', brick: 'probe', kind: 'item', params: { id: 'nowcast-example' } }
+  // The subscription's member in the nowcast mod's state: this mod's name,
+  // then the subscription's.
+  const id = 'nowcast-example/item'
+  // The flow subscribed to, once the service accepted the subscription.
   let flow: string | undefined
 
   /** A flow as the nowcast mod's state holds it, for the status line. */
@@ -33,15 +36,27 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({ name: 'nowcast-refresh', description: 'Ask the nowcast example flow to publish again' })
-    // Not awaited: the session does not wait for the service.
+    // Not awaited: the session does not wait for the service. The nowcast
+    // mod keeps the subscription, and tries again while the service refuses.
     void $.nowcast.subscribe(subscription).then(async answer => {
       if (!answer.ok) return $.ui.status(`nowcast example: ${answer.message}`)
+      if (answer.flow === null) return $.ui.status(`nowcast example: waiting, ${answer.error?.message ?? ''}`)
       flow = answer.flow
       // The value the flow already had is in the state now; null if none.
       const { value } = await $.state.get({ plugin: 'nowcast', key: 'flows', id: answer.flow })
       $.ui.status(describe(value ?? { last: null, error: null, ended: false }))
     })
     return started
+  })
+
+  // Where the subscription stands: its flow once known, why it waits.
+  on('state.set', { plugin: 'nowcast', key: 'subscriptions' }, async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === id && e.value !== null) {
+      if (e.value.flow !== null) flow = e.value.flow
+      if (e.value.status !== 'active') $.ui.status(`nowcast example: ${e.value.status}, ${e.value.error?.message ?? ''}`)
+    }
+    return result
   })
 
   // The nowcast mod writes each flow it receives to its state; this hook sees
