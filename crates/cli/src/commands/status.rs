@@ -45,12 +45,12 @@ fn systemd_states() -> String {
         .unwrap_or_default()
 }
 
-/// Whether systemd holds the socket while the service does not run: a
-/// connection would start it.
+/// Whether systemd holds the socket while the service does not run, or is
+/// stopping: a connection would start it.
 fn waits_for_a_connection(states: &str) -> bool {
     let mut lines = states.lines();
     let (socket, service) = (lines.next(), lines.next());
-    socket == Some("active") && matches!(service, Some("inactive" | "failed"))
+    socket == Some("active") && matches!(service, Some("inactive" | "failed" | "deactivating"))
 }
 
 /// The status for a human, `running` being the service's `GET /v1/status`
@@ -156,6 +156,8 @@ mod tests {
     fn a_socket_held_by_systemd_without_its_service_waits_for_a_connection() {
         assert!(waits_for_a_connection("active\ninactive\n"));
         assert!(waits_for_a_connection("active\nfailed\n"));
+        // Stopping once idle: systemd would start it again for the connection.
+        assert!(waits_for_a_connection("active\ndeactivating\n"));
         assert!(!waits_for_a_connection("active\nactive\n"));
         assert!(!waits_for_a_connection("active\nactivating\n"));
         // No socket unit: nothing starts the service on a connection.
