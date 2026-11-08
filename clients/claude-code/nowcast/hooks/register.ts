@@ -11,6 +11,7 @@ import { STUB, history, input, last, refresh, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
 import { registerMeasures } from './measures'
 import { Lines, type Status, parseLine } from './stream'
+import { OLDEST_SERVICE, isOlder, printedVersion } from './version'
 import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
 
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
@@ -164,9 +165,13 @@ function start($: $, session: string): Watch {
     for (;;) {
       const startedAt = await $.clock.now()
       if (stopped) return
-      const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
-      child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
-      const why = await run($, child, () => stopped, id => (lastEventId = id))
+      // Read again before each start: an upgrade during the session is taken.
+      let why = await tooOld($)
+      if (why === null) {
+        const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
+        child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
+        why = await run($, child, () => stopped, id => (lastEventId = id))
+      }
       if (stopped) return
       await setStream($, { status: 'stopped', error: why })
       $.ui.log(`nowcast: ${why}`, { to: 'debug' })
@@ -234,6 +239,22 @@ async function run(
   } catch (error) {
     return (await onPath($)) ? `cannot run ${CLI}: ${message(error)}` : NOT_ON_PATH
   }
+}
+
+/**
+ * Why the installed service is too old for this mod, or null. A version that
+ * cannot be read is let through: starting `watch` says what is wrong.
+ */
+async function tooOld($: $): Promise<string | null> {
+  let version: string | null
+  try {
+    const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 })
+    version = ran.exitCode === 0 ? printedVersion(ran.stdout) : null
+  } catch {
+    return null
+  }
+  if (version === null || !isOlder(version, OLDEST_SERVICE)) return null
+  return `${CLI} ${version} is older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it`
 }
 
 /**
