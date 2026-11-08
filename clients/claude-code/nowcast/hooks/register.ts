@@ -167,6 +167,8 @@ function start($: $, session: string): Watch {
       if (stopped) return
       // Read again before each start: an upgrade during the session is taken.
       let why = await tooOld($)
+      // Stopped while the version was read: no `watch` for the session left behind.
+      if (stopped) return
       if (why === null) {
         const resume = lastEventId === undefined ? [] : ['--last-event-id', lastEventId]
         child = $.process.spawn({ argv: [CLI, '--json', '--session', session, 'watch', ...resume] })
@@ -246,13 +248,8 @@ async function run(
  * cannot be read is let through: starting `watch` says what is wrong.
  */
 async function tooOld($: $): Promise<string | null> {
-  let version: string | null
-  try {
-    const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 })
-    version = ran.exitCode === 0 ? printedVersion(ran.stdout) : null
-  } catch {
-    return null
-  }
+  const ran = await $.process.run([CLI, '--version'], { timeoutMs: 5_000 }).catch(() => null)
+  const version = ran?.exitCode === 0 ? printedVersion(ran.stdout) : null
   if (version === null || !isOlder(version, OLDEST_SERVICE)) return null
   return `${CLI} ${version} is older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it`
 }

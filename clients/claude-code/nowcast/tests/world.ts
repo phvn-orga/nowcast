@@ -107,6 +107,8 @@ export type WorldOptions = {
   spawnFails?: boolean
   /** What `nowcast --version` prints; the oldest version the mod accepts when absent. */
   version?: string
+  /** What `nowcast --version` waits for before it answers; nothing when absent. */
+  versionRead?: Promise<void>
   /** The files that exist, for `$.fs.exists`; none when absent. */
   files?: string[]
   /** A flow whose writes are refused, as an observer of the state may. */
@@ -195,8 +197,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     const status = answer.status ?? 204
     return { value: { status, ok: status < 300, headers: {}, text: '', ...answer } }
   })
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     if (options.spawnFails) return { deny: `${e.argv[0]}: not found` }
+    await options.versionRead
     const stdout = `nowcast ${options.version ?? '0.1.0-alpha.2'}\n`
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })

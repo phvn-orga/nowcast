@@ -67,3 +67,18 @@ test('a service at the oldest version accepted, or newer, starts `watch`', async
   await w.clock.settle()
   expect(w.children.length).toBe(1)
 })
+
+test('a session left while its version is read gets no `watch`', async ($, on) => {
+  let read = () => {}
+  const w = world(on, { versionRead: new Promise<void>(resolve => (read = resolve)) })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  w.session.id = 'session-2'
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+  await w.clock.settle()
+  read()
+  await w.clock.settle()
+
+  expect(w.children.map(c => c.session)).toEqual(['session-2'])
+})
