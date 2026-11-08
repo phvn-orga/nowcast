@@ -14,8 +14,8 @@ use nowcast_conformance::{block_on, probe};
 use nowcast_server::{MAX_BODY, Server};
 use nowcast_traits::fake::{FakeDiscovery, FakeIdentity, FakeRouter, FakeSessions, FakeSupervisor};
 use nowcast_traits::{
-    Anchor, AnchorId, History, Identity, InputError, ResolveError, Resolved, Router, Supervisor,
-    UnknownFlow, UnknownSubscription,
+    Anchor, AnchorId, BrickState, BrickSummary, History, Identity, InputError, ResolveError,
+    Resolved, Router, Supervisor, UnknownFlow, UnknownSubscription,
 };
 use nowcast_types::QualifiedFlowId;
 use nowcast_types::{BrickName, Event, EventId, StreamEvent, SubscriptionId};
@@ -269,6 +269,86 @@ fn the_service_tells_its_version_start_and_path_without_a_session() {
                 "started_at": "2026-11-08T16:41:00.5Z",
                 "path": path,
             })
+        );
+    });
+}
+
+#[test]
+fn the_status_tells_the_whole_state_without_a_session() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        let response = request(&harness, "GET", "/v1/status", "").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers["content-type"], "application/json");
+        let stopped = json!({ "name": probe::NAME, "state": "stopped", "pid": null, "crashes": 0 });
+        assert_eq!(response.json()["bricks"], json!([stopped]));
+        assert_eq!(response.json()["sessions"], json!([]));
+        assert_eq!(response.json()["flows"], json!([]));
+
+        declare(&harness).await;
+        let subscribed = subscribe(&harness, "a").await;
+        let flow = qualified(&subscribed);
+        let event = harness
+            .router
+            .publish(&flow, probe::TYPE.into(), b"{}".to_vec())
+            .unwrap();
+        // A brick still running once disabled is listed too.
+        harness.supervisor.set_bricks(vec![
+            BrickSummary {
+                name: BrickName::new("gone").unwrap(),
+                state: BrickState::Stopping,
+                pid: Some(7),
+                crashes: 0,
+            },
+            BrickSummary {
+                name: probe::name(),
+                state: BrickState::Running,
+                pid: Some(42),
+                crashes: 1,
+            },
+        ]);
+
+        let status = request(&harness, "GET", "/v1/status", "").await.json();
+        let service = request(&harness, "GET", "/v1/service", "").await.json();
+        let time = jiff::Timestamp::try_from(event.time).unwrap().to_string();
+        assert_eq!(
+            status,
+            json!({
+                "service": service,
+                "bricks": [
+                    { "name": "gone", "state": "stopping", "pid": 7, "crashes": 0 },
+                    { "name": probe::NAME, "state": "running", "pid": 42, "crashes": 1 },
+                ],
+                "sessions": [{
+                    "id": "s",
+                    "subscriptions": [{ "id": subscribed["subscription"], "flow": flow.to_string() }],
+                }],
+                "flows": [{
+                    "id": flow.to_string(),
+                    "subscribers": 1,
+                    "last_event": { "id": event.id.to_string(), "time": time },
+                }],
+            })
+        );
+    });
+}
+
+#[test]
+fn a_flow_without_a_subscriber_is_left_out_of_the_status() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        let subscribed = subscribe(&harness, "a").await;
+        let id = subscribed["subscription"].as_str().unwrap();
+        let path = format!("/v1/subscriptions/{id}");
+        assert_eq!(request(&harness, "DELETE", &path, "").await.status, 204);
+        // The router keeps the flow until the supervisor ends it.
+        assert_eq!(harness.router.flows().len(), 1);
+        let status = request(&harness, "GET", "/v1/status", "").await.json();
+        assert_eq!(status["flows"], json!([]));
+        assert_eq!(
+            status["sessions"],
+            json!([{ "id": "s", "subscriptions": [] }])
         );
     });
 }
@@ -709,6 +789,10 @@ impl Supervisor for DyingAnchor {
         self.inner.kind(flow)
     }
 
+    fn bricks(&self) -> Vec<nowcast_traits::BrickSummary> {
+        self.inner.bricks()
+    }
+
     fn input(
         &self,
         flow: &QualifiedFlowId,
@@ -821,6 +905,14 @@ impl Router for DyingOnStream {
 
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize {
         self.inner.subscribers(flow)
+    }
+
+    fn flows(&self) -> Vec<nowcast_traits::FlowSummary> {
+        self.inner.flows()
+    }
+
+    fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)> {
+        self.inner.subscriptions(anchor)
     }
 
     fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId> {

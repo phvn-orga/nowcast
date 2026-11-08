@@ -1,6 +1,6 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use nowcast_traits::{AnchorId, History, Router, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, FlowSummary, History, Router, UnknownFlow, UnknownSubscription};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -104,6 +104,14 @@ impl Router for FlowRouter {
 
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize {
         self.state().subscribers(flow)
+    }
+
+    fn flows(&self) -> Vec<FlowSummary> {
+        self.state().flows()
+    }
+
+    fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)> {
+        self.state().subscriptions(anchor)
     }
 
     fn empty_flows(&self) -> UnboundedReceiver<QualifiedFlowId> {

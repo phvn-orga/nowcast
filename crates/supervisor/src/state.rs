@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nowcast_traits::{
-    AnchorId, BrickDeclaration, BrickProcess, BrickUnavailable, InputError, ResolveError, Resolved,
-    Router, UnknownFlow,
+    AnchorId, BrickDeclaration, BrickProcess, BrickState, BrickSummary, BrickUnavailable,
+    InputError, ResolveError, Resolved, Router, UnknownFlow,
 };
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
@@ -342,6 +342,31 @@ impl State {
             debug!(brick = %brick.name, %flow, "refresh dropped: the brick is not running");
         }
         Ok(())
+    }
+
+    /// Every brick not idle, by name.
+    pub(crate) fn bricks(&self) -> Vec<BrickSummary> {
+        let mut bricks: Vec<_> = self
+            .bricks
+            .values()
+            .filter_map(|brick| {
+                let state = match brick.phase {
+                    Phase::Idle => return None,
+                    Phase::Starting => BrickState::Starting,
+                    Phase::Running | Phase::Grace => BrickState::Running,
+                    Phase::Stopping(_) => BrickState::Stopping,
+                    Phase::Backoff => BrickState::Waiting,
+                };
+                Some(BrickSummary {
+                    name: brick.name.clone(),
+                    state,
+                    pid: brick.process.as_ref().and_then(|p| p.signals.pid()),
+                    crashes: brick.crashes,
+                })
+            })
+            .collect();
+        bricks.sort_by(|a, b| a.name.cmp(&b.name));
+        bricks
     }
 
     pub(crate) fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {

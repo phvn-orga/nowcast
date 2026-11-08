@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nowcast_traits::{AnchorId, FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{AnchorId, FLOW_HISTORY, FlowSummary, History, Router, UnknownFlow, UnknownSubscription};
 use nowcast_types::{BrickName, Event, EventId, FlowId, QualifiedFlowId, StreamEvent};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
@@ -441,6 +441,48 @@ pub async fn the_router_tells_whether_any_subscription_exists<S: RouterSubject>(
     assert!(!*router.has_subscriptions().borrow());
 }
 
+/// `GET /v1/status` reads each anchor's subscriptions, and every flow with its
+/// subscribers and last event, an empty flow kept included until it ends.
+pub async fn the_router_tells_its_flows_and_subscriptions<S: RouterSubject>() {
+    let router = S::new();
+    assert_eq!(router.flows(), vec![]);
+    assert_eq!(router.subscriptions(A), vec![]);
+
+    let (ay, _) = router.subscribe(A, flow("y"));
+    let (ax, _) = router.subscribe(A, flow("x"));
+    let (bx, _) = router.subscribe(B, flow("x"));
+    let sent = publish(&router, &flow("x"), "1");
+    assert_eq!(
+        router.subscriptions(A),
+        vec![(ax, flow("x")), (ay.clone(), flow("y"))]
+    );
+    assert_eq!(router.subscriptions(B), vec![(bx, flow("x"))]);
+    assert_eq!(
+        router.flows(),
+        vec![
+            FlowSummary {
+                flow: flow("x"),
+                subscribers: 2,
+                last: Some((sent.id, sent.time)),
+            },
+            FlowSummary {
+                flow: flow("y"),
+                subscribers: 1,
+                last: None,
+            },
+        ]
+    );
+
+    router.unsubscribe(A, &ay).unwrap();
+    router.remove_anchor(B);
+    assert_eq!(router.subscriptions(B), vec![]);
+    let flows = router.flows();
+    assert_eq!(flows[1].flow, flow("y"));
+    assert_eq!(flows[1].subscribers, 0, "kept until ended");
+    router.end_flow(&flow("y"));
+    assert_eq!(router.flows().len(), 1);
+}
+
 /// Runs the router rules of contract section 3.
 #[macro_export]
 macro_rules! router_suite {
@@ -476,6 +518,7 @@ macro_rules! router_suite {
                     an_empty_flow_is_signalled_and_kept,
                     removing_an_anchor_drops_its_subscriptions,
                     the_router_tells_whether_any_subscription_exists,
+                    the_router_tells_its_flows_and_subscriptions,
                 ]
             );
         }

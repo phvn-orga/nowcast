@@ -113,6 +113,18 @@ pub enum Command {
         params: Option<String>,
     },
 
+    /// Print what runs: the service and its version beside this tool's, the
+    /// bricks, the sessions with their subscriptions, and the active flows
+    ///
+    /// Never starts the service: when systemd holds the socket and
+    /// nowcast.service is not running, it says the service is stopped without
+    /// connecting. It asks systemd only when the socket is not given (--socket,
+    /// NOWCAST_SOCKET).
+    ///
+    /// With --json, prints {"installed": <this tool's version>, "running":
+    /// <the service's GET /v1/status answer, null when stopped>}.
+    Status,
+
     /// Enable or disable a brick
     ///
     /// Acts on the bricks directory the service follows,

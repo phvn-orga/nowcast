@@ -29,4 +29,16 @@ impl Sessions for FakeSessions {
     fn current(&self, anchor: AnchorId) -> Option<SessionId> {
         self.sessions.lock().unwrap().get(&anchor).cloned()
     }
+
+    fn declared(&self) -> Vec<(AnchorId, SessionId)> {
+        let mut declared: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&anchor, session)| (anchor, session.clone()))
+            .collect();
+        declared.sort_by_key(|&(anchor, _)| anchor);
+        declared
+    }
 }

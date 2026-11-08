@@ -34,6 +34,10 @@ impl BrickProcess for FakeProcess {
     fn kill(&mut self) {
         let _ = self.0.send(Signal::Kill);
     }
+
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Launches no process: each launch hands a [`FakeBrick`] to the test.

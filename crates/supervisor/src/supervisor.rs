@@ -4,8 +4,8 @@ use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use nowcast_traits::{
-    AnchorId, BrickConnection, BrickLauncher, BrickUnavailable, Discovery, DiscoveryChange,
-    InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    AnchorId, BrickConnection, BrickLauncher, BrickSummary, BrickUnavailable, Discovery,
+    DiscoveryChange, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{BrickMessage, BrickName, QualifiedFlowId};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -116,6 +116,10 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
 
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
         self.inner.lock().kind(flow)
+    }
+
+    fn bricks(&self) -> Vec<BrickSummary> {
+        self.inner.lock().bricks()
     }
 
     fn input(

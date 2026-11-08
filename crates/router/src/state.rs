@@ -9,7 +9,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nowcast_traits::{AnchorId, FLOW_HISTORY, History, UnknownFlow, UnknownSubscription};
+use nowcast_traits::{
+    AnchorId, FLOW_HISTORY, FlowSummary, History, UnknownFlow, UnknownSubscription,
+};
 use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
@@ -295,6 +297,33 @@ impl State {
         entry.streams.retain(|s| !s.is_closed());
         entry.streams.push(tx);
         rx
+    }
+
+    pub(crate) fn flows(&self) -> Vec<FlowSummary> {
+        let mut flows: Vec<_> = self
+            .flows
+            .iter()
+            .map(|(id, flow)| FlowSummary {
+                flow: id.clone(),
+                subscribers: flow.subscriptions.len(),
+                last: flow.last().map(|event| (event.id, event.time)),
+            })
+            .collect();
+        flows.sort_by(|a, b| a.flow.cmp(&b.flow));
+        flows
+    }
+
+    pub(crate) fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)> {
+        let Some(entry) = self.anchors.get(&anchor) else {
+            return Vec::new();
+        };
+        let mut subscriptions: Vec<_> = entry
+            .subscriptions
+            .iter()
+            .map(|(id, flow)| (id.clone(), flow.clone()))
+            .collect();
+        subscriptions.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+        subscriptions
     }
 
     pub(crate) fn subscribers(&self, flow_id: &QualifiedFlowId) -> usize {

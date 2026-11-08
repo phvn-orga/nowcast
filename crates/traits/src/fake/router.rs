@@ -6,7 +6,9 @@ use nowcast_types::{Event, EventId, QualifiedFlowId, StreamEvent, SubscriptionId
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
-use crate::{AnchorId, FLOW_HISTORY, History, Router, UnknownFlow, UnknownSubscription};
+use crate::{
+    AnchorId, FLOW_HISTORY, FlowSummary, History, Router, UnknownFlow, UnknownSubscription,
+};
 
 #[derive(Default)]
 struct Flow {
@@ -254,6 +256,33 @@ impl Router for FakeRouter {
         }
         state.streams.entry(anchor).or_default().push(tx);
         rx
+    }
+
+    fn flows(&self) -> Vec<FlowSummary> {
+        let state = self.state.lock().unwrap();
+        let mut flows: Vec<_> = state
+            .flows
+            .iter()
+            .map(|(id, flow)| FlowSummary {
+                flow: id.clone(),
+                subscribers: flow.subscriptions.len(),
+                last: flow.history.back().map(|e| (e.id, e.time)),
+            })
+            .collect();
+        flows.sort_by(|a, b| a.flow.cmp(&b.flow));
+        flows
+    }
+
+    fn subscriptions(&self, anchor: AnchorId) -> Vec<(SubscriptionId, QualifiedFlowId)> {
+        let state = self.state.lock().unwrap();
+        let mut subscriptions: Vec<_> = state
+            .subscriptions
+            .iter()
+            .filter(|(_, (owner, _))| *owner == anchor)
+            .map(|(id, (_, flow))| (id.clone(), flow.clone()))
+            .collect();
+        subscriptions.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+        subscriptions
     }
 
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize {

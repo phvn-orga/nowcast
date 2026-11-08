@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use nowcast_traits::fake::{FakeBrick, FakeDiscovery, FakeLauncher, FakeRouter, Signal};
 use nowcast_traits::{
-    AnchorId, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
+    AnchorId, BrickState, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{
     BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
@@ -505,6 +505,47 @@ pub async fn a_crashed_brick_is_relaunched<S: SupervisorSubject>() {
     );
 }
 
+/// `GET /v1/status` reads where each brick is in its life, with its crashes
+/// in a row; a brick without a process or a relaunch to wait for is left out.
+pub async fn the_supervisor_tells_its_bricks<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let summary = |state, crashes| {
+        vec![BrickSummary {
+            name: probe::name(),
+            state,
+            // The fake launcher's processes have no pid.
+            pid: None,
+            crashes,
+        }]
+    };
+    assert_eq!(world.supervisor.bricks(), vec![]);
+
+    let pending = world.resolve("a");
+    let mut brick = timeout(LONG, world.launcher.next()).await.expect("a launch");
+    assert_eq!(world.supervisor.bricks(), summary(BrickState::Starting, 0));
+    recv(&mut brick).await;
+    brick.to_service.send(BrickMessage::Ready).unwrap();
+    serve(&mut brick, "a").await;
+    assert_eq!(flow_of(pending).await, Ok(qualified("a")));
+    assert_eq!(world.supervisor.bricks(), summary(BrickState::Running, 0));
+
+    let mut stream = world.router.stream(A, None);
+    drop(brick);
+    let _flow_error = timeout(LONG, stream.recv()).await.unwrap();
+    assert_eq!(world.supervisor.bricks(), summary(BrickState::Waiting, 1));
+    let mut brick = world.ready_brick().await;
+    serve(&mut brick, "a").await;
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(world.supervisor.bricks(), summary(BrickState::Running, 1));
+
+    world.router.remove_anchor(A);
+    while recv(&mut brick).await != ServiceMessage::Shutdown {}
+    assert_eq!(world.supervisor.bricks(), summary(BrickState::Stopping, 1));
+    drop(brick);
+    sleep(LONG).await;
+    assert_eq!(world.supervisor.bricks(), vec![]);
+}
+
 /// A brick that crashes with no subscriber left is not relaunched.
 pub async fn a_crash_without_subscribers_is_not_relaunched<S: SupervisorSubject>() {
     let world = world::<S>();
@@ -721,6 +762,7 @@ macro_rules! supervisor_suite {
                     a_brick_ignoring_shutdown_is_terminated_then_killed,
                     a_crashed_brick_is_relaunched,
                     a_crash_without_subscribers_is_not_relaunched,
+                    the_supervisor_tells_its_bricks,
                     a_removed_brick_stops_and_its_flows_end,
                     a_value_published_right_after_subscribed_is_not_lost,
                     an_abandoned_subscription_leaves_no_subscriber,

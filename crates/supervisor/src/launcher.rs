@@ -51,16 +51,23 @@ enum Signal {
 
 /// The signals of one process, carried out by the task that waits on it, so
 /// that a signal never reaches a process already reaped (whose pid may have
-/// been reused).
-struct Signals(UnboundedSender<Signal>);
+/// been reused). The pid is only told, never signalled.
+struct Signals {
+    to_waiter: UnboundedSender<Signal>,
+    pid: Option<u32>,
+}
 
 impl BrickProcess for Signals {
     fn terminate(&mut self) {
-        let _ = self.0.send(Signal::Term);
+        let _ = self.to_waiter.send(Signal::Term);
     }
 
     fn kill(&mut self) {
-        let _ = self.0.send(Signal::Kill);
+        let _ = self.to_waiter.send(Signal::Kill);
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.pid
     }
 }
 
@@ -93,10 +100,10 @@ impl BrickLauncher for ProcessLauncher {
         let stdin = child.stdin.take().expect(piped);
         let stdout = child.stdout.take().expect(piped);
         let stderr = child.stderr.take().expect(piped);
-        info!(brick = %brick.name, pid = child.id(), "brick launched");
+        let pid = child.id();
+        info!(brick = %brick.name, pid, "brick launched");
         // The brick leads its own group: the group id is its pid.
-        let group = child
-            .id()
+        let group = pid
             .and_then(|id| i32::try_from(id).ok())
             .and_then(Pid::from_raw);
 
@@ -118,7 +125,10 @@ impl BrickLauncher for ProcessLauncher {
         Ok(BrickConnection {
             to_brick,
             from_brick,
-            process: Box::new(Signals(signals)),
+            process: Box::new(Signals {
+                to_waiter: signals,
+                pid,
+            }),
         })
     }
 }

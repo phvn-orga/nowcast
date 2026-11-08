@@ -1,9 +1,9 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `input`, `subscribe`. `nowcast daemon` runs the service itself, from the
+//! `refresh`, `input`, `subscribe`, `status`. `nowcast daemon` runs the service itself, from the
 //! `nowcast-daemon` library: one binary to install, at one version.
 //!
-//! Every command declares a session (`PUT /v1/session`) before any other call
-//! to the client API. The service attaches the tool to its anchor process: an
+//! Every command but `status` declares a session (`PUT /v1/session`) before
+//! any other call to the client API. The service attaches the tool to its anchor process: an
 //! agent when the tool runs from one of its hooks, the tool itself when it
 //! runs from a plain shell, in which case its subscriptions end with it.
 
@@ -106,6 +106,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
         }
         Command::Refresh { flow } => commands::refresh(&client, &flow).await,
+        Command::Status => {
+            // A socket given explicitly is not the one systemd holds.
+            let ask_systemd = cli.socket.is_none();
+            commands::status(&client, ask_systemd, cli.json, &mut out).await
+        }
         Command::Input { flow } => commands::input(&client, &flow, io::stdin().lock()).await,
         Command::Subscribe {
             brick,
