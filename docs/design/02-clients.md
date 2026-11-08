@@ -120,7 +120,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     ne peut falsifier : deux mods ne se gênent pas. Le même nom avec la même requête
     rend l'abonnement en place ; avec une autre requête, il le remplace, si bien
     qu'un changement de branche n'a rien à désabonner. `unsubscribe({ name })` le
-    retire.
+    retire. Une suppression que le service n'a pas reçue (service absent) est
+    gardée et refaite à chaque reconnexion du flux : le mod répond quand même
+    `ok`, la fin de l'abonnement est à sa charge.
   - **Un abonnement vit jusqu'à `unsubscribe`**, que sa première tentative ait réussi
     ou non. Seule une requête qui ne peut jamais aboutir est refusée, sans rien
     garder : `unknown_brick`, `unknown_kind`, `invalid_params`, `invalid_request` (un
@@ -132,8 +134,11 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   - **Le mod central refait ce que le service a perdu** : après un redémarrage du
     service, une brique retirée ou abandonnée après ses relances. Il le vérifie à
     chaque reconnexion du flux, et quand le flux d'un abonnement se termine ou tombe
-    en erreur. Une erreur définitive à ce moment laisse l'abonnement en échec, avec
-    sa raison, sans nouvelle tentative de lui-même. Un `subscribe` du même nom et de
+    en erreur. Un abonnement resté actif au moins une minute est repris aussitôt ;
+    perdu plus tôt, il l'est après le délai des tentatives, doublé à chaque perte.
+    Sans cela, une brique que le service abandonne après ses relances serait
+    relancée aussitôt, sans fin. Une erreur définitive à ce moment laisse
+    l'abonnement en échec, avec sa raison, sans nouvelle tentative de lui-même. Un `subscribe` du même nom et de
     la même requête le tente à nouveau : un consommateur rechargé après la
     réactivation de sa brique le retrouve ainsi.
   - **L'état dit où en est chaque abonnement** : une famille `subscriptions`, indexée
