@@ -136,6 +136,8 @@ n'envoie rien pour cette session.
   "effort": "high",
   "context": { "tokens": 152340, "window": 200000, "percent": 76 },
   "tokens": { "input": 41210, "output": 88400, "cache_creation": 310500, "cache_read": 9120400 },
+  "side_tokens": { "input": 120, "output": 40, "cache_creation": 2100, "cache_read": 610000 },
+  "side_since": "2026-11-07T14:02:51Z",
   "last_request_at": "2026-11-07T15:31:10Z",
   "cache_ttl": "1h",
   "rate_limits": [
@@ -151,7 +153,9 @@ n'envoie rien pour cette session.
 | `model` | Modèle du fil principal | `$.session.model()` |
 | `effort` | Effort de la dernière requête du fil principal | `turn.step`, champ `effort` ; facultatif |
 | `context` | Remplissage de la fenêtre de contexte | `session.measure`, champ `context` |
-| `tokens` | Tokens consommés depuis le début de la session, par catégorie | somme des `usage` de `turn.step`, `model.fork`, `model.complete` et `session.compact` |
+| `tokens` | Tokens que le mod compte, par catégorie : les transcriptions, plus ce qu'il a vu depuis son chargement | transcriptions, puis somme des `usage` de `turn.step`, `model.fork`, `model.complete` et `session.compact` |
+| `side_tokens` | La part de `tokens` que les transcriptions ne gardent pas, comptée depuis le chargement du mod | somme des `usage` de `model.fork`, `model.complete` et `session.compact` |
+| `side_since` | Instant du chargement du mod, qui date ce comptage | horloge du mod |
 | `last_request_at` | Instant de la dernière requête qui a lu ou écrit le cache du fil principal | `turn.step`, `model.fork` (plus bas) |
 | `cache_ttl` | Durée de vie du cache du fil principal, `5m` ou `1h` ; facultatif | transcription (plus bas) |
 | `rate_limits` | Fenêtres de quota de la dernière réponse ; vide hors abonnement | `session.measure`, champ `rateLimits` |
@@ -196,6 +200,21 @@ chaque requête qu'il voit. Une transcription illisible ou dans un format inatte
 compter depuis son chargement, sans erreur. Après un `/clear`, la nouvelle session a
 une transcription vide et repart de zéro.
 
+Les forks, les completions et les résumés de compaction ne sont pas écrits dans les
+transcriptions : un mod rechargé ne les retrouve pas. Il les compte donc aussi à part,
+dans `side_tokens`, depuis son chargement, que `side_since` date. La brique fait le
+reste. Elle garde sur disque la somme des comptages des chargements précédents
+(plus bas). Quand une mesure arrive avec un `side_since` plus récent que celui qu'elle
+connaît, elle y ajoute le dernier `side_tokens` du chargement précédent. Elle publie
+`tokens` et `side_tokens` augmentés de cette somme : le total ne recule ni après un
+rechargement du mod, ni après une reprise, ni après un redémarrage de la machine. Une
+mesure dont le `side_since` est plus ancien que celui que la brique connaît vient d'un
+chargement déjà remplacé : ses tokens sont ignorés.
+
+Le mod n'a ainsi rien à relire. La réponse à un abonnement ne lui rendrait pas la
+valeur gardée : le service la construit quand la brique confirme l'abonnement, avant
+la publication qui suit.
+
 **Après chaque tour**, le mod relit la fin de la transcription pour `cache_ttl`.
 L'`usage` brut de chaque réponse y répartit les écritures en cache par durée
 (`cache_creation.ephemeral_1h_input_tokens` et `ephemeral_5m_input_tokens`) : la
@@ -223,6 +242,7 @@ Une session, telle que la brique la retient :
   "effort": "high",
   "context": { "tokens": 152340, "window": 200000, "percent": 76 },
   "tokens": { "input": 41210, "output": 88400, "cache_creation": 310500, "cache_read": 9120400 },
+  "side_tokens": { "input": 360, "output": 95, "cache_creation": 2100, "cache_read": 1840000 },
   "last_request_at": "2026-11-07T15:31:10Z",
   "cache_ttl": "1h",
   "cache_expires_at": "2026-11-07T16:31:10Z",
@@ -243,6 +263,28 @@ et publie `cache_ttl` à `null`.
   `claude-code/sessions/<id>` publie une dernière fois son entrée avec `ended_at`.
 - Un consommateur trie et filtre lui-même, par exemple pour lister les sessions au
   contexte le plus rempli.
+
+### Ce que la brique garde sur disque
+
+La brique garde chaque session dans
+`$XDG_STATE_HOME/nowcast/bricks/claude-code/sessions/<id>.json`
+(`~/.local/state/…` par défaut) : son entrée, la somme des comptages `side_tokens` des
+chargements précédents, et le dernier comptage reçu avec son `side_since`. Le fichier
+est réécrit à chaque mesure par un fichier temporaire renommé : un arrêt brutal laisse
+l'ancienne version ou la nouvelle, jamais un fichier coupé. C'est le seul état de
+nowcast qui survit à un arrêt du service. Il existe parce que rien d'autre ne garde ce
+que les transcriptions n'ont pas.
+
+- Au démarrage, la brique relit ces fichiers et supprime ceux dont `updated_at` a plus
+  de 30 jours, la durée pendant laquelle Claude Code garde ses transcriptions par
+  défaut. Un fichier illisible est supprimé et journalisé.
+- Une session relue du disque ne devient vivante qu'à sa mesure suivante : elle entre
+  alors dans `claude-code.sessions/v1` avec son entrée gardée, `ended_at` remis à
+  `null`. Avant, ni son flux ni `claude-code/sessions/<id>` ne publient rien.
+- La fin d'une session (`release` de son flux) garde le fichier : une reprise le
+  retrouve.
+- Sans `XDG_STATE_HOME` absolu ni `HOME`, ou si l'écriture échoue, la brique
+  journalise et continue en mémoire seulement.
 
 ## Hors des sources documentées
 
