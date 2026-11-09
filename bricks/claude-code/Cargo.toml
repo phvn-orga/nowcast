@@ -18,3 +18,6 @@ tokio = { version = "1.54.1", features = ["rt", "io-std", "io-util", "macros", "
 tempfile = "3.27.0"
 nowcast-conformance = { path = "../../crates/conformance" }
 nowcast-discovery = { path = "../../crates/discovery" }
+
+[build-dependencies]
+nowcast-brick-build = { path = "../../crates/brick-build" }

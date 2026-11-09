@@ -145,9 +145,9 @@ async fn enables_the_native_bricks_named() {
 #[tokio::test]
 async fn refuses_a_brick_not_native_before_changing_anything() {
     let home = Home::new();
-    let output = home.setup(&["forge"]).await;
+    let output = home.setup(&["weather"]).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("no native brick \"forge\""));
+    assert!(stderr(&output).contains("no native brick \"weather\""));
     assert!(home.calls().is_empty());
     assert!(!home.units().exists());
 }

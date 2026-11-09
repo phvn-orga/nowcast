@@ -13,14 +13,24 @@ pub struct Native {
     pub run: fn() -> ExitCode,
 }
 
-pub const NATIVES: &[Native] = &[Native {
-    files: NativeFiles {
-        name: nowcast_brick_claude_code::NAME,
-        files: nowcast_brick_claude_code::FILES,
+pub const NATIVES: &[Native] = &[
+    Native {
+        files: NativeFiles {
+            name: nowcast_brick_claude_code::NAME,
+            files: nowcast_brick_claude_code::FILES,
+        },
+        description: "Quotas of the Claude Code account and measures of its running sessions.",
+        run: nowcast_brick_claude_code::run,
     },
-    description: "Quotas of the Claude Code account and measures of its running sessions.",
-    run: nowcast_brick_claude_code::run,
-}];
+    Native {
+        files: NativeFiles {
+            name: nowcast_brick_forge::NAME,
+            files: nowcast_brick_forge::FILES,
+        },
+        description: "A branch's PR and its CI, per pipeline and job, on GitHub.",
+        run: nowcast_brick_forge::run,
+    },
+];
 
 pub fn find(name: &str) -> Option<&'static Native> {
     NATIVES.iter().find(|n| n.files.name == name)
