@@ -7,6 +7,13 @@ Design pull requests target `design`, not `main`. A code change that reverses
 or extends a decision recorded there updates the design in its own pull
 request.
 
+## Bricks
+
+Every brick, native ones included, is optional: code outside it (core, CLI,
+Claude Code mod) acts for a brick only once it is enabled, and works without
+it, with no error and nothing waiting
+([design](https://github.com/phvn-orga/nowcast/blob/design/docs/design/01-briques.md)).
+
 ## Checks
 
 Locally, run only what the change touches:
