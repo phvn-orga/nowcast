@@ -121,8 +121,12 @@ pub enum Command {
     /// connecting. It asks systemd only when the socket is not given (--socket,
     /// NOWCAST_SOCKET).
     ///
+    /// Says when `nowcast setup` has to run: its units are missing, or differ
+    /// from the ones this binary writes (after an upgrade, for one).
+    ///
     /// With --json, prints {"installed": <this tool's version>, "running":
-    /// <the service's GET /v1/status answer, null when stopped>}.
+    /// <the service's GET /v1/status answer, null when stopped>, "setup":
+    /// "current" | "outdated" | "missing", null when it cannot tell}.
     Status,
 
     /// Enable or disable a brick

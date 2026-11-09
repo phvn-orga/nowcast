@@ -27,7 +27,7 @@ The full name trusts this formula alone, which Homebrew 6 and later require for 
 nowcast setup
 ```
 
-It writes the systemd user units into `~/.config/systemd/user`, the service running from Homebrew's opt path, which stays the same across upgrades, and enables the socket. Run it again after each `brew upgrade`: it rewrites a unit that changed and leaves the rest. Before `brew uninstall`, `nowcast setup --remove` stops the service and removes its units.
+It writes the systemd user units into `~/.config/systemd/user`, the service running from Homebrew's opt path, which stays the same across upgrades, and enables the socket. After an upgrade that changes the units, `nowcast status` says to run it again, and the Claude Code mod shows it at the start of a session: it rewrites a unit that changed and leaves the rest. Before `brew uninstall`, `nowcast setup --remove` stops the service and removes its units.
 
 ### From source
 

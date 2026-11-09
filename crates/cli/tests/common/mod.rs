@@ -598,10 +598,12 @@ pub fn nowcast(fake: &Fake) -> Command {
     command
 }
 
-/// The `nowcast` binary, with none of its environment variables set.
+/// The `nowcast` binary, with none of its environment variables set, and a
+/// configuration directory that does not exist.
 pub fn bare() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nowcast"));
     command
+        .env("XDG_CONFIG_HOME", "/nonexistent/nowcast-tests")
         .env_remove("NOWCAST_SOCKET")
         .env_remove("NOWCAST_SESSION")
         .env_remove("XDG_RUNTIME_DIR")

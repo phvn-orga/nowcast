@@ -40,8 +40,7 @@ pub fn setup(
         })?;
         wanted.push((native, true));
     }
-    let units = units_dir()?;
-    let exec = exec_path(&service_executable(&std::env::current_exe()?))?;
+    let (units, exec, expected) = expected_units()?;
     let ask = chosen.is_empty() && io::stdin().is_terminal() && io::stderr().is_terminal();
 
     cliclack::intro("nowcast setup")?;
@@ -53,8 +52,7 @@ pub fn setup(
         }
     }
 
-    let service = SERVICE_UNIT.replace("@NOWCAST@", &exec);
-    for (name, text) in [(SOCKET, SOCKET_UNIT), (SERVICE, service.as_str())] {
+    for (name, text) in &expected {
         let path = units.join(name);
         let written = write_unit(&path, text)
             .map_err(|e| CliError::Setup(format!("cannot write {}: {e}", path.display())))?;
@@ -156,6 +154,68 @@ pub fn remove() -> Result<(), CliError> {
     systemctl(&["daemon-reload"])?;
     cliclack::outro("The service is stopped and will not start again")?;
     Ok(())
+}
+
+/// Whether the units in place are the ones `setup` would write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Units {
+    Current,
+    /// One is missing, differs or is a link: an upgrade changed them, or an
+    /// install by hand linked them.
+    Outdated,
+    /// Neither is there: `setup` never ran.
+    Missing,
+}
+
+impl Units {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Outdated => "outdated",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+/// The state of the units in place, `None` when it cannot be told: no home
+/// directory, or a binary `setup` would refuse to run the service from.
+pub fn units_state() -> Option<Units> {
+    let (units, _, expected) = expected_units().ok()?;
+    let mut present = 0;
+    let mut current = 0;
+    for (name, text) in &expected {
+        let path = units.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                present += 1;
+                let same = !meta.file_type().is_symlink()
+                    && fs::read(&path).is_ok_and(|held| held == text.as_bytes());
+                current += usize::from(same);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    Some(match (present, current) {
+        (0, _) => Units::Missing,
+        (p, c) if p == expected.len() && c == p => Units::Current,
+        _ => Units::Outdated,
+    })
+}
+
+/// Each unit's file name and text.
+type UnitFiles = [(&'static str, String); 2];
+
+/// Where the units go, the path the service runs from, and the units.
+fn expected_units() -> Result<(PathBuf, String, UnitFiles), CliError> {
+    let units = units_dir()?;
+    let exec = exec_path(&service_executable(&std::env::current_exe()?))?;
+    let service = SERVICE_UNIT.replace("@NOWCAST@", &exec);
+    Ok((
+        units,
+        exec,
+        [(SOCKET, SOCKET_UNIT.to_owned()), (SERVICE, service)],
+    ))
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user/`, where systemd reads the user's units.

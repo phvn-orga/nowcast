@@ -13,7 +13,8 @@ class Nowcast < Formula
   end
 
   # `nowcast setup` writes the systemd units, the service running from the opt
-  # path. Run again after an upgrade, it rewrites a unit that changed.
+  # path. After an upgrade that changes them, `nowcast status` says to run it
+  # again.
   def caveats
     warning = if version.to_s.include?("-")
       "nowcast #{version} is an experimental pre-release, for testing only: " \
@@ -21,9 +22,9 @@ class Nowcast < Formula
     end
     warning.to_s + <<~EOS
       To let systemd start the service on the first connection, and choose its
-      bricks, after this install and after each upgrade:
+      bricks:
         nowcast setup
-      Before `brew uninstall`:
+      `nowcast status` says when an upgrade needs it again. Before `brew uninstall`:
         nowcast setup --remove
     EOS
   end

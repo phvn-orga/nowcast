@@ -54,6 +54,12 @@ impl Home {
     }
 
     async fn setup(&self, args: &[&str]) -> std::process::Output {
+        let mut all = vec!["setup"];
+        all.extend(args);
+        self.nowcast(&all).await
+    }
+
+    async fn nowcast(&self, args: &[&str]) -> std::process::Output {
         let path = format!(
             "{}:{}",
             self.bin().display(),
@@ -66,9 +72,7 @@ impl Home {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_RUNTIME_DIR", self.root.path().join("run"))
             .env("PATH", path);
-        let mut all = vec!["setup"];
-        all.extend(args);
-        run(&mut command, &all).await
+        run(&mut command, args).await
     }
 }
 
@@ -205,4 +209,28 @@ async fn remove_goes_on_when_the_service_does_not_stop() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stderr(&output).contains("Unit not loaded"));
     assert!(std::fs::symlink_metadata(home.units().join("nowcast.socket")).is_err());
+}
+
+#[tokio::test]
+async fn status_says_when_setup_has_to_run() {
+    let home = Home::new();
+    let state = |output: std::process::Output| {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        printed["setup"].clone()
+    };
+    assert_eq!(state(home.nowcast(&["status", "--json"]).await), "missing");
+    home.setup(&[]).await;
+    assert_eq!(state(home.nowcast(&["status", "--json"]).await), "current");
+    std::fs::write(home.units().join("nowcast.service"), "old").unwrap();
+    assert_eq!(state(home.nowcast(&["status", "--json"]).await), "outdated");
+    std::fs::remove_file(home.units().join("nowcast.service")).unwrap();
+    assert_eq!(state(home.nowcast(&["status", "--json"]).await), "outdated");
+
+    let output = home.nowcast(&["status"]).await;
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("setup      outdated: run nowcast setup to rewrite the units\n"),
+        "{text}"
+    );
 }
