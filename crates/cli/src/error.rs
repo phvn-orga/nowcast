@@ -26,6 +26,9 @@ pub enum CliError {
     Unreachable { socket: PathBuf, reason: String },
     /// The service answered outside the contract.
     Protocol(String),
+    /// Setting the service up or removing it failed: a unit file, or
+    /// `systemctl`.
+    Setup(String),
     /// Writing the output failed.
     Io(io::Error),
 }
@@ -35,7 +38,7 @@ impl CliError {
         match self {
             // Nobody reads a closed pipe: stop quietly, like `head` expects.
             Self::Io(e) if e.kind() == io::ErrorKind::BrokenPipe => 0,
-            Self::Api { .. } | Self::Io(_) => exit::FAILURE,
+            Self::Api { .. } | Self::Setup(_) | Self::Io(_) => exit::FAILURE,
             Self::Usage(_) => exit::USAGE,
             Self::Unreachable { .. } => exit::UNREACHABLE,
             Self::Protocol(_) => exit::PROTOCOL,
@@ -49,6 +52,7 @@ impl CliError {
             Self::Usage(_) => "invalid_usage",
             Self::Unreachable { .. } => "service_unreachable",
             Self::Protocol(_) => "unexpected_response",
+            Self::Setup(_) => "setup_failed",
             Self::Io(_) => "output_failed",
         }
     }
@@ -56,7 +60,9 @@ impl CliError {
     pub fn message(&self) -> String {
         match self {
             Self::Api { message, .. } => message.clone(),
-            Self::Usage(message) | Self::Protocol(message) => message.clone(),
+            Self::Usage(message) | Self::Protocol(message) | Self::Setup(message) => {
+                message.clone()
+            }
             Self::Unreachable { socket, reason } => {
                 format!("cannot reach the service at {}: {reason}", socket.display())
             }
@@ -121,6 +127,7 @@ mod tests {
     #[test]
     fn each_kind_has_its_status() {
         assert_eq!(CliError::Usage(String::new()).exit_code(), exit::USAGE);
+        assert_eq!(CliError::Setup(String::new()).exit_code(), exit::FAILURE);
         assert_eq!(
             CliError::Protocol(String::new()).exit_code(),
             exit::PROTOCOL

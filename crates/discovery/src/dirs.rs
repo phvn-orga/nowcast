@@ -50,6 +50,12 @@ fn from_env(var: &str) -> Result<(Option<PathBuf>, PathBuf), NoHome> {
     Ok((xdg, home))
 }
 
+/// `$XDG_CONFIG_HOME`, or `~/.config`, from the environment.
+pub fn config_home_from_env() -> Result<PathBuf, NoHome> {
+    let (xdg, home) = from_env("XDG_CONFIG_HOME")?;
+    Ok(config_home(xdg.as_deref(), &home))
+}
+
 /// [`native_dir`] from `$XDG_DATA_HOME` and `$HOME`.
 pub fn native_dir_from_env() -> Result<PathBuf, NoHome> {
     let (xdg, home) = from_env("XDG_DATA_HOME")?;

@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 const INSTALLED: &str = env!("CARGO_PKG_VERSION");
 
+const MISSING: &str = "setup      missing: run nowcast setup to let systemd start the service\n";
+
 fn status(version: &str) -> Value {
     json!({
         "service": { "version": version, "started_at": "2026-11-08T16:41:00Z", "path": null },
@@ -41,7 +43,8 @@ async fn prints_the_state_without_declaring_a_session() {
     let output = run(&mut nowcast(&fake), &["status", "--json"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let printed: Value = serde_json::from_str(&stdout(&output)).unwrap();
-    assert_eq!(printed, json!({ "installed": INSTALLED, "running": body }));
+    let expected = json!({ "installed": INSTALLED, "running": body, "setup": "missing" });
+    assert_eq!(printed, expected);
 
     let calls: Vec<_> = fake.log().into_iter().map(|r| (r.method, r.path)).collect();
     let status = ("GET".to_owned(), "/v1/status".to_owned());
@@ -77,11 +80,12 @@ async fn a_service_not_listening_is_stopped() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        format!("service    stopped\ninstalled  {INSTALLED}\n")
+        format!("service    stopped\ninstalled  {INSTALLED}\n{MISSING}")
     );
     let output = run(&mut nowcast(&fake), &["status", "--json"]).await;
     let printed: Value = serde_json::from_str(&stdout(&output)).unwrap();
-    assert_eq!(printed, json!({ "installed": INSTALLED, "running": null }));
+    let expected = json!({ "installed": INSTALLED, "running": null, "setup": "missing" });
+    assert_eq!(printed, expected);
 }
 
 #[tokio::test]
@@ -129,7 +133,7 @@ async fn a_service_systemd_would_start_is_stopped_and_left_alone() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        format!("service    stopped\ninstalled  {INSTALLED}\n")
+        format!("service    stopped\ninstalled  {INSTALLED}\n{MISSING}")
     );
     assert!(fake.log().is_empty(), "no request reaches the socket");
 

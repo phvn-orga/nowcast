@@ -114,6 +114,8 @@ export type WorldOptions = {
   service?: Partial<HttpResponse> | string | Promise<Partial<HttpResponse> | string>
   /** What `nowcast --version` prints; the oldest version the mod accepts when absent. */
   version?: string
+  /** What `nowcast status --json` prints; units in place when absent. */
+  status?: string
   /** What `nowcast --version` waits for before it answers; nothing when absent. */
   versionRead?: Promise<void>
   /** The files that exist, for `$.fs.exists`; none when absent. */
@@ -146,6 +148,8 @@ export type World = {
   observed: string[]
   /** What mods put in the status line, in order. */
   statuses: string[]
+  /** The toasts shown, in order. */
+  toasts: string[]
 }
 
 export type Write = { key: string; id: string | undefined; value: unknown }
@@ -168,6 +172,11 @@ export function world(on: On, options: WorldOptions = {}): World {
   const writes: Write[] = []
   const observed: string[] = []
   const statuses: string[] = []
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.status', (_, e) => {
     statuses.push(e.text ?? '')
     return { value: undefined }
@@ -210,6 +219,10 @@ export function world(on: On, options: WorldOptions = {}): World {
   })
   on('process.run', async (_, e) => {
     if (options.spawnFails) return { deny: `${e.argv[0]}: not found` }
+    if (e.argv[1] === 'status') {
+      const stdout = options.status ?? '{"installed":"0.1.0","running":null,"setup":"current"}'
+      return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     await options.versionRead
     const stdout = `nowcast ${options.version ?? '0.1.0-alpha.2'}\n`
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -231,6 +244,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     writes,
     observed,
     statuses,
+    toasts,
     flowWrites,
     flow: id => flowWrites(id).at(-1),
     stream: () => writes.filter(w => w.key === 'stream').at(-1)?.value as NowcastStream | undefined,

@@ -21,28 +21,21 @@ brew tap phvn-orga/nowcast https://github.com/phvn-orga/nowcast
 brew install phvn-orga/nowcast/nowcast
 ```
 
-The full name trusts this formula alone, which Homebrew 6 and later require for a tap outside Homebrew's own. Then let systemd start the service on the first connection, with the units the formula installs:
+The full name trusts this formula alone, which Homebrew 6 and later require for a tap outside Homebrew's own. Then let systemd start the service on the first connection, and choose the bricks to enable:
 
 ```sh
-mkdir -p ~/.config/systemd/user/sockets.target.wants
-ln -sf "$(brew --prefix)"/opt/nowcast/share/nowcast/systemd/nowcast.{socket,service} ~/.config/systemd/user/
-ln -sfn ../nowcast.socket ~/.config/systemd/user/sockets.target.wants/nowcast.socket
-systemctl --user daemon-reload
-systemctl --user start nowcast.socket
+nowcast setup
 ```
 
-The socket is enabled by a link made by hand, through `~/.config/systemd/user`: `systemctl enable` would record the versioned path behind it, which the next `brew upgrade` removes.
+It writes the systemd user units into `~/.config/systemd/user`, the service running from Homebrew's opt path, which stays the same across upgrades, and enables the socket. After an upgrade that changes the units, `nowcast status` says to run it again, and the Claude Code mod shows it at the start of a session: it rewrites a unit that changed and leaves the rest. Before `brew uninstall`, `nowcast setup --remove` stops the service and removes its units.
 
 ### From source
 
-For development, install the checkout into `~/.local/bin`, where the repository's unit runs it from:
+For development, install the checkout into `~/.local/bin`, then set it up the same way, the service running from there:
 
 ```sh
 cargo install --root ~/.local --path crates/cli
-mkdir -p ~/.config/systemd/user
-cp crates/daemon/systemd/nowcast.socket crates/daemon/systemd/nowcast.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now nowcast.socket
+~/.local/bin/nowcast setup
 ```
 
 `nowcast daemon` also runs by hand, in the foreground, for a test. `nowcast daemon --help` lists the variables it reads.
@@ -51,7 +44,7 @@ systemctl --user enable --now nowcast.socket
 
 ## Bricks
 
-A brick runs only once enabled, and only while something subscribes to it. The bricks this repository ships are built into the binary and enabled by name:
+A brick runs only once enabled, and only while something subscribes to it. The bricks this repository ships are built into the binary: `nowcast setup` offers them in a list to check, and they are enabled by name too, there (`nowcast setup claude-code`, the way to go without a terminal) or on their own:
 
 ```sh
 nowcast bricks enable claude-code

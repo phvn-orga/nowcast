@@ -5,6 +5,7 @@ pub mod bricks;
 mod get;
 mod input;
 mod refresh;
+pub mod setup;
 mod status;
 mod subscribe;
 mod watch;
