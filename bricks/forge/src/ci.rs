@@ -108,9 +108,11 @@ pub struct Ci {
 }
 
 impl Ci {
-    /// Whether a pipeline or a job is not over yet.
-    pub fn is_active(&self) -> bool {
-        self.elements().any(|(state, _)| state.is_active())
+    /// Whether a pipeline or a job is queued or running. One that waits for
+    /// a person may wait for days: it does not count.
+    pub fn is_running(&self) -> bool {
+        self.elements()
+            .any(|(state, _)| matches!(state, State::Queued | State::Running))
     }
 
     /// Every pipeline and every job, with whether it is required.
@@ -251,6 +253,27 @@ pub(crate) mod tests {
             url: None,
             jobs,
         }
+    }
+
+    #[test]
+    fn a_ci_waiting_for_a_person_is_not_running() {
+        let waiting = Ci {
+            pipelines: vec![pipeline(
+                State::Waiting,
+                vec![job("deploy", State::Waiting, None)],
+            )],
+            missing_required: vec![],
+        };
+        assert!(!waiting.is_running());
+        assert_eq!(waiting.to_json(false)["state"], "waiting");
+        let queued = Ci {
+            pipelines: vec![pipeline(
+                State::Running,
+                vec![job("a", State::Queued, None)],
+            )],
+            missing_required: vec![],
+        };
+        assert!(queued.is_running());
     }
 
     #[test]

@@ -346,7 +346,7 @@ fn finish(
     }
     let ci = flow.reading.as_ref().and_then(|r| r.ci.as_ref());
     let pipelines = ci.map_or(0, |c| c.pipelines.len());
-    let running = ci.is_some_and(|c| c.is_active());
+    let running = ci.is_some_and(|c| c.is_running());
     // A failed reading says nothing new about the CI: no faster than the
     // normal pace until a reading succeeds again.
     let mut delay = if flow.status == "ok" {

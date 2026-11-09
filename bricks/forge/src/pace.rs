@@ -3,7 +3,8 @@
 //!
 //! 1. CI expected: a new head (a push, a PR just opened) with no pipeline
 //!    yet, for at most [`EXPECTED_FOR`];
-//! 2. CI running: a pipeline or a job not over yet;
+//! 2. CI running: a pipeline or a job queued or running; one waiting for a
+//!    person (an approval) does not count, it may wait for days;
 //! 3. fast window: a `refresh` asked for, for [`WINDOW_FOR`];
 //! 4. normal.
 //!
