@@ -113,7 +113,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Get { flow, after } => {
             commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
         }
-        Command::Refresh { flow } => commands::refresh(&client, &flow).await,
+        Command::Refresh { flow, brick, kind } => match (flow, brick) {
+            (Some(flow), _) => commands::refresh(&client, &flow).await,
+            (None, Some(brick)) => commands::refresh_brick(&client, &brick, kind.as_deref()).await,
+            (None, None) => unreachable!("clap requires a flow or a brick"),
+        },
         Command::Status => {
             // A socket given explicitly is not the one systemd holds.
             let ask_systemd = cli.socket.is_none();

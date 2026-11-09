@@ -105,6 +105,17 @@ test('without a socket path, nothing is sent', plugins, async ($, on) => {
   expect(w.requests).toEqual([])
 })
 
+test('refreshBrick reaches the brick, with its kind when given', plugins, async ($, on) => {
+  const w = world(on, { answer: service({ 'POST /v1/bricks/forge/refresh': { status: 202 } }) })
+
+  expect(await call($, 'refreshBrick', { brick: 'forge', kind: 'pr' })).toEqual({ ok: true })
+  expect(await call($, 'refreshBrick', { brick: 'forge' })).toEqual({ ok: true })
+  const sent = w.requests.filter(r => r.url.endsWith('/v1/bricks/forge/refresh'))
+  expect(sent.map(r => r.method)).toEqual(['POST', 'POST'])
+  expect(JSON.parse(sent[0]?.body ?? 'null')).toEqual({ kind: 'pr' })
+  expect(sent[1]?.body ?? '').toBe('')
+})
+
 test('refresh, input and last reach the flow', plugins, async ($, on) => {
   const last = update(FLOW, '5', { number: 1 })
   const w = world(on, {

@@ -588,6 +588,46 @@ pub async fn refresh_answers_202_and_reaches_the_brick<S: ApiSubject>() {
     assert!(reached.is_ok(), "the brick never got the refresh");
 }
 
+/// `POST /v1/bricks/{brick}/refresh` answers `202` and refreshes every flow
+/// of the brick, or of the kind given, without a subscription to them; an
+/// unknown brick or kind answers `404`.
+pub async fn brick_refresh_reaches_every_flow_of_the_brick<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let item = client.subscribe("a").await;
+    let inbox = client.subscribe_to(probe::INBOX_KIND, "b").await;
+    let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+    client
+        .request("POST", &path, Some(json!({ "kind": probe::KIND })))
+        .await
+        .status(202);
+    wait_for_refresh(&harness, &item.qualified).await;
+    assert!(
+        !harness.refreshes().await.contains(&inbox.qualified),
+        "only the kind asked for"
+    );
+    client.request("POST", &path, None).await.status(202);
+    wait_for_refresh(&harness, &inbox.qualified).await;
+
+    let unknown = client
+        .request("POST", "/v1/bricks/nope/refresh", None)
+        .await;
+    assert_eq!(unknown.status(404).json()["error"]["code"], "unknown_brick");
+    let unknown = client
+        .request("POST", &path, Some(json!({ "kind": "nope" })))
+        .await;
+    assert_eq!(unknown.status(404).json()["error"]["code"], "unknown_kind");
+}
+
+async fn wait_for_refresh(harness: &impl ApiHarness, flow: &QualifiedFlowId) {
+    let reached = timeout(WAIT, async {
+        while !harness.refreshes().await.contains(flow) {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the brick never got the refresh of {flow}");
+}
+
 /// `POST /v1/flows/{flow}/input` answers `202` and relays the detail to the
 /// brick, under the type the flow's kind accepts.
 pub async fn input_answers_202_and_reaches_the_brick<S: ApiSubject>() {
@@ -890,6 +930,7 @@ macro_rules! api_suite {
                     subscriptions_are_per_subscriber,
                     unsubscribing_answers_204,
                     refresh_answers_202_and_reaches_the_brick,
+                    brick_refresh_reaches_every_flow_of_the_brick,
                     input_answers_202_and_reaches_the_brick,
                     invalid_inputs_are_refused,
                     reading_a_flow_gives_its_last_event,

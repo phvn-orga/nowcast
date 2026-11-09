@@ -7,7 +7,7 @@
 
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastStream } from '../types'
-import { CLI, STUB, checkService, history, input, last, refresh, socketPath } from './client'
+import { CLI, STUB, checkService, history, input, last, refresh, refreshBrick, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
 import { registerMeasures } from './measures'
 import { warnSetup } from './setup'
@@ -50,6 +50,7 @@ export const register: Register = on => {
   on('nowcast.subscribe', async ($, e, next) => ({ value: await subscribeFor($, next.origin.plugin, e) }))
   on('nowcast.unsubscribe', async ($, e, next) => ({ value: await unsubscribeFor($, next.origin.plugin, e.name) }))
   on('nowcast.refresh', async ($, e) => ({ value: await refresh($, e.flow) }))
+  on('nowcast.refreshBrick', async ($, e) => ({ value: await refreshBrick($, e.brick, e.kind) }))
   on('nowcast.input', async ($, e) => ({ value: await input($, e.flow, e.detail) }))
   on('nowcast.last', async ($, e) => {
     const value = await last($, e.flow)
