@@ -1,5 +1,6 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `input`, `subscribe`, `status`. `nowcast daemon` runs the service itself, from the
+//! `refresh`, `input`, `subscribe`, `status`, and `setup`, which installs the
+//! service's systemd units. `nowcast daemon` runs the service itself, from the
 //! `nowcast-daemon` library: one binary to install, at one version.
 //!
 //! Every command but `status` declares a session (`PUT /v1/session`) before
@@ -33,13 +34,20 @@ fn main() -> ExitCode {
         Command::Daemon => return daemon(&matches),
         // A brick runs on its own runtime, and talks to the service alone.
         Command::Brick { name } => return brick(name),
-        Command::Bricks { action } => {
-            let result = match action {
-                BricksAction::Enable { brick, force } => {
+        Command::Bricks { .. } | Command::Setup { .. } => {
+            let result = match &cli.command {
+                Command::Bricks {
+                    action: BricksAction::Enable { brick, force },
+                } => {
                     let service = (!force).then(|| client(&cli));
                     commands::bricks::enable(brick, service)
                 }
-                BricksAction::Disable { brick } => commands::bricks::disable(brick),
+                Command::Bricks {
+                    action: BricksAction::Disable { brick },
+                } => commands::bricks::disable(brick),
+                Command::Setup { remove: true, .. } => commands::setup::remove(),
+                Command::Setup { bricks, .. } => commands::setup::setup(bricks, &|| client(&cli)),
+                _ => unreachable!(),
             };
             return match result {
                 Ok(()) => ExitCode::SUCCESS,
@@ -127,7 +135,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let resume = last_event_id.as_deref();
             commands::watch(&client, &subscribe, resume, cli.json, &mut out, &mut err).await
         }
-        Command::Daemon | Command::Brick { .. } | Command::Bricks { .. } => {
+        Command::Daemon
+        | Command::Brick { .. }
+        | Command::Bricks { .. }
+        | Command::Setup { .. } => {
             unreachable!("main runs these before any client command")
         }
     }

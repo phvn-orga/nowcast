@@ -113,9 +113,8 @@ jobs:
         id: package
         run: |
           name="nowcast-v$VERSION-$TARGET"
-          mkdir -p "dist/$name/systemd"
+          mkdir -p "dist/$name"
           cp out/nowcast README.md "dist/$name/"
-          cp crates/daemon/systemd/nowcast.socket crates/daemon/systemd/nowcast.service "dist/$name/systemd/"
           test "$("dist/$name/nowcast" --version)" = "nowcast $VERSION"
           tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
@@ -145,9 +144,15 @@ jobs:
           brew install nowcast/dry-run/nowcast
           brew audit --formula nowcast/dry-run/nowcast
           brew test nowcast/dry-run/nowcast
-          unit="$(brew --prefix)/opt/nowcast/share/nowcast/systemd/nowcast.service"
-          grep -x "ExecStart=$(brew --prefix)/opt/nowcast/bin/nowcast daemon" "$unit"
-          ! grep -F .local/bin "$unit"
+          # The units `nowcast setup` writes run the binary from the opt path,
+          # here with a systemctl that does nothing.
+          fake="$RUNNER_TEMP/fake"
+          mkdir -p "$fake/bin"
+          printf '#!/bin/sh\n' > "$fake/bin/systemctl"
+          chmod +x "$fake/bin/systemctl"
+          PATH="$fake/bin:$PATH" XDG_CONFIG_HOME="$fake/config" XDG_DATA_HOME="$fake/data" \
+            nowcast setup < /dev/null
+          grep -x "ExecStart=$(brew --prefix)/opt/nowcast/bin/nowcast daemon" "$fake/config/systemd/user/nowcast.service"
       - uses: actions/upload-artifact@v7
         with:
           name: dist

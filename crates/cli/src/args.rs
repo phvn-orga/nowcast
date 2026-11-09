@@ -135,6 +135,28 @@ pub enum Command {
         action: BricksAction,
     },
 
+    /// Let systemd start the service on the first connection, and enable native bricks
+    ///
+    /// Writes nowcast.socket and nowcast.service into
+    /// $XDG_CONFIG_HOME/systemd/user/, the service running this binary
+    /// (through Homebrew's opt path when Homebrew installed it), then enables
+    /// the socket. Run again, after an upgrade for one, it rewrites a unit
+    /// that differs and changes nothing else.
+    ///
+    /// The native bricks named are enabled. With none, in a terminal, it asks
+    /// which native bricks to enable, the enabled ones checked: unchecking
+    /// one disables it. Elsewhere it enables none. Any other brick is enabled
+    /// with `nowcast bricks enable`.
+    Setup {
+        /// Native bricks to enable, by name (claude-code)
+        #[arg(conflicts_with = "remove")]
+        bricks: Vec<String>,
+        /// Stop the service and remove its units instead, before
+        /// uninstalling nowcast. The bricks stay as they are.
+        #[arg(long)]
+        remove: bool,
+    },
+
     /// Run a brick native to nowcast on stdin and stdout, as the service launches it
     #[command(hide = true)]
     Brick {
@@ -291,6 +313,17 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["nowcast", "get", "a/b", "--after", "x"]).is_err());
+    }
+
+    #[test]
+    fn setup_takes_bricks_or_remove() {
+        let cli = Cli::try_parse_from(["nowcast", "setup", "claude-code"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Setup { ref bricks, remove: false } if bricks == &["claude-code"]
+        ));
+        assert!(Cli::try_parse_from(["nowcast", "setup", "--remove"]).is_ok());
+        assert!(Cli::try_parse_from(["nowcast", "setup", "--remove", "claude-code"]).is_err());
     }
 
     #[test]

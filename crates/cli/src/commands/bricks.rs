@@ -133,6 +133,13 @@ pub fn disable(brick: &str) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("cannot disable {brick}: {e}")))
 }
 
+/// Whether the brick named `name` is enabled: its link is in the bricks
+/// directory.
+pub fn is_enabled(name: &str) -> Result<bool, CliError> {
+    let link = bricks_dir()?.join(format!("{name}.toml"));
+    Ok(std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink()))
+}
+
 fn bricks_dir() -> Result<std::path::PathBuf, CliError> {
     DiscoveryConfig::from_env()
         .map(|config| config.bricks)
