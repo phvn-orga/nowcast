@@ -7,6 +7,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use crate::client::Client;
+use crate::commands::setup::{Units, units_state};
 use crate::error::CliError;
 
 /// This tool's version: the installed binary's.
@@ -23,14 +24,16 @@ pub async fn status(
     } else {
         client.status().await?
     };
+    let setup = units_state();
     if json {
+        let setup = setup.map(Units::as_str);
         writeln!(
             out,
             "{}",
-            json!({ "installed": INSTALLED, "running": running })
+            json!({ "installed": INSTALLED, "running": running, "setup": setup })
         )?;
     } else {
-        out.write_all(readable(INSTALLED, running.as_ref()).as_bytes())?;
+        out.write_all(readable(INSTALLED, running.as_ref(), setup).as_bytes())?;
     }
     Ok(())
 }
@@ -54,12 +57,14 @@ fn waits_for_a_connection(states: &str) -> bool {
 }
 
 /// The status for a human, `running` being the service's `GET /v1/status`
-/// answer, `None` when it is stopped.
-fn readable(installed: &str, running: Option<&Value>) -> String {
+/// answer, `None` when it is stopped, and `setup` the state of the units,
+/// shown when `nowcast setup` has to run.
+fn readable(installed: &str, running: Option<&Value>, setup: Option<Units>) -> String {
     let mut text = String::new();
     let Some(status) = running else {
         let _ = writeln!(text, "service    stopped");
         let _ = writeln!(text, "installed  {installed}");
+        setup_line(&mut text, setup);
         return text;
     };
     let service = &status["service"];
@@ -78,6 +83,7 @@ fn readable(installed: &str, running: Option<&Value>) -> String {
     } else {
         let _ = writeln!(text, "installed  {installed}");
     }
+    setup_line(&mut text, setup);
 
     let bricks = items(&status["bricks"]);
     let width = bricks
@@ -135,6 +141,16 @@ fn readable(installed: &str, running: Option<&Value>) -> String {
     text
 }
 
+/// The line saying to run `nowcast setup`, when the units need it.
+fn setup_line(text: &mut String, setup: Option<Units>) {
+    let why = match setup {
+        Some(Units::Missing) => "missing: run nowcast setup to let systemd start the service",
+        Some(Units::Outdated) => "outdated: run nowcast setup again",
+        Some(Units::Current) | None => return,
+    };
+    let _ = writeln!(text, "setup      {why}");
+}
+
 /// A section's heading, `none` beside it when it is empty.
 fn section(text: &mut String, name: &str, empty: bool) {
     let _ = writeln!(text, "{name}{}", if empty { "  none" } else { "" });
@@ -169,8 +185,13 @@ mod tests {
     #[test]
     fn a_stopped_service_shows_the_installed_version() {
         assert_eq!(
-            readable("0.2.0", None),
+            readable("0.2.0", None, Some(Units::Current)),
             "service    stopped\ninstalled  0.2.0\n"
+        );
+        assert_eq!(
+            readable("0.2.0", None, Some(Units::Missing)),
+            "service    stopped\ninstalled  0.2.0\n\
+             setup      missing: run nowcast setup to let systemd start the service\n"
         );
     }
 
@@ -197,7 +218,7 @@ mod tests {
             ],
         });
         assert_eq!(
-            readable("0.2.0", Some(&status)),
+            readable("0.2.0", Some(&status), None),
             "\
 service    0.2.0, running since 2026-11-08T16:41:00Z
 installed  0.2.0
@@ -226,10 +247,11 @@ flows
             "flows": [],
         });
         assert_eq!(
-            readable("0.2.0", Some(&status)),
+            readable("0.2.0", Some(&status), Some(Units::Outdated)),
             "\
 service    0.1.0, running since 2026-11-08T16:41:00Z
 installed  0.2.0, not the service's: restart the service to run it
+setup      outdated: run nowcast setup again
 bricks  none
 sessions  none
 flows  none

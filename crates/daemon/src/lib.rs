@@ -21,6 +21,14 @@
 
 mod socket;
 
+/// The systemd user unit holding the service's socket, as `nowcast setup`
+/// writes it.
+pub const SOCKET_UNIT: &str = include_str!("../systemd/nowcast.socket");
+
+/// The systemd user unit running the service, with `@NOWCAST@` in place of
+/// the binary's path.
+pub const SERVICE_UNIT: &str = include_str!("../systemd/nowcast.service");
+
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;

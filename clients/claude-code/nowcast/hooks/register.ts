@@ -10,6 +10,7 @@ import type { NowcastStream } from '../types'
 import { CLI, STUB, checkService, history, input, last, refresh, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
 import { registerMeasures } from './measures'
+import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
 import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
 
@@ -60,11 +61,13 @@ export const register: Register = on => {
   // Once per load of the mod: the session's start, or a reload. The start
   // does not wait for the service: `stream` says when the session is declared.
   // A reload finds the subscriptions it kept in its state, before the mods
-  // that start with it subscribe again under the same names.
+  // that start with it subscribe again under the same names. It also says
+  // when the service needs `nowcast setup`.
   on('session.start', async ($, e, next) => {
     await restore($).catch(error => $.ui.log(`nowcast: cannot restore: ${message(error)}`, { to: 'debug' }))
     const started = await next(e)
     void follow($, await $.session.id())
+    void warnSetup($).catch(error => $.ui.log(`nowcast: cannot read the setup: ${message(error)}`, { to: 'debug' }))
     return started
   })
 

@@ -1,5 +1,6 @@
 //! `nowcast`, the command-line client of the nowcast service: `watch`, `get`,
-//! `refresh`, `input`, `subscribe`, `status`. `nowcast daemon` runs the service itself, from the
+//! `refresh`, `input`, `subscribe`, `status`, and `setup`, which installs the
+//! service's systemd units. `nowcast daemon` runs the service itself, from the
 //! `nowcast-daemon` library: one binary to install, at one version.
 //!
 //! Every command but `status` declares a session (`PUT /v1/session`) before
@@ -41,13 +42,15 @@ fn main() -> ExitCode {
                 }
                 BricksAction::Disable { brick } => commands::bricks::disable(brick),
             };
-            return match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    error.report(cli.json);
-                    ExitCode::from(error.exit_code())
-                }
+            return exit_code(result, cli.json);
+        }
+        Command::Setup { bricks, remove } => {
+            let result = if *remove {
+                commands::setup::remove()
+            } else {
+                commands::setup::setup(bricks, &|| client(&cli))
             };
+            return exit_code(result, cli.json);
         }
         _ => {}
     }
@@ -57,6 +60,11 @@ fn main() -> ExitCode {
         .build()
         .map_err(CliError::Io)
         .and_then(|runtime| runtime.block_on(run(cli)));
+    exit_code(result, json)
+}
+
+/// The exit code of a command's `result`, its error reported first.
+fn exit_code(result: Result<(), CliError>, json: bool) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -127,7 +135,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let resume = last_event_id.as_deref();
             commands::watch(&client, &subscribe, resume, cli.json, &mut out, &mut err).await
         }
-        Command::Daemon | Command::Brick { .. } | Command::Bricks { .. } => {
+        Command::Daemon
+        | Command::Brick { .. }
+        | Command::Bricks { .. }
+        | Command::Setup { .. } => {
             unreachable!("main runs these before any client command")
         }
     }

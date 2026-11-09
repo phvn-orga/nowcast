@@ -1,6 +1,6 @@
 {
   "name": "nowcast",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Holds the session's nowcast stream and shares each flow with other mods through its state.",
   "types": "./types/index.d.ts"
 }

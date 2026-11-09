@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+cliclack = "0.5.7"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }

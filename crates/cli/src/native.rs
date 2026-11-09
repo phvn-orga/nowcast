@@ -7,6 +7,8 @@ use nowcast_discovery::NativeFiles;
 
 pub struct Native {
     pub files: NativeFiles,
+    /// Its declaration's description, which `nowcast setup` shows.
+    pub description: &'static str,
     /// Runs the brick on standard input and output, as `nowcast brick <name>`.
     pub run: fn() -> ExitCode,
 }
@@ -16,6 +18,7 @@ pub const NATIVES: &[Native] = &[Native {
         name: nowcast_brick_claude_code::NAME,
         files: nowcast_brick_claude_code::FILES,
     },
+    description: "Quotas of the Claude Code account and measures of its running sessions.",
     run: nowcast_brick_claude_code::run,
 }];
 
@@ -34,8 +37,9 @@ mod tests {
 
     use super::*;
 
-    /// Each native brick's declaration loads, names the brick, is launched by
-    /// `nowcast brick <name>` and has the binary's version.
+    /// Each native brick's declaration loads, names the brick, carries the
+    /// description `setup` shows, is launched by `nowcast brick <name>` and
+    /// has the binary's version.
     #[test]
     fn every_native_declaration_is_valid() {
         let dir = tempfile::tempdir().unwrap();
@@ -50,6 +54,7 @@ mod tests {
             let path = write_native(dir.path(), &native.files).unwrap();
             let declaration = load_manifest(&path).unwrap();
             assert_eq!(declaration.name.as_str(), native.files.name);
+            assert_eq!(declaration.description, native.description);
             assert_eq!(declaration.command, ["nowcast", "brick", native.files.name]);
             assert_eq!(
                 declaration.version,
