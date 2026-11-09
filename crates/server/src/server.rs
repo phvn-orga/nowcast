@@ -74,6 +74,13 @@ struct Subscribe {
     params: Value,
 }
 
+/// The body of `POST /v1/bricks/{brick}/refresh`, which may be empty.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RefreshBrick {
+    kind: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct HistoryRead<'a> {
     gap: bool,
@@ -252,6 +259,7 @@ where
                 Ok(empty(StatusCode::ACCEPTED))
             }
             Route::Input(flow) => self.input(anchor, &flow_id(flow)?, body).await,
+            Route::BrickRefresh(brick) => self.refresh_brick(brick, body).await,
             Route::Stream => self.stream(anchor, &parts.headers),
         }
     }
@@ -379,6 +387,48 @@ where
                 InputError::UnknownFlow(_) => unknown(),
                 InputError::Unavailable(e) => ApiError::from(e).into(),
             })?;
+        Ok(empty(StatusCode::ACCEPTED))
+    }
+
+    /// Refreshes every live flow of a brick, or of one of its kinds, whoever
+    /// subscribed to it. A brick without flows gets nothing, and a stopped
+    /// one is not launched for it.
+    async fn refresh_brick(
+        &self,
+        brick: &str,
+        body: Incoming,
+    ) -> Result<Response<Body>, HttpError> {
+        let name = decode(brick)?;
+        let unknown_brick =
+            || HttpError::api(ApiErrorCode::UnknownBrick, format!("no brick {name:?}"));
+        let brick = BrickName::new(name.as_str()).map_err(|_| unknown_brick())?;
+        let declaration = self.discovery.brick(&brick).ok_or_else(unknown_brick)?;
+        let body = read_body(body).await?;
+        let RefreshBrick { kind } = if body.iter().all(u8::is_ascii_whitespace) {
+            RefreshBrick::default()
+        } else {
+            serde_json::from_slice(&body).map_err(|e| {
+                HttpError::invalid_request(format!("the body is not the expected JSON: {e}"))
+            })?
+        };
+        if let Some(kind) = &kind
+            && !declaration.subscriptions.contains_key(kind)
+        {
+            return Err(HttpError::api(
+                ApiErrorCode::UnknownKind,
+                format!("brick {brick} has no kind {kind:?}"),
+            ));
+        }
+        for flow in self.router.flows() {
+            if flow.subscribers == 0 || flow.flow.brick() != &brick {
+                continue;
+            }
+            if kind.is_some() && self.supervisor.kind(&flow.flow) != kind {
+                continue;
+            }
+            // A flow that ended meanwhile has nothing to refresh.
+            let _ = self.supervisor.refresh(&flow.flow);
+        }
         Ok(empty(StatusCode::ACCEPTED))
     }
 

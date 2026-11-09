@@ -248,6 +248,16 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// `POST /v1/bricks/{brick}/refresh`: every live flow of the brick, or of
+    /// `kind`.
+    pub async fn refresh_brick(&self, brick: &str, kind: Option<&str>) -> Result<(), CliError> {
+        let path = format!("/v1/bricks/{}/refresh", percent_encode(brick));
+        let body = kind.map(|kind| serde_json::json!({ "kind": kind }));
+        let reply = self.client.call(Method::POST, &path, body).await?;
+        reply.expect(StatusCode::ACCEPTED)?;
+        Ok(())
+    }
+
     /// `POST /v1/flows/{flow}/input`: the service checks the detail and
     /// relays it to the brick.
     pub async fn input(&self, flow: &str, detail: Value) -> Result<(), CliError> {

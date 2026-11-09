@@ -38,6 +38,45 @@ async fn asks_for_a_refresh_and_prints_nothing() {
     fake.assert_sessions_first();
 }
 
+/// With --brick, one call to the brick's route, its kind in the body when
+/// given.
+#[tokio::test]
+async fn refreshes_every_flow_of_a_brick() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    fake.can("/v1/bricks/probe/refresh", 202, "", "");
+    for args in [
+        &["refresh", "--brick", "probe", "--kind", "item"][..],
+        &["refresh", "--brick", "probe"],
+    ] {
+        let output = run(&mut nowcast(&fake), args).await;
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stdout(&output), "");
+    }
+    let calls: Vec<_> = fake
+        .log()
+        .into_iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| (r.path, r.body))
+        .collect();
+    let path = "/v1/bricks/probe/refresh".to_owned();
+    assert_eq!(
+        calls,
+        [
+            (path.clone(), Some(json!({ "kind": "item" }))),
+            (path, None)
+        ]
+    );
+    fake.assert_sessions_first();
+}
+
+#[tokio::test]
+async fn an_invalid_brick_name_exits_2_without_a_call() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    let output = run(&mut nowcast(&fake), &["refresh", "--brick", "Bad/name"]).await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(fake.log().is_empty());
+}
+
 /// The two commands' code and stderr, side by side.
 async fn get_and_refresh(fake: &Fake, flow: &str, json: bool) -> [(Option<i32>, String); 2] {
     let mut results = Vec::new();

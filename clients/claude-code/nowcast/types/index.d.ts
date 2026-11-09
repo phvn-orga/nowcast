@@ -152,6 +152,14 @@ export type Nowcast = {
   /** `POST /v1/flows/{flow}/refresh`: the brick publishes again once it has read. */
   refresh(request: { flow: string }): Promise<NowcastDone | NowcastFailure>
   /**
+   * `POST /v1/bricks/{brick}/refresh`: every live flow of the brick, or of
+   * its subscription `kind`, whoever subscribed to it. For a mod that changed
+   * a source others may follow. A brick that is not enabled answers
+   * `unknown_brick`, a kind it does not declare `unknown_kind`; one without
+   * flows answers `ok` and reads nothing.
+   */
+  refreshBrick(request: { brick: string; kind?: string }): Promise<NowcastDone | NowcastFailure>
+  /**
    * `POST /v1/flows/{flow}/input`: sends `detail` to the flow's brick. The
    * flow's subscription kind must accept an input, and `detail` match the
    * type it accepts (`input_not_accepted`, `invalid_input` otherwise).

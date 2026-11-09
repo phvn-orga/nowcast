@@ -27,6 +27,8 @@ pub(crate) enum Route<'a> {
     Refresh(&'a str),
     /// `POST /v1/flows/{flow}/input`
     Input(&'a str),
+    /// `POST /v1/bricks/{brick}/refresh`
+    BrickRefresh(&'a str),
     /// `GET /v1/stream`
     Stream,
 }
@@ -50,6 +52,7 @@ impl<'a> Route<'a> {
             ["flows", flow] => (Self::Flow(flow), Method::GET),
             ["flows", flow, "refresh"] => (Self::Refresh(flow), Method::POST),
             ["flows", flow, "input"] => (Self::Input(flow), Method::POST),
+            ["bricks", brick, "refresh"] => (Self::BrickRefresh(brick), Method::POST),
             ["stream"] => (Self::Stream, Method::GET),
             _ => return Err(HttpError::not_found()),
         };
@@ -166,6 +169,10 @@ mod tests {
         assert_eq!(
             parse(Method::POST, "/v1/flows/forge%2Fa/refresh"),
             Ok(Route::Refresh("forge%2Fa"))
+        );
+        assert_eq!(
+            parse(Method::POST, "/v1/bricks/forge/refresh"),
+            Ok(Route::BrickRefresh("forge"))
         );
         assert_eq!(parse(Method::GET, "/v1/stream"), Ok(Route::Stream));
     }

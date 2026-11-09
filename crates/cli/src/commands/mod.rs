@@ -12,7 +12,7 @@ mod watch;
 
 pub use get::get;
 pub use input::input;
-pub use refresh::refresh;
+pub use refresh::{refresh, refresh_brick};
 pub use status::status;
 pub use subscribe::subscribe;
 pub use watch::watch;

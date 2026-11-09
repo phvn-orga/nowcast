@@ -504,6 +504,23 @@ fn another_anchors_subscription_is_unknown() {
 }
 
 #[test]
+fn a_brick_refresh_reaches_another_anchors_flows() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        let subscribed = subscribe(&harness, "a").await;
+        harness.identity.set_anchor(Anchor {
+            id: AnchorId(2),
+            kind: None,
+        });
+        declare(&harness).await;
+        let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+        assert_eq!(request(&harness, "POST", &path, "").await.status, 202);
+        assert_eq!(harness.supervisor.refreshes(), [qualified(&subscribed)]);
+    });
+}
+
+#[test]
 fn the_session_is_per_anchor() {
     run(async {
         let harness = start(ProbeMode::Ready);

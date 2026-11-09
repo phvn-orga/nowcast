@@ -81,13 +81,22 @@ pub enum Command {
         after: Option<u64>,
     },
 
-    /// Ask the brick to refresh a flow the anchor process is subscribed to
+    /// Ask the brick to refresh a flow the anchor process is subscribed to, or every flow of a brick
     ///
     /// Prints nothing. The brick publishes again once it has read its source:
     /// the new value comes on the stream, or through `get` afterwards.
+    /// With --brick, every live flow of the brick is refreshed, whoever
+    /// subscribed to it; none at all is no error.
     Refresh {
         /// Flow id, as `subscribe` prints it: <brick>/<flow>
-        flow: String,
+        #[arg(required_unless_present = "brick", conflicts_with = "brick")]
+        flow: Option<String>,
+        /// Refresh every live flow of this brick instead
+        #[arg(long, value_name = "NAME")]
+        brick: Option<String>,
+        /// With --brick, only the flows of this subscription kind
+        #[arg(long, requires = "brick", conflicts_with = "flow")]
+        kind: Option<String>,
     },
 
     /// Send the JSON value read on stdin to the brick of a flow the anchor process is subscribed to
@@ -278,13 +287,28 @@ mod tests {
     }
 
     #[test]
-    fn refresh_takes_a_flow() {
+    fn refresh_takes_a_flow_or_a_brick() {
         let cli = Cli::try_parse_from(["nowcast", "refresh", "a/b"]).unwrap();
-        let Command::Refresh { flow } = cli.command else {
+        let Command::Refresh { flow, brick, kind } = cli.command else {
             panic!("refresh");
         };
-        assert_eq!(flow, "a/b");
-        assert!(Cli::try_parse_from(["nowcast", "refresh"]).is_err());
+        assert_eq!((flow.as_deref(), brick, kind), (Some("a/b"), None, None));
+        let cli = Cli::try_parse_from(["nowcast", "refresh", "--brick", "forge", "--kind", "pr"])
+            .unwrap();
+        let Command::Refresh { flow, brick, kind } = cli.command else {
+            panic!("refresh");
+        };
+        assert_eq!(
+            (flow, brick.as_deref(), kind.as_deref()),
+            (None, Some("forge"), Some("pr"))
+        );
+        for args in [
+            &["nowcast", "refresh"][..],
+            &["nowcast", "refresh", "a/b", "--brick", "forge"],
+            &["nowcast", "refresh", "a/b", "--kind", "pr"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+        }
     }
 
     fn daemon_matches(args: &[&str]) -> ArgMatches {

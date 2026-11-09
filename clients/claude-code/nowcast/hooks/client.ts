@@ -45,6 +45,7 @@ export const STUB: Nowcast = {
   subscribe: unavailable,
   unsubscribe: unavailable,
   refresh: unavailable,
+  refreshBrick: unavailable,
   input: unavailable,
   last: unavailable,
   history: unavailable,
@@ -85,6 +86,12 @@ export async function flowKnown($: $, flow: string): Promise<boolean> {
 /** `$.nowcast.refresh`. */
 export async function refresh($: $, flow: string): Promise<NowcastDone | NowcastFailure> {
   return expect(await request($, 'POST', `/v1/flows/${encodeURIComponent(flow)}/refresh`), 202, done)
+}
+
+/** `$.nowcast.refreshBrick`. */
+export async function refreshBrick($: $, brick: string, kind?: string): Promise<NowcastDone | NowcastFailure> {
+  const body = kind === undefined ? undefined : { kind }
+  return expect(await request($, 'POST', `/v1/bricks/${encodeURIComponent(brick)}/refresh`, body), 202, done)
 }
 
 /** `$.nowcast.input`. */
