@@ -15,3 +15,6 @@ tokio = { version = "1.54.1", features = ["rt", "io-std", "io-util", "macros", "
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["rt", "io-std", "io-util", "macros", "sync", "time", "process", "net"] }
+
+[build-dependencies]
+nowcast-brick-build = { path = "../../crates/brick-build" }

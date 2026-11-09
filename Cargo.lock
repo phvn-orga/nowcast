@@ -1098,11 +1098,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nowcast-brick-build"
+version = "0.1.0-alpha.6"
+
+[[package]]
 name = "nowcast-brick-claude-code"
 version = "0.1.0-alpha.6"
 dependencies = [
  "jiff",
  "notify",
+ "nowcast-brick-build",
  "nowcast-codec",
  "nowcast-conformance",
  "nowcast-discovery",
@@ -1119,6 +1124,7 @@ name = "nowcast-brick-forge"
 version = "0.1.0-alpha.6"
 dependencies = [
  "jiff",
+ "nowcast-brick-build",
  "nowcast-codec",
  "nowcast-types",
  "reqwest",
