@@ -117,11 +117,11 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
   service, un flux par session, outil en ligne de commande commun, un adaptateur par
   agent) est décrite dans `02-clients.md`.
 - **Distribution par binaire précompilé.** Un tag de version (`v0.1.0`) fait
-  construire par la CI un binaire statique (`x86_64-unknown-linux-musl`), publié avec
-  les unités systemd dans une release GitHub. Homebrew l'installe depuis une formule
-  rangée dans le dépôt même (`Formula/`), sans dépôt de tap à part. Installer ne
-  demande aucune compilation ; `cargo install` reste la voie du développement (voir
-  `02-clients.md`).
+  construire par la CI un binaire statique (`x86_64-unknown-linux-musl`), publié dans
+  une release GitHub. Il embarque ses unités systemd, que `nowcast setup` écrit.
+  Homebrew l'installe depuis une formule rangée dans le dépôt même (`Formula/`), sans
+  dépôt de tap à part. Installer ne demande aucune compilation ; `cargo install` reste
+  la voie du développement (voir `02-clients.md`).
 - **Une release part d'un changement de version sur `main`.** La version n'est
   écrite qu'à un endroit, celle du workspace dans `Cargo.toml` ; les déclarations
   des briques natives la reçoivent à la compilation. Une PR qui la monte publie la

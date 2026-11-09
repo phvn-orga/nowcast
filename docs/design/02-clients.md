@@ -76,11 +76,33 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
 - **Un seul binaire, `nowcast`** : l'outil en ligne de commande, et le service sous la
   sous-commande `nowcast daemon`, que lance l'unité systemd. L'outil et le service
   sortent toujours à la même version : une seule chose à installer. Homebrew le place
-  dans son répertoire `bin`, qui est dans le `PATH`, et l'unité qu'installe la formule
-  le lance par le chemin `opt` de Homebrew, stable d'une version à l'autre. Depuis les
-  sources, pour le développement, il s'installe dans `~/.local/bin`
-  (`cargo install --root ~/.local`), d'ordinaire dans le `PATH`, contrairement à
-  `~/.cargo/bin`. L'adaptateur Claude Code lance `nowcast` depuis le `PATH`.
+  dans son répertoire `bin`, qui est dans le `PATH`. Depuis les sources, pour le
+  développement, il s'installe dans `~/.local/bin` (`cargo install --root ~/.local`),
+  d'ordinaire dans le `PATH`, contrairement à `~/.cargo/bin`. L'adaptateur Claude Code
+  lance `nowcast` depuis le `PATH`.
+- **Une commande installe le service : `nowcast setup`.** Elle écrit les deux unités
+  systemd de l'utilisateur (`nowcast.socket`, `nowcast.service`) en fichiers ordinaires
+  dans `$XDG_CONFIG_HOME/systemd/user/`, active le socket, puis active les briques
+  natives choisies. Les unités viennent du binaire, qui les embarque : une seule voie
+  pour Homebrew et pour les sources, alors qu'un binaire installé depuis les sources
+  ne sait pas où est le dépôt. Le service tourne depuis le chemin du binaire, ou depuis
+  le chemin `opt` de Homebrew quand le binaire est dans le Cellar, dont le prochain
+  `brew upgrade` retire le chemin versionné.
+  - **Relancée, elle répare et ne change rien d'autre.** Une unité absente est écrite,
+    une unité qui diffère (après une mise à jour, ou un lien d'une installation à la
+    main) est réécrite. C'est par là qu'une unité modifiée arrive chez l'utilisateur :
+    la formule demande de la relancer après chaque mise à jour.
+  - **Les briques se cochent dans une liste.** Dans un terminal, sans brique en
+    argument, elle propose les briques natives, celles déjà actives cochées ; décocher
+    en désactive une. Sans terminal (un script, une CI), seules les briques nommées en
+    argument sont activées. Les briques externes s'installent de leur côté, par
+    `nowcast bricks enable`.
+  - **`nowcast setup --remove` défait la partie systemd**, avant `brew uninstall` :
+    arrêt du socket et du service, retrait des unités et du lien d'activation. Les
+    briques et leurs fichiers restent.
+  - **Écarté : `brew services`.** Sous Linux, Homebrew ne génère qu'un `.service`
+    lancé à l'ouverture de session, sans unité socket : le service tournerait en
+    permanence au lieu de démarrer à la première connexion.
 - **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et
