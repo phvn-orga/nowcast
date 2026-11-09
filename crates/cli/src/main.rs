@@ -34,28 +34,23 @@ fn main() -> ExitCode {
         Command::Daemon => return daemon(&matches),
         // A brick runs on its own runtime, and talks to the service alone.
         Command::Brick { name } => return brick(name),
-        Command::Bricks { .. } | Command::Setup { .. } => {
-            let result = match &cli.command {
-                Command::Bricks {
-                    action: BricksAction::Enable { brick, force },
-                } => {
+        Command::Bricks { action } => {
+            let result = match action {
+                BricksAction::Enable { brick, force } => {
                     let service = (!force).then(|| client(&cli));
                     commands::bricks::enable(brick, service)
                 }
-                Command::Bricks {
-                    action: BricksAction::Disable { brick },
-                } => commands::bricks::disable(brick),
-                Command::Setup { remove: true, .. } => commands::setup::remove(),
-                Command::Setup { bricks, .. } => commands::setup::setup(bricks, &|| client(&cli)),
-                _ => unreachable!(),
+                BricksAction::Disable { brick } => commands::bricks::disable(brick),
             };
-            return match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    error.report(cli.json);
-                    ExitCode::from(error.exit_code())
-                }
+            return exit_code(result, cli.json);
+        }
+        Command::Setup { bricks, remove } => {
+            let result = if *remove {
+                commands::setup::remove()
+            } else {
+                commands::setup::setup(bricks, &|| client(&cli))
             };
+            return exit_code(result, cli.json);
         }
         _ => {}
     }
@@ -65,6 +60,11 @@ fn main() -> ExitCode {
         .build()
         .map_err(CliError::Io)
         .and_then(|runtime| runtime.block_on(run(cli)));
+    exit_code(result, json)
+}
+
+/// The exit code of a command's `result`, its error reported first.
+fn exit_code(result: Result<(), CliError>, json: bool) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -30,6 +30,8 @@ on:
       - build/**
       - .dockerignore
       - crates/daemon/systemd/**
+      # What the dry run checks of `nowcast setup`.
+      - crates/cli/src/commands/setup.rs
       # The version, and a new dependency, which can break the static build.
       - Cargo.toml
       - Cargo.lock

@@ -32,6 +32,6 @@ export function setupWarning(stdout: string): string | null {
   }
   const setup = typeof status === 'object' && status !== null ? (status as { setup?: unknown }).setup : undefined
   if (setup === 'missing') return `systemd does not start the ${CLI} service yet: run \`${CLI} setup\``
-  if (setup === 'outdated') return `the ${CLI} service's systemd units are outdated: run \`${CLI} setup\``
+  if (setup === 'outdated') return `the ${CLI} service's setup is outdated: run \`${CLI} setup\` again`
   return null
 }

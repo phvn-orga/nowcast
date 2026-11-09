@@ -9,7 +9,7 @@ const status = (setup: unknown) => JSON.stringify({ installed: '0.1.0', running:
 
 test('missing or outdated units call for `nowcast setup`, anything else for nothing', () => {
   expect(setupWarning(status('missing'))).toBe('systemd does not start the nowcast service yet: run `nowcast setup`')
-  expect(setupWarning(status('outdated'))).toBe("the nowcast service's systemd units are outdated: run `nowcast setup`")
+  expect(setupWarning(status('outdated'))).toBe("the nowcast service's setup is outdated: run `nowcast setup` again")
   expect(setupWarning(status('current'))).toBeNull()
   expect(setupWarning(status(null))).toBeNull()
   // A binary older than the field.
@@ -21,7 +21,7 @@ test('the session start shows the toast once when the units are outdated', async
   const w = world(on, { status: status('outdated') })
   await $.session.start(START)
   await w.clock.settle()
-  expect(w.toasts).toEqual(["the nowcast service's systemd units are outdated: run `nowcast setup`"])
+  expect(w.toasts).toEqual(["the nowcast service's setup is outdated: run `nowcast setup` again"])
 
   await $.turn.start({ text: 'hi', turnId: 't-1' })
   await w.clock.settle()

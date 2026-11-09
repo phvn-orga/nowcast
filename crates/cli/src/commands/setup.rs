@@ -23,6 +23,8 @@ use crate::native::{self, NATIVES, Native};
 
 const SOCKET: &str = "nowcast.socket";
 const SERVICE: &str = "nowcast.service";
+/// The link `systemctl enable` makes, relative to the units' directory.
+const WANTS: &str = "sockets.target.wants/nowcast.socket";
 
 /// Sets the service up, then enables the native bricks named in `chosen`.
 /// With none, and a terminal to ask in, asks which native bricks to enable.
@@ -77,7 +79,7 @@ pub fn setup(
         }
     }
     if !ask && wanted.is_empty() {
-        log::info("No brick enabled: name them, or run setup in a terminal to choose")?;
+        log::info("No brick enabled by this run: name them, or run setup in a terminal to choose")?;
     }
     cliclack::outro(
         "The service starts on the first connection: `nowcast status` tells what runs",
@@ -124,7 +126,8 @@ pub fn remove() -> Result<(), CliError> {
         .into_iter()
         .filter(|name| fs::symlink_metadata(units.join(name)).is_ok())
         .collect();
-    if present.is_empty() {
+    let wants = units.join(WANTS);
+    if present.is_empty() && fs::symlink_metadata(&wants).is_err() {
         cliclack::outro(format!(
             "No nowcast unit in {}: nothing to remove",
             units.display()
@@ -133,12 +136,13 @@ pub fn remove() -> Result<(), CliError> {
     }
     // A unit whose link the last upgrade broke may not stop: it is removed
     // all the same.
-    let mut stop = vec!["stop"];
-    stop.extend(&present);
-    if let Err(e) = systemctl(&stop) {
-        log::warning(e.message())?;
+    if !present.is_empty() {
+        let mut stop = vec!["stop"];
+        stop.extend(&present);
+        if let Err(e) = systemctl(&stop) {
+            log::warning(e.message())?;
+        }
     }
-    let wants = units.join("sockets.target.wants").join(SOCKET);
     for path in std::iter::once(wants).chain(present.iter().map(|name| units.join(name))) {
         match fs::remove_file(&path) {
             Ok(()) => log::success(format!("{} removed", path.display()))?,
@@ -160,8 +164,8 @@ pub fn remove() -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Units {
     Current,
-    /// One is missing, differs or is a link: an upgrade changed them, or an
-    /// install by hand linked them.
+    /// One is missing, differs or is a link (an upgrade changed them, or an
+    /// install by hand linked them), or the socket is not enabled.
     Outdated,
     /// Neither is there: `setup` never ran.
     Missing,
@@ -198,7 +202,11 @@ pub fn units_state() -> Option<Units> {
     }
     Some(match (present, current) {
         (0, _) => Units::Missing,
-        (p, c) if p == expected.len() && c == p => Units::Current,
+        (p, c)
+            if p == expected.len() && c == p && fs::symlink_metadata(units.join(WANTS)).is_ok() =>
+        {
+            Units::Current
+        }
         _ => Units::Outdated,
     })
 }

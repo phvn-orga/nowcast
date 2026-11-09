@@ -145,7 +145,7 @@ fn readable(installed: &str, running: Option<&Value>, setup: Option<Units>) -> S
 fn setup_line(text: &mut String, setup: Option<Units>) {
     let why = match setup {
         Some(Units::Missing) => "missing: run nowcast setup to let systemd start the service",
-        Some(Units::Outdated) => "outdated: run nowcast setup to rewrite the units",
+        Some(Units::Outdated) => "outdated: run nowcast setup again",
         Some(Units::Current) | None => return,
     };
     let _ = writeln!(text, "setup      {why}");
@@ -251,7 +251,7 @@ flows
             "\
 service    0.1.0, running since 2026-11-08T16:41:00Z
 installed  0.2.0, not the service's: restart the service to run it
-setup      outdated: run nowcast setup to rewrite the units
+setup      outdated: run nowcast setup again
 bricks  none
 sessions  none
 flows  none

@@ -36,6 +36,13 @@ impl Home {
             .join(format!("config/nowcast/bricks/{name}.toml"))
     }
 
+    /// The link `systemctl enable nowcast.socket` makes.
+    fn enable_link(&self) {
+        let wants = self.units().join("sockets.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::os::unix::fs::symlink("../nowcast.socket", wants.join("nowcast.socket")).unwrap();
+    }
+
     /// Installs a `systemctl` that logs its arguments, then runs `then`.
     fn systemctl(&self, then: &str) {
         let log = self.root.path().join("systemctl.log");
@@ -164,10 +171,7 @@ async fn remove_stops_the_service_and_removes_its_units() {
     let home = Home::new();
     let output = home.setup(&["claude-code"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    // As `systemctl enable` would.
-    let wants = home.units().join("sockets.target.wants");
-    std::fs::create_dir_all(&wants).unwrap();
-    std::os::unix::fs::symlink("../nowcast.socket", wants.join("nowcast.socket")).unwrap();
+    home.enable_link();
     home.calls();
 
     let output = home.setup(&["--remove"]).await;
@@ -221,6 +225,9 @@ async fn status_says_when_setup_has_to_run() {
     };
     assert_eq!(state(home.nowcast(&["status", "--json"]).await), "missing");
     home.setup(&[]).await;
+    // The stub systemctl enables nothing: the socket is not enabled yet.
+    assert_eq!(state(home.nowcast(&["status", "--json"]).await), "outdated");
+    home.enable_link();
     assert_eq!(state(home.nowcast(&["status", "--json"]).await), "current");
     std::fs::write(home.units().join("nowcast.service"), "old").unwrap();
     assert_eq!(state(home.nowcast(&["status", "--json"]).await), "outdated");
@@ -230,7 +237,18 @@ async fn status_says_when_setup_has_to_run() {
     let output = home.nowcast(&["status"]).await;
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
-        text.contains("setup      outdated: run nowcast setup to rewrite the units\n"),
+        text.contains("setup      outdated: run nowcast setup again\n"),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn remove_takes_an_enable_link_left_alone() {
+    let home = Home::new();
+    home.enable_link();
+    let output = home.setup(&["--remove"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(home.calls(), ["--user daemon-reload"]);
+    let link = home.units().join("sockets.target.wants/nowcast.socket");
+    assert!(std::fs::symlink_metadata(link).is_err());
 }
