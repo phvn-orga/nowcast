@@ -31,10 +31,14 @@ pub enum Failure {
     Unreachable(String),
 }
 
+/// Each URL's `ETag` and body. Bodies are shared, not copied, with every
+/// reading that gets them.
+type Cache = HashMap<String, (String, Arc<Value>)>;
+
 #[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
-    cache: Arc<Mutex<HashMap<String, (String, Value)>>>,
+    cache: Arc<Mutex<Cache>>,
 }
 
 impl Http {
@@ -53,13 +57,10 @@ impl Http {
         url: &str,
         token: &str,
         headers: &[(&str, &str)],
-    ) -> Result<Value, Failure> {
-        let etag = self
-            .cache
-            .lock()
-            .unwrap()
-            .get(url)
-            .map(|(etag, _)| etag.clone());
+    ) -> Result<Arc<Value>, Failure> {
+        // The body is taken with its ETag: a 304 gives back this one, even if
+        // the cache was cleared meanwhile.
+        let kept = self.cache.lock().unwrap().get(url).cloned();
         let mut request = self
             .client
             .get(url)
@@ -71,7 +72,7 @@ impl Http {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        if let Some(etag) = &etag {
+        if let Some((etag, _)) = &kept {
             request = request.header(IF_NONE_MATCH, etag);
         }
         let response = request
@@ -80,8 +81,8 @@ impl Http {
             .map_err(|e| Failure::Unreachable(e.to_string()))?;
         let status = response.status();
         match status {
-            StatusCode::NOT_MODIFIED => match self.cache.lock().unwrap().get(url) {
-                Some((_, body)) => Ok(body.clone()),
+            StatusCode::NOT_MODIFIED => match kept {
+                Some((_, body)) => Ok(body),
                 None => Err(Failure::Unreadable("304 without a kept answer".into())),
             },
             StatusCode::UNAUTHORIZED => Err(Failure::Unauthorized),
@@ -103,7 +104,8 @@ impl Http {
                     .bytes()
                     .await
                     .map_err(|e| Failure::Unreachable(e.to_string()))?;
-                let body: Value = serde_json::from_slice(&body)
+                let body: Arc<Value> = serde_json::from_slice(&body)
+                    .map(Arc::new)
                     .map_err(|e| Failure::Unreadable(format!("the answer is not JSON: {e}")))?;
                 if let Some(etag) = etag {
                     let mut cache = self.cache.lock().unwrap();

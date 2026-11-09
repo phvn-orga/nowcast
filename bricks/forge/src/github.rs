@@ -57,11 +57,11 @@ pub async fn read(
     let repo = format!("{api}/repos/{owner}/{name}");
     let get = |url: String| async move { http.get(&url, token, HEADERS).await };
 
-    let open = get(format!("{repo}/pulls?state=open&per_page=100")).await?;
+    let head = encode(&format!("{owner}:{branch}"));
+    let open = get(format!("{repo}/pulls?head={head}&state=open&per_page=100")).await?;
     let pr = match open_pr(&open, owner, name, branch) {
         Some(pr) => Some(pr),
         None => {
-            let head = encode(&format!("{owner}:{branch}"));
             let closed = get(format!("{repo}/pulls?head={head}&state=closed&per_page=1")).await?;
             closed.as_array().and_then(|a| a.first()).and_then(pr_of)
         }
@@ -80,9 +80,11 @@ pub async fn read(
     };
     let ci = match &sha {
         Some(sha) => {
-            let runs = get(format!("{repo}/actions/runs?head_sha={sha}&per_page=100")).await?;
-            let checks = get(format!("{repo}/commits/{sha}/check-runs?per_page=100")).await?;
-            let statuses = get(format!("{repo}/commits/{sha}/status")).await?;
+            let (runs, checks, statuses) = tokio::try_join!(
+                get(format!("{repo}/actions/runs?head_sha={sha}&per_page=100")),
+                get(format!("{repo}/commits/{sha}/check-runs?per_page=100")),
+                get(format!("{repo}/commits/{sha}/status")),
+            )?;
             let open_number = pr.as_ref().filter(|p| p.state == "open").map(|p| p.number);
             Some(Ci {
                 pipelines: pipelines(&runs, &checks, &statuses, open_number),
@@ -517,7 +519,7 @@ mod tests {
     async fn a_branch_without_pr_reads_the_ci_of_its_head() {
         let server = Server::start(|request| {
             let line = request.lines().next().unwrap_or_default().to_owned();
-            let body = if line.contains("/pulls?state=open") || line.contains("state=closed") {
+            let body = if line.contains("/pulls?") {
                 "[]".to_owned()
             } else if line.contains("/branches/feat%2fx") {
                 json!({ "commit": { "sha": "abc" } }).to_string()

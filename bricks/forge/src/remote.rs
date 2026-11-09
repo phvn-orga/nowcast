@@ -48,14 +48,18 @@ pub fn split(remote: &str) -> Option<(String, String)> {
     Some((host, path.to_owned()))
 }
 
-/// The repository of `remote`. A host the brick does not know is taken as an
-/// SSH alias and handed to `resolve`, which gives its real host name.
+/// The repository of `remote`. On an SSH remote, a host the brick does not
+/// know is taken as an SSH alias and handed to `resolve`, which gives its
+/// real host name.
 pub fn recognise(remote: &str, resolve: impl Fn(&str) -> Option<String>) -> Option<Repo> {
     let (host, path) = split(remote)?;
     let host = if is_github(&host) {
         host
-    } else {
+    } else if is_ssh(remote) {
         resolve(&host)?.to_ascii_lowercase()
+    } else {
+        // Only an SSH remote can name an SSH alias.
+        return None;
     };
     if !is_github(&host) {
         return None;
@@ -68,6 +72,21 @@ pub fn recognise(remote: &str, resolve: impl Fn(&str) -> Option<String>) -> Opti
         owner: owner.to_ascii_lowercase(),
         name: name.to_ascii_lowercase(),
     })
+}
+
+/// The owner as the remote writes it. GitHub ignores its case, `gh` does
+/// not: `gh auth token --user` needs the login's own spelling.
+pub fn owner_as_written(remote: &str) -> Option<String> {
+    let (_, path) = split(remote)?;
+    path.split('/').next().map(str::to_owned)
+}
+
+/// An SSH remote: scp-like, or an `ssh://` URL (`git+ssh://` included).
+fn is_ssh(remote: &str) -> bool {
+    match remote.trim().split_once("://") {
+        Some((scheme, _)) => scheme.ends_with("ssh"),
+        None => true,
+    }
 }
 
 fn is_github(host: &str) -> bool {
@@ -132,6 +151,12 @@ mod tests {
             })
         );
         assert_eq!(recognise("git@gitlab.com:org/repo.git", resolve), None);
+        let never = |_: &str| -> Option<String> { panic!("an HTTPS host is no SSH alias") };
+        assert_eq!(recognise("https://github-pro/org/repo.git", never), None);
+        assert_eq!(
+            owner_as_written("git@github.com:PHVN/Repo.git").as_deref(),
+            Some("PHVN")
+        );
     }
 
     #[test]

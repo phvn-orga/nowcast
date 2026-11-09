@@ -83,6 +83,9 @@ fn log(message: impl std::fmt::Display) {
 /// A `pr` flow.
 struct Flow {
     repo: Repo,
+    /// The owner as the first remote wrote it, for `gh`, which matches
+    /// logins case-sensitively.
+    login: String,
     branch: String,
     pace: Pace,
     next: Instant,
@@ -169,9 +172,11 @@ async fn serve() -> ExitCode {
                         if let Some(f) = flows.get_mut(&flow) {
                             f.pace.refreshed(now);
                             f.force = true;
+                            // A rate limit is waited out: the reading
+                            // it planned answers the refresh.
                             if f.in_flight {
                                 f.again = true;
-                            } else {
+                            } else if f.status != "rate_limited" {
                                 f.next = now;
                             }
                         }
@@ -236,8 +241,10 @@ fn subscribe(
         Ok(flow) => flow,
         Err(e) => return refuse("key_too_long", e.to_string()),
     };
+    let login = remote::owner_as_written(remote).unwrap_or_default();
     flows.entry(flow.clone()).or_insert_with(|| Flow {
         repo,
+        login,
         branch: branch.to_owned(),
         pace: Pace::default(),
         next: now,
@@ -261,7 +268,8 @@ fn spawn_reading(
     tokens: &Arc<Mutex<HashMap<String, String>>>,
     done: UnboundedSender<(FlowId, u64, Outcome)>,
 ) {
-    let Repo::GitHub { owner, name } = flow.repo.clone();
+    let Repo::GitHub { name, .. } = flow.repo.clone();
+    let owner = flow.login.clone();
     let (branch, generation) = (flow.branch.clone(), flow.generation);
     let (http, api, tokens) = (http.clone(), api.to_owned(), tokens.clone());
     tokio::spawn(async move {
@@ -339,11 +347,17 @@ fn finish(
     let ci = flow.reading.as_ref().and_then(|r| r.ci.as_ref());
     let pipelines = ci.map_or(0, |c| c.pipelines.len());
     let running = ci.is_some_and(|c| c.is_active());
-    let mut delay = flow.pace.next(&pace::GITHUB, now, pipelines, running);
+    // A failed reading says nothing new about the CI: no faster than the
+    // normal pace until a reading succeeds again.
+    let mut delay = if flow.status == "ok" {
+        flow.pace.next(&pace::GITHUB, now, pipelines, running)
+    } else {
+        pace::GITHUB.normal
+    };
     if let Some(wait) = wait {
         delay = delay.max(wait);
     }
-    flow.next = if std::mem::take(&mut flow.again) {
+    flow.next = if std::mem::take(&mut flow.again) && wait.is_none() {
         now
     } else {
         now + delay
@@ -537,6 +551,11 @@ mod tests {
         .unwrap();
         assert_eq!(failed["source"]["status"], "unreachable");
         assert_eq!(failed["pr"]["number"], 7, "the last reading stays");
+        assert_eq!(
+            flow.next,
+            now + pace::GITHUB.normal,
+            "a failure does not keep the running CI's pace"
+        );
     }
 
     #[test]
@@ -575,6 +594,8 @@ mod tests {
         let flow = flows.get_mut(&id).unwrap();
         let (now, mut req) = (Instant::now(), 0);
         let limited = Outcome::Failed(Failure::Limited(Some(Duration::from_secs(300))));
+        // A refresh came during the reading: the limit still holds.
+        flow.again = true;
         let detail =
             published(&finish(&id, flow, limited, now, Timestamp::now(), &mut req)).unwrap();
         assert_eq!(detail["source"]["status"], "rate_limited");
