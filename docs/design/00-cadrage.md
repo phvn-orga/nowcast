@@ -131,7 +131,7 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
     binaire, l'archive et sa formule, et installe celle-ci depuis l'archive locale.
     Il publie ensuite la release d'un bloc (un brouillon complété, puis publié, ce
     qui pose le tag), et seulement après met à jour la formule par une PR vers
-    `main`, mergée par lui une fois ses checks verts : la formule ne pointe jamais
+    `main`, qui se merge seule une fois ses checks verts : la formule ne pointe jamais
     vers une release absente. Un échec avant la publication ne laisse rien ; le
     même numéro sert à la tentative suivante.
   - **Une relance reprend où l'échec a laissé.** Relancer le workflow, ou
@@ -140,6 +140,12 @@ CI, quotas, tâches) se calcule dans chaque session. D'où trois limites :
     reste publiée ; les utilisateurs restent sur la version précédente.
   - **Le workflow ouvre lui-même la PR de formule**, ce que l'organisation doit
     autoriser à GitHub Actions.
+  - **Un mainteneur approuve les runs de la PR de formule**, le seul geste à la
+    main d'une release. GitHub retient les runs d'une PR ouverte avec le
+    `GITHUB_TOKEN` jusqu'à cette approbation ; on garde ce point de contrôle
+    plutôt que d'ouvrir la PR avec un token d'app ou un PAT. Le workflow ne
+    l'attend pas : il ouvre la PR en auto-merge et finit, et la release est
+    complète une fois la formule mergée.
 - **Le plugin Claude Code a sa propre version**, en semver, indépendante de celle du
   service : les deux n'évoluent pas ensemble. Elle est écrite dans son
   `plugin.json`, et le mod d'exemple a la sienne. Claude Code ne livre un plugin
