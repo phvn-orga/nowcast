@@ -170,7 +170,9 @@ s'y injecter. Aucune authentification locale ne tient contre ce cas, qui relève
 sécurité de la machine. Pour de la lecture, le risque est faible : un tel programme
 peut déjà lire directement ce que lisent les briques. Il peut aussi envoyer de fausses
 entrées à une brique (`01-briques.md`) : il fausse alors ce qu'elle publie, jamais la
-source. Le service n'offre aucune action sur une source ; s'il en offrait un jour
+source. Il peut enfin demander le rafraîchissement des flux d'une brique, même
+sans y être abonné : il ne fait qu'ajouter des lectures. Le service n'offre aucune
+action sur une source ; s'il en offrait un jour
 d'autres que le rafraîchissement et l'entrée, il faudrait
 limiter ce que chaque type de client a le droit de demander. Ces droits s'arrêtent à la
 session : le noyau ne distingue pas deux mods d'une même session, qui partagent le

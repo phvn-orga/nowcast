@@ -124,7 +124,8 @@ attend une approbation.
   dernière tentative est publiée (`attempt`).
 - **`sha` et `ref` disent ce que le pipeline a testé**, qui n'est pas toujours ce à
   quoi il est rattaché : un pipeline de PR teste le commit de merge
-  (`refs/pull/N/merge`), pas la tête de la PR.
+  (`refs/pull/N/merge`), pas la tête de la PR. Sur GitHub, `sha` reste la tête de la
+  PR : l'API REST ne donne pas le commit de merge qu'un run `pull_request` a testé.
 - **`trigger`** : `push`, `pull_request`, `merge_queue`, `manual`, `schedule`,
   `downstream`, `external` ou `other`. La valeur de la forge reste dans `raw_trigger`.
 - **Les statuts de commit** (GitHub) et les statuts de PR (Azure DevOps), que
@@ -182,15 +183,15 @@ arriver. Une fois tout terminé, un manque est un blocage (`missing`, plus bas).
 `ci.state` résume les pipelines, `ci.required_state` les seuls éléments
 obligatoires (`null` quand la forge ne dit rien de ce qui l'est) :
 
-1. `none` sans aucun pipeline ni obligatoire absent ;
-2. sinon `fail` si un élément échoue ;
+1. `none` sans aucun pipeline, ni obligatoire absent, ni CI attendue ;
+2. sinon `fail` si un élément échoue ou a été annulé ;
 3. sinon `running` si un élément tourne ou attend son tour, ou si une CI est
    attendue ;
 4. sinon `missing` s'il manque un obligatoire (`required_state` seulement) ;
 5. sinon `waiting` si un élément attend une personne ;
-6. sinon `pass`.
+6. sinon `pass` si un élément passe, `none` si tous ont été sautés.
 
-`ci.jobs` compte les jobs terminés et le total, pour une progression.
+Un élément sauté ou d'état inconnu ne compte pas. `ci.jobs` compte les jobs terminés et le total, pour une progression.
 
 ### `source`
 
@@ -322,7 +323,7 @@ Chaque flux a son rythme, déduit de ce que la brique vient de lire. Le premier
 | État du flux | GitHub | Azure DevOps | Jusqu'à |
 |---|---|---|---|
 | **CI attendue** : une tête neuve (push, PR ouverte) sans aucun pipeline encore | 2 s pendant 30 s, puis 5 s | 5 s pendant 30 s, puis 10 s | un pipeline apparaît, ou 2 min sans rien : pas de CI pour cet événement |
-| **CI en cours** : un pipeline `queued`, `running` ou `waiting`, PR ou file de merge | 5 s | 10 s | tout est terminé |
+| **CI en cours** : un pipeline ou un job `queued` ou `running`, PR ou file de merge | 5 s | 10 s | plus rien ne tourne |
 | **fenêtre rapide** : un `refresh` n'a rien montré de neuf | 2 s | 5 s | 30 s |
 | **normal** | 60 s | 120 s | |
 
@@ -333,6 +334,11 @@ Chaque flux a son rythme, déduit de ce que la brique vient de lire. Le premier
   qui couvre le délai entre le push et la création des pipelines. Si l'API n'a pas
   encore la nouvelle tête, la fenêtre rapide la rattrape. Des `refresh` rapprochés
   ne font qu'une lecture.
+- **Une attente humaine ne compte pas comme une CI en cours.** Un pipeline
+  `waiting` (une approbation de déploiement) peut attendre des jours : il suit le
+  rythme normal.
+- **Une lecture en échec** (réseau, jeton, limite) repasse au rythme normal, ou
+  attend ce que la limite demande. Elle ne dit rien de neuf sur la CI.
 - **Le même état sert sans `refresh`** : un push depuis un terminal ou par quelqu'un
   d'autre, une fois que le rythme normal a vu la tête neuve.
 - **Le rythme normal** voit ce que la machine ne voit pas : une relecture, un merge,
@@ -352,17 +358,24 @@ Chaque flux a son rythme, déduit de ce que la brique vient de lire. Le premier
 
 Le service ne connaît aucun agent (`00-cadrage.md`) : reconnaître une action d'agent
 qui peut changer une PR revient au client. **Le mod central de Claude Code s'en
-charge** (`02-clients.md`). Après un appel d'outil qui a abouti, il demande un
-`refresh` des flux forge que sa session suit :
+charge** (`02-clients.md`). Après un appel d'outil qui a abouti, il demande le
+rafraîchissement de tous les flux forge d'une sorte (`POST
+/v1/bricks/forge/refresh`, `03-contrats.md`) :
 
 - `git push`, `gh pr …`, `az repos pr …`, et l'outil d'écriture de PR des serveurs
-  MCP Azure DevOps : les flux `pr` ;
-- `gh issue …` qui écrit, `gh pr merge` (une PR peut fermer une issue) : les flux
+  MCP Azure DevOps : la sorte `pr` ;
+- `gh issue …` qui écrit, `gh pr merge` (une PR peut fermer une issue) : les sortes
   `issues` et `issue`.
 
-Il ne rafraîchit que des flux auxquels sa session est abonnée. Sans brique forge
-activée, ou sans consommateur abonné, il n'y en a aucun, et rien ne part. Un push
-depuis un terminal n'est pas vu : le rythme normal le rattrape.
+**Tous les flux, pas ceux de la session.** Une session sur un dépôt peut agir sur un
+autre (`gh issue create -R`, `git -C`), que suit une autre session. Le mod n'a pas à
+reconnaître le dépôt visé : la brique relit tous les flux de la sorte. Sur GitHub,
+une relecture sans changement ne coûte rien ; sur Azure DevOps, de l'ordre de
+0,1 TSTU par flux.
+
+Sans brique forge activée, le service répond `unknown_brick` et le mod n'insiste
+pas ; sans flux, rien ne part. Un push depuis un terminal n'est pas vu : le rythme
+normal le rattrape.
 
 ## Ce qui existe déjà
 
