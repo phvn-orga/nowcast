@@ -466,11 +466,9 @@ fn the_service_unit_lets_the_daemon_stop_its_bricks() {
 
 #[test]
 fn the_service_unit_runs_nowcast_daemon() {
+    // `nowcast setup` writes the binary's path in place of @NOWCAST@.
     let unit = include_str!("../systemd/nowcast.service");
-    assert!(
-        unit.lines()
-            .any(|l| l == "ExecStart=%h/.local/bin/nowcast daemon")
-    );
+    assert!(unit.lines().any(|l| l == "ExecStart=@NOWCAST@ daemon"));
 }
 
 /// Not a test of its own: the connector, this binary run again with
