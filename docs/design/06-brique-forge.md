@@ -323,7 +323,7 @@ Chaque flux a son rythme, déduit de ce que la brique vient de lire. Le premier
 | État du flux | GitHub | Azure DevOps | Jusqu'à |
 |---|---|---|---|
 | **CI attendue** : une tête neuve (push, PR ouverte) sans aucun pipeline encore | 2 s pendant 30 s, puis 5 s | 5 s pendant 30 s, puis 10 s | un pipeline apparaît, ou 2 min sans rien : pas de CI pour cet événement |
-| **CI en cours** : un pipeline `queued`, `running` ou `waiting`, PR ou file de merge | 5 s | 10 s | tout est terminé |
+| **CI en cours** : un pipeline ou un job `queued` ou `running`, PR ou file de merge | 5 s | 10 s | plus rien ne tourne |
 | **fenêtre rapide** : un `refresh` n'a rien montré de neuf | 2 s | 5 s | 30 s |
 | **normal** | 60 s | 120 s | |
 
@@ -334,6 +334,11 @@ Chaque flux a son rythme, déduit de ce que la brique vient de lire. Le premier
   qui couvre le délai entre le push et la création des pipelines. Si l'API n'a pas
   encore la nouvelle tête, la fenêtre rapide la rattrape. Des `refresh` rapprochés
   ne font qu'une lecture.
+- **Une attente humaine ne compte pas comme une CI en cours.** Un pipeline
+  `waiting` (une approbation de déploiement) peut attendre des jours : il suit le
+  rythme normal.
+- **Une lecture en échec** (réseau, jeton, limite) repasse au rythme normal, ou
+  attend ce que la limite demande. Elle ne dit rien de neuf sur la CI.
 - **Le même état sert sans `refresh`** : un push depuis un terminal ou par quelqu'un
   d'autre, une fois que le rythme normal a vu la tête neuve.
 - **Le rythme normal** voit ce que la machine ne voit pas : une relecture, un merge,
