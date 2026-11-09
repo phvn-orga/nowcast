@@ -315,11 +315,11 @@ export const caller: Plugin = {
               ? await $.nowcast.refresh(request)
               : method === 'refreshBrick'
                 ? await $.nowcast.refreshBrick(request)
-              : method === 'input'
-                ? await $.nowcast.input(request)
-                : method === 'history'
-                  ? await $.nowcast.history(request)
-                  : await $.nowcast.last(request)
+                : method === 'input'
+                  ? await $.nowcast.input(request)
+                  : method === 'history'
+                    ? await $.nowcast.history(request)
+                    : await $.nowcast.last(request)
       return { text: JSON.stringify(answer) }
     })
   },

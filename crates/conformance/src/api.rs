@@ -593,8 +593,10 @@ pub async fn refresh_answers_202_and_reaches_the_brick<S: ApiSubject>() {
 /// unknown brick or kind answers `404`.
 pub async fn brick_refresh_reaches_every_flow_of_the_brick<S: ApiSubject>() {
     let (harness, client) = ready::<S>().await;
-    let item = client.subscribe("a").await;
-    let inbox = client.subscribe_to(probe::INBOX_KIND, "b").await;
+    // The inbox flow sorts first, so a refresh wrongly sent to it would reach
+    // the brick before the one awaited below.
+    let item = client.subscribe("b").await;
+    let inbox = client.subscribe_to(probe::INBOX_KIND, "a").await;
     let path = format!("/v1/bricks/{}/refresh", probe::NAME);
     client
         .request("POST", &path, Some(json!({ "kind": probe::KIND })))

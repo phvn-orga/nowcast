@@ -155,7 +155,8 @@ export type Nowcast = {
    * `POST /v1/bricks/{brick}/refresh`: every live flow of the brick, or of
    * its subscription `kind`, whoever subscribed to it. For a mod that changed
    * a source others may follow. A brick that is not enabled answers
-   * `unknown_brick`; one without flows answers `ok` and reads nothing.
+   * `unknown_brick`, a kind it does not declare `unknown_kind`; one without
+   * flows answers `ok` and reads nothing.
    */
   refreshBrick(request: { brick: string; kind?: string }): Promise<NowcastDone | NowcastFailure>
   /**
