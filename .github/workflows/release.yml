@@ -7,7 +7,10 @@ name: Release
 # the release container, packages it, and installs the formula from the local
 # archive. It then publishes the release whole (a draft completed, then
 # published, which creates the tag), and only then points the Homebrew formula
-# at it, through a pull request it merges once its checks pass.
+# at it, through a pull request set to merge itself once its checks pass. GitHub
+# holds the runs of a pull request opened with GITHUB_TOKEN until a maintainer
+# approves them: that approval is the one step by hand, and the run does not
+# wait for it.
 #
 # Run again (Re-run, or `gh workflow run release.yml`), it validates again,
 # keeps a release already published, and redoes the formula.
@@ -23,7 +26,6 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/scripts/version-goes-up.py
-      - .github/scripts/merge-when-green.sh
       - Formula/**
       - build/**
       - .dockerignore
@@ -204,10 +206,8 @@ jobs:
     permissions:
       # Push the formula branch.
       contents: write
-      # Open and merge the formula pull request.
+      # Open the formula pull request and set it to merge itself.
       pull-requests: write
-      # Run CI on that branch: a pull request opened by GITHUB_TOKEN starts no workflow.
-      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.version.outputs.version }}
@@ -215,7 +215,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: main
-      - name: Point the formula at the release and merge it
+      - name: Point the formula at the release in a pull request
         run: |
           tag="v$VERSION"
           # The published archive, not this run's build: a release kept from
@@ -238,9 +238,7 @@ jobs:
           # The branch is this workflow's: a run again replaces it, and takes
           # over its pull request.
           git push --force origin "$branch"
-          gh workflow run ci.yml --ref "$branch"
-          gh workflow run check-agents-md.yml --ref "$branch"
           gh pr view "$branch" --json state -q .state 2>/dev/null | grep -qx OPEN ||
             gh pr create --base main --head "$branch" --title "$title" \
-              --body "Points the Homebrew formula at the $tag release, so that \`brew upgrade\` sees it. Opened by the release workflow, which merges it once its checks pass."
-          .github/scripts/merge-when-green.sh "$branch"
+              --body "Points the Homebrew formula at the $tag release, so that \`brew upgrade\` sees it. Opened by the release workflow: approve its runs, and it merges itself once its checks pass."
+          gh pr merge "$branch" --auto --squash
