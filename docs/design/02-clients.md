@@ -115,6 +115,15 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   en retient (`05-brique-claude-code.md`). Ce flux suit
   l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
   même nom, ce qui remplace l'abonnement à l'ancien.
+- **Le mod central rafraîchit les flux forge après une action de sa session** :
+  après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
+  `az repos pr`…), il demande un `refresh` des flux de la brique forge auxquels sa
+  session est abonnée (`06-brique-forge.md`). Reconnaître ces appels est propre à
+  l'agent, donc au client, pas à la brique.
+- **Une brique reste facultative pour le mod central.** Ce qu'il fait pour une
+  brique ne vise que ses flux, ou ne part qu'une fois la brique activée (la réponse
+  `unknown_brick` dit qu'elle ne l'est pas). Sans la brique, il ne fait rien pour
+  elle, sans erreur ni attente.
 - **Un `watch` par identifiant de session.** Comme `/clear` vide l'état du plugin, le
   mod central arrête alors `watch` et le relance sous le nouvel identifiant, sans
   `Last-Event-ID` : le service envoie à nouveau chaque dernière valeur, qui remplit
