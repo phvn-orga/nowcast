@@ -7,8 +7,6 @@ name: Agent instructions
 
 on:
   pull_request:
-  # The release workflow runs this check on the version and formula branches
-  # it pushes: a pull request opened with GITHUB_TOKEN starts no workflow.
   workflow_dispatch:
 
 permissions:

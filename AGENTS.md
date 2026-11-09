@@ -25,7 +25,9 @@ The CI (`.github/workflows/ci.yml`) runs the whole workspace and is the judge.
 
 Release by raising the workspace version in `Cargo.toml` in a pull request,
 and nothing by hand: no tag, no formula edit. Merged into `main`, it publishes
-the release and updates `Formula/`; a failed run is rerun as is.
+the release and opens a pull request updating `Formula/`; a failed run is rerun
+as is. That pull request merges itself only once a maintainer approves its
+runs: a release is done when it is merged.
 `.github/workflows/release.yml` describes it.
 
 The Claude Code plugins version apart from the service: a pull request raising
