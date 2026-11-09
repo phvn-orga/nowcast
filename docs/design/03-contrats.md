@@ -238,6 +238,14 @@ répond `201` :
 
 - `POST /v1/flows/{flow}/refresh` répond `202`. Le service relaie la demande à la
   brique.
+- `POST /v1/bricks/{brick}/refresh`, corps facultatif `{"kind": "<sorte>"}`, répond
+  `202`. Le service envoie `refresh` à chaque flux vivant de la brique, ou de cette
+  seule sorte, quel qu'en soit l'abonné : le client n'a pas à y être abonné, ni à
+  savoir s'il existe des flux. Sans flux, rien ne part, et une brique arrêtée n'est
+  pas lancée pour cela. `404` `unknown_brick` si la brique n'est pas activée, `404`
+  `unknown_kind` si elle ne déclare pas cette sorte, `400` `invalid_request` pour un
+  corps mal formé. Le protocole des briques ne change pas : une brique reçoit des
+  `refresh` ordinaires (section 4).
 - `POST /v1/flows/{flow}/input` envoie une entrée à la brique du flux. Le corps est le
   détail JSON lui-même, du type que la sorte d'abonnement déclare dans `accepts`
   (section 1). Le service le valide contre le schéma de ce type, puis le relaie ;

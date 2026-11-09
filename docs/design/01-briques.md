@@ -62,10 +62,11 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
   propres identifiants. Ces identifiants se partagent par l'outillage de la source ou
   le trousseau du système, jamais par le service. N'importe qui écrira des mods
   spécifiques : faire passer chaque action par le service n'aurait pas de sens. En
-  dehors des abonnements, un client adresse deux requêtes à une brique, toujours sur un
-  flux auquel il est abonné, et le service les relaie à la brique de ce flux : le
-  rafraîchissement immédiat, typiquement après qu'un mod a agi sur la source, et
-  l'entrée (ci-dessous).
+  dehors des abonnements, un client adresse deux requêtes à une brique, et le service
+  les relaie : le rafraîchissement immédiat, typiquement après qu'un mod a agi sur la
+  source, et l'entrée (ci-dessous). L'entrée vise un flux auquel il est abonné. Le
+  rafraîchissement vise un tel flux, ou tous les flux d'une brique, d'une sorte au
+  besoin : le service les envoie un par un, et la brique n'en sait rien.
 - **L'entrée d'un flux : une donnée qu'un client envoie à la brique.** Certaines
   données n'existent que chez le client (les mesures d'une session d'agent, que seul
   son moteur connaît). Un abonné d'un flux peut y envoyer un détail JSON, d'un type

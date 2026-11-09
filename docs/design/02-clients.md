@@ -15,9 +15,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   chaque flux ses derniers événements (`03-contrats.md`, section 3). Une coupure du flux
   ne fait rien perdre dans la limite de cet historique, et au-delà le client en est
   averti (`flow-gap`). Un client ne fait que
-  six choses : déclarer sa session, s'abonner, se désabonner, lire son flux,
-  demander le rafraîchissement immédiat d'un flux et envoyer une entrée sur un flux
-  (voir `01-briques.md`). Le service n'exécute aucune action
+  sept choses : déclarer sa session, s'abonner, se désabonner, lire son flux,
+  demander le rafraîchissement immédiat d'un flux ou de tous les flux d'une brique,
+  et envoyer une entrée sur un flux (voir `01-briques.md`). Le service n'exécute aucune action
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
@@ -45,7 +45,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
 - **Un outil en ligne de commande fourni avec nowcast, commun à tous les agents.** Par
   exemple `nowcast watch` (tient le flux, se reconnecte), `nowcast get <flux>` (dernière
   valeur, en un appel ; avec `--after <id>`, l'historique après cet identifiant), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
-  immédiat, rien d'affiché en cas de succès), `nowcast input <flux>` (envoie le détail
+  immédiat, rien d'affiché en cas de succès ; `nowcast refresh --brick <nom> [--kind
+  <sorte>]` pour tous les flux d'une brique), `nowcast input <flux>` (envoie le détail
   JSON lu sur l'entrée standard), `nowcast bricks enable <nom>` et
   `nowcast bricks disable <nom>` (activer ou désactiver une brique), `nowcast status`
   (ce qui tourne, voir plus bas). La reconnexion et la conduite à tenir
@@ -142,11 +143,12 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   en retient (`05-brique-claude-code.md`). Ce flux suit
   l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
   même nom, ce qui remplace l'abonnement à l'ancien.
-- **Le mod central rafraîchit les flux forge après une action de sa session** :
+- **Le mod central rafraîchit la brique forge après une action de sa session** :
   après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
-  `az repos pr`…), il demande un `refresh` des flux de la brique forge auxquels sa
-  session est abonnée (`06-brique-forge.md`). Reconnaître ces appels est propre à
-  l'agent, donc au client, pas à la brique.
+  `az repos pr`…), il demande le rafraîchissement de tous les flux de la sorte
+  concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
+  dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
+  Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
 - **Une brique reste facultative pour le mod central.** Ce qu'il fait pour une
   brique ne vise que ses flux, ou ne part qu'une fois la brique activée (la réponse
   `unknown_brick` dit qu'elle ne l'est pas). Sans la brique, il ne fait rien pour
@@ -157,7 +159,7 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
 - **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
   mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
-  `subscribe`, `unsubscribe`, `refresh`, `input`, `last` et `history`, typés par le contrat du mod
+  `subscribe`, `unsubscribe`, `refresh`, `refreshBrick`, `input`, `last` et `history`, typés par le contrat du mod
   central. `history` lit l'historique d'un flux après un identifiant
   (`GET /v1/flows/{flow}?after=<id>`) : c'est ainsi qu'un mod qui s'abonne en cours de
   session à un flux déjà suivi lit ce qui a précédé. L'état partagé, lui, ne garde que
