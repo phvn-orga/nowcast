@@ -56,8 +56,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   signalées quand elles diffèrent ; depuis quand le service tourne ; les briques
   activées et celles lancées ; les sessions déclarées et leurs abonnements ; les
   flux actifs. Sous `--json`, il écrit
-  `{"installed": "<sa version>", "running": <la réponse de GET /v1/status>}`,
-  `running` à `null` pour un service arrêté. Arrêté est un état, pas une erreur :
+  `{"installed": "<sa version>", "running": <la réponse de GET /v1/status>, "setup":
+  "current" | "outdated" | "missing"}`,
+  `running` à `null` pour un service arrêté, `setup` à `null` quand il ne peut le dire. Arrêté est un état, pas une erreur :
   status sort en 0.
 - **`nowcast status` ne réveille pas un service arrêté.** Quand systemd tient le
   socket (`nowcast.socket` actif) sans que `nowcast.service` tourne, s'y connecter
@@ -90,8 +91,12 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   `brew upgrade` retire le chemin versionné.
   - **Relancée, elle répare et ne change rien d'autre.** Une unité absente est écrite,
     une unité qui diffère (après une mise à jour, ou un lien d'une installation à la
-    main) est réécrite. C'est par là qu'une unité modifiée arrive chez l'utilisateur :
-    la formule demande de la relancer après chaque mise à jour.
+    main) est réécrite. C'est par là qu'une unité modifiée arrive chez l'utilisateur.
+  - **`nowcast status` dit quand la relancer.** Le binaire installé compare les unités
+    en place à celles qu'il écrirait : `setup` vaut `current`, `outdated` ou `missing`
+    dans sa sortie `--json`, et une ligne le dit hors de `current`. L'adaptateur Claude
+    Code le lit au début de chaque session et l'affiche dans un toast. Il n'y a donc
+    rien à relancer après une mise à jour qui ne change pas les unités.
   - **Les briques se cochent dans une liste.** Dans un terminal, sans brique en
     argument, elle propose les briques natives, celles déjà actives cochées ; décocher
     en désactive une. Sans terminal (un script, une CI), seules les briques nommées en
