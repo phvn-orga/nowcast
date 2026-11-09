@@ -82,9 +82,11 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
   - **Ce n'est pas une action.** Une entrée informe une brique ; elle n'agit sur
     aucune source.
 - **Le dépôt fournit des briques natives, toutes facultatives.** claude-code d'abord
-  (`05-brique-claude-code.md`), d'autres ensuite (git, forge). Aucune n'est requise :
-  le cœur n'en dépend pas, et une brique native ne sert qu'une fois activée par
-  l'utilisateur.
+  (`05-brique-claude-code.md`), forge (`06-brique-forge.md`), d'autres ensuite (git).
+  Aucune n'est requise : le cœur n'en dépend pas, et une brique native ne sert qu'une
+  fois activée par l'utilisateur. Il en va de même des clients du dépôt : ce que le
+  mod central de Claude Code fait pour une brique ne se déclenche que si elle est
+  activée, et son absence ne produit ni erreur ni attente (`02-clients.md`).
   - **Sous-commandes du binaire unique.** Une brique native est une sous-commande,
     `nowcast brick <nom>`, qui parle le protocole des briques sur son entrée et sa
     sortie. Elle reste un processus à part, que le service lance à partir de sa

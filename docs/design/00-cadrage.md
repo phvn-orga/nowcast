@@ -176,20 +176,13 @@ limiter ce que chaque type de client a le droit de demander. Ces droits s'arrêt
 session : le noyau ne distingue pas deux mods d'une même session, qui partagent le
 même processus.
 
-## Premier jet : la brique forge
+## La brique forge
 
-Un premier contrat a déjà servi dans un client et a tenu sur GitHub (`gh`) et Azure
-DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébergeur :
-
-- reconnaître un remote git de l'hébergeur (SSH, HTTPS, alias SSH) ;
-- trouver la PR d'une branche, de préférence ouverte, avec un état neutre
-  (`open`, `merged`, `closed`) et un drapeau brouillon ;
-- lire les contrôles d'une PR, ou à défaut ceux d'un commit, sous des états neutres
-  (`pass`, `fail`, `pending`, `skip`). Sur Azure DevOps, la CI d'une PR est celle de ses
-  politiques de build et de statut, pas les autres (relecteurs, commentaires, stratégie
-  de merge) ;
-- reconnaître les appels d'outils d'un agent qui peuvent créer ou modifier une PR, pour
-  relire sans attendre.
+Un premier contrat, tenu dans un client sur GitHub (`gh`) et Azure DevOps (`az`), a
+servi de point de départ. La brique est conçue dans `06-brique-forge.md` : PR, CI par
+pipeline et par job, issues, lues par les API publiques avec un polling qui accélère
+quand quelque chose bouge. Le push par webhook y est écarté pour l'instant, porte
+ouverte.
 
 ## À trancher
 
@@ -201,9 +194,6 @@ DevOps (`az`). Il sépare ce qui est commun de ce qui est propre à chaque hébe
   décrites dans `02-clients.md`.
 - **Le comportement quand le service est absent** ou en échec : il vit dans l'outil
   en ligne de commande commun aux clients (voir `02-clients.md`), reste à le définir.
-- **La CI en temps réel.** Sans webhook, c'est du polling, mutualisé et mieux réglé.
-  Des webhooks GitHub ou Azure DevOps demanderaient une adresse joignable depuis
-  Internet, donc un tunnel.
 - **Un processus orphelin** (lancé en double fork) perd sa filiation et ne remonte plus
   à son ancrage : il devient son propre ancrage et ne suit plus la session de son
   agent. À rattacher autrement si le besoin apparaît.
