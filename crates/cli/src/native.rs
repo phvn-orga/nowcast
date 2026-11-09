@@ -11,13 +11,22 @@ pub struct Native {
     pub run: fn() -> ExitCode,
 }
 
-pub const NATIVES: &[Native] = &[Native {
-    files: NativeFiles {
-        name: nowcast_brick_claude_code::NAME,
-        files: nowcast_brick_claude_code::FILES,
+pub const NATIVES: &[Native] = &[
+    Native {
+        files: NativeFiles {
+            name: nowcast_brick_claude_code::NAME,
+            files: nowcast_brick_claude_code::FILES,
+        },
+        run: nowcast_brick_claude_code::run,
     },
-    run: nowcast_brick_claude_code::run,
-}];
+    Native {
+        files: NativeFiles {
+            name: nowcast_brick_forge::NAME,
+            files: nowcast_brick_forge::FILES,
+        },
+        run: nowcast_brick_forge::run,
+    },
+];
 
 pub fn find(name: &str) -> Option<&'static Native> {
     NATIVES.iter().find(|n| n.files.name == name)

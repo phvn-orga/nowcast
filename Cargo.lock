@@ -1024,6 +1024,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nowcast-brick-forge"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "jiff",
+ "nowcast-codec",
+ "nowcast-types",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "nowcast-cli"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -1033,6 +1046,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nowcast-brick-claude-code",
+ "nowcast-brick-forge",
  "nowcast-conformance",
  "nowcast-daemon",
  "nowcast-discovery",

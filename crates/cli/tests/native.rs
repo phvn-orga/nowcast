@@ -34,6 +34,36 @@ impl BrickSubject for ClaudeCode {
 
 nowcast_conformance::brick_suite!(ClaudeCode);
 
+struct Forge;
+
+impl BrickSubject for Forge {
+    fn command() -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nowcast"));
+        // Nothing listens there: every reading publishes `unreachable`.
+        command
+            .args(["brick", "forge"])
+            .env("NOWCAST_FORGE_GITHUB_API", "http://127.0.0.1:9")
+            .env("NOWCAST_FORGE_GITHUB_TOKEN", "t");
+        command
+    }
+
+    fn name() -> BrickName {
+        BrickName::new("forge").unwrap()
+    }
+
+    fn subscription() -> (String, Vec<u8>) {
+        (
+            "pr".into(),
+            br#"{"remote":"https://github.com/o/r.git","branch":"main"}"#.to_vec(),
+        )
+    }
+}
+
+mod forge {
+    use super::*;
+    nowcast_conformance::brick_suite!(Forge);
+}
+
 fn bricks(config: &Path, data: &Path) -> tokio::process::Command {
     let mut command = bare();
     command

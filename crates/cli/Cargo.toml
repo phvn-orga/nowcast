@@ -15,6 +15,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 nowcast-brick-claude-code = { path = "../../bricks/claude-code" }
+nowcast-brick-forge = { path = "../../bricks/forge" }
 nowcast-daemon = { path = "../daemon" }
 nowcast-discovery = { path = "../discovery" }
 nowcast-supervisor = { path = "../supervisor" }

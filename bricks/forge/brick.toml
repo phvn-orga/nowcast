@@ -1,0 +1,20 @@
+# The forge brick, native to nowcast: `nowcast bricks enable forge` writes
+# this file and its schemas under $XDG_DATA_HOME/nowcast/bricks/ and
+# activates it. The program `nowcast` is the service's own executable.
+manifest_version = 1
+name = "forge"
+# The binary embeds this file with the workspace version in its place.
+version = "0.0.0"
+description = "A branch's PR and its CI, per pipeline and job, on GitHub."
+protocol = 1
+
+[run]
+command = ["nowcast", "brick", "forge"]
+
+[subscriptions.pr]
+description = "A branch's PR, open first, and the CI of its head, or of the branch's head without a PR."
+schema = "schemas/params-pr.json"
+publishes = "forge.pr/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/pr-v1.json"
