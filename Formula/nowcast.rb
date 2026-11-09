@@ -2,8 +2,8 @@
 class Nowcast < Formula
   desc "Local service streaming ready-to-use data to agents, dashboards and apps"
   homepage "https://github.com/phvn-orga/nowcast"
-  url "https://github.com/phvn-orga/nowcast/releases/download/v0.1.0-alpha.5/nowcast-v0.1.0-alpha.5-x86_64-unknown-linux-musl.tar.gz"
-  sha256 "012d58d4f3ddb5326f7e4c9b24a4d86bddf89adde514dd2129345e28c5b57525"
+  url "https://github.com/phvn-orga/nowcast/releases/download/v0.1.0-alpha.6/nowcast-v0.1.0-alpha.6-x86_64-unknown-linux-musl.tar.gz"
+  sha256 "b62698510b1ae3987e5f3553315fc87bc323b927ff2f902e77934a6b5a52aa0a"
 
   depends_on arch: :x86_64
   depends_on :linux
