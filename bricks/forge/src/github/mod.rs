@@ -304,6 +304,9 @@ struct Memory {
     tested: Option<(String, Instant)>,
     /// The last CI read for that commit, kept when a reading of it fails.
     queue_ci: Option<Ci>,
+    /// Whether a failure to read that CI was logged: a lasting one is
+    /// logged once, until it reads again.
+    queue_ci_unread: bool,
 }
 
 /// Whether RFC 3339 time `a` comes before `b`; `false` when either does not
@@ -394,6 +397,7 @@ impl Branch {
             Some(None) => {
                 self.memory.tested = None;
                 self.memory.queue_ci = None;
+                self.memory.queue_ci_unread = false;
                 let left = self.memory.queued.take();
                 if let Some((number, head, enqueued_at)) = left
                     && number == pr.number
@@ -430,8 +434,8 @@ impl Branch {
 
 /// The CI of `sha`, the commit the queue of `base` tests, marked from the
 /// base's `names` and expected for a while after that commit shows up. A
-/// reading that fails is logged and gives the last CI `memory` holds for
-/// that commit, or none.
+/// reading that fails gives the last CI `memory` holds for that commit, or
+/// none; it is logged once per commit, until a reading succeeds.
 async fn queue_ci(
     memory: &mut Memory,
     base: &Base<'_>,
@@ -442,6 +446,7 @@ async fn queue_ci(
         Some((tested, since)) if tested == sha => *since,
         _ => {
             memory.queue_ci = None;
+            memory.queue_ci_unread = false;
             Instant::now()
         }
     };
@@ -458,11 +463,16 @@ async fn queue_ci(
                 required::mark(&mut ci, names);
             }
             memory.queue_ci = Some(ci);
+            memory.queue_ci_unread = false;
         }
-        Err(failure) => crate::log(format_args!(
-            "github.com/{}/{}@{sha}: merge queue CI unread: {failure:?}",
-            base.owner, base.name
-        )),
+        Err(failure) => {
+            if !std::mem::replace(&mut memory.queue_ci_unread, true) {
+                crate::log(format_args!(
+                    "github.com/{}/{}@{sha}: merge queue CI unread: {failure:?}",
+                    base.owner, base.name
+                ));
+            }
+        }
     }
     memory.queue_ci.clone()
 }
@@ -922,9 +932,11 @@ mod tests {
         let entry = reading.pr.unwrap().queue.unwrap();
         assert_eq!(entry.sha.as_deref(), Some("q1"));
         assert_eq!(entry.ci, None, "never read");
+        assert!(branch.memory.queue_ci_unread, "logged");
         world.lock().unwrap().queue_ci_lost = false;
         let read = read_pr(&mut branch).await.queue.unwrap().ci;
         assert_eq!(read.as_ref().unwrap().pipelines.len(), 1);
+        assert!(!branch.memory.queue_ci_unread, "a failure would log again");
         world.lock().unwrap().queue_ci_lost = true;
         assert_eq!(read_pr(&mut branch).await.queue.unwrap().ci, read, "kept");
     }

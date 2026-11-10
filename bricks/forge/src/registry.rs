@@ -337,7 +337,8 @@ impl Core {
 
     /// Takes in what a provider read for target `id` at `at`, and publishes
     /// the flows whose detail changed or that a `refresh` asked for, as of
-    /// `now`. A failure keeps the last reading.
+    /// `now`. A failure keeps the last reading, but for an issue not found:
+    /// deleted or no longer visible, it is a number that is no issue.
     pub fn update(
         &mut self,
         id: u64,
@@ -357,7 +358,12 @@ impl Core {
                 target.status = Some(Ok(()));
                 target.as_of = Some(at);
             }
-            Err(failure) => target.status = Some(Err(failure)),
+            Err(failure) => {
+                if failure == Failure::NotFound && matches!(target.subject, Subject::Issue(_)) {
+                    target.reading = None;
+                }
+                target.status = Some(Err(failure));
+            }
         }
         let target = &*target;
         let mut out = Vec::new();
@@ -980,6 +986,24 @@ mod tests {
         ));
         assert_eq!(out[0].1["source"]["status"], "unreachable");
         assert_eq!(out[0].1["state"], "closed", "the last reading stays");
+    }
+
+    /// An issue read once, then not found (deleted, or no longer visible),
+    /// is a number that is no issue: its fields become null.
+    #[tokio::test]
+    async fn an_issue_no_longer_found_loses_its_fields() {
+        let (mut core, _) = core();
+        core.subscribe(RequestId(1), "issue", &issue_params("https://forge/o/r", 7));
+        let read = Ok(Reading::Issue(issue(7, true)));
+        core.update(1, read, Timestamp::now(), Instant::now());
+        let out =
+            published(&core.update(1, Err(Failure::NotFound), Timestamp::now(), Instant::now()));
+        let detail = &out[0].1;
+        assert_eq!(detail["source"]["status"], "not_found");
+        assert_eq!(detail["number"], 7);
+        for field in ["title", "type", "state", "url"] {
+            assert_eq!(detail[field], Value::Null, "{field}");
+        }
     }
 
     #[tokio::test]
