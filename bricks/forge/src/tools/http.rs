@@ -1,15 +1,18 @@
-//! Conditional GET requests: each answer's `ETag` is sent back with the next
-//! request for the same URL (`If-None-Match`), and a `304` gives back the
-//! body kept from the last `200`. GitHub does not count a `304` against its
-//! rate limit. The cache is shared by every branch followed, so two readings
-//! of the same URL pay for it once.
+//! JSON over HTTP. GET requests are conditional: each answer's `ETag` is
+//! sent back with the next request for the same URL (`If-None-Match`), and a
+//! `304` gives back the body kept from the last `200`. GitHub does not count
+//! a `304` against its rate limit. The cache is shared by every branch
+//! followed, so two readings of the same URL pay for it once. POST requests,
+//! for an API that only answers them (GraphQL), are not cached.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reqwest::StatusCode;
-use reqwest::header::{AUTHORIZATION, ETAG, HeaderMap, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT};
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT,
+};
+use reqwest::{RequestBuilder, Response, StatusCode};
 use serde_json::Value;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -61,9 +64,57 @@ impl Http {
         // The body is taken with its ETag: a 304 gives back this one, even if
         // the cache was cleared meanwhile.
         let kept = self.cache.lock().unwrap().get(url).cloned();
-        let mut request = self
-            .client
-            .get(url)
+        let mut request = self.request(self.client.get(url), token, headers);
+        if let Some((etag, _)) = &kept {
+            request = request.header(IF_NONE_MATCH, etag);
+        }
+        let response = send(request).await?;
+        if response.status() == StatusCode::NOT_MODIFIED {
+            return match kept {
+                Some((_, body)) => Ok(body),
+                None => Err(Failure::Unreadable("304 without a kept answer".into())),
+            };
+        }
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = Arc::new(json(response).await?);
+        if let Some(etag) = etag {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.len() >= CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(url.to_owned(), (etag, body.clone()));
+        }
+        Ok(body)
+    }
+
+    /// POSTs `body` as JSON to `url`, with `headers` and the bearer `token`,
+    /// and reads the answer as JSON. Nothing is cached.
+    pub async fn post(
+        &self,
+        url: &str,
+        token: &str,
+        headers: &[(&str, &str)],
+        body: &Value,
+    ) -> Result<Value, Failure> {
+        let request = self
+            .request(self.client.post(url), token, headers)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        json(send(request).await?).await
+    }
+
+    /// `request` with the bearer `token`, the user agent and `headers`.
+    fn request(
+        &self,
+        request: RequestBuilder,
+        token: &str,
+        headers: &[(&str, &str)],
+    ) -> RequestBuilder {
+        let mut request = request
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .header(
                 USER_AGENT,
@@ -72,53 +123,41 @@ impl Http {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        if let Some((etag, _)) = &kept {
-            request = request.header(IF_NONE_MATCH, etag);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Failure::Unreachable(e.to_string()))?;
-        let status = response.status();
-        match status {
-            StatusCode::NOT_MODIFIED => match kept {
-                Some((_, body)) => Ok(body),
-                None => Err(Failure::Unreadable("304 without a kept answer".into())),
-            },
-            StatusCode::UNAUTHORIZED => Err(Failure::Unauthorized),
-            StatusCode::NOT_FOUND => Err(Failure::NotFound),
-            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
-                match limit(response.headers()) {
-                    Some(wait) => Err(Failure::Limited(wait)),
-                    None if status == StatusCode::TOO_MANY_REQUESTS => Err(Failure::Limited(None)),
-                    None => Err(Failure::Unauthorized),
-                }
-            }
-            s if s.is_success() => {
-                let etag = response
-                    .headers()
-                    .get(ETAG)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                let body = response
-                    .bytes()
-                    .await
-                    .map_err(|e| Failure::Unreachable(e.to_string()))?;
-                let body: Arc<Value> = serde_json::from_slice(&body)
-                    .map(Arc::new)
-                    .map_err(|e| Failure::Unreadable(format!("the answer is not JSON: {e}")))?;
-                if let Some(etag) = etag {
-                    let mut cache = self.cache.lock().unwrap();
-                    if cache.len() >= CACHE_MAX {
-                        cache.clear();
-                    }
-                    cache.insert(url.to_owned(), (etag, body.clone()));
-                }
-                Ok(body)
-            }
-            s => Err(Failure::Unreadable(format!("the forge answered {s}"))),
-        }
+        request
     }
+}
+
+async fn send(request: RequestBuilder) -> Result<Response, Failure> {
+    request
+        .send()
+        .await
+        .map_err(|e| Failure::Unreachable(e.to_string()))
+}
+
+/// The body of a successful answer, as JSON; any other status is a failure.
+async fn json(response: Response) -> Result<Value, Failure> {
+    let status = response.status();
+    match status {
+        StatusCode::UNAUTHORIZED => return Err(Failure::Unauthorized),
+        StatusCode::NOT_FOUND => return Err(Failure::NotFound),
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
+            return Err(match limit(response.headers()) {
+                Some(wait) => Failure::Limited(wait),
+                None if status == StatusCode::TOO_MANY_REQUESTS => Failure::Limited(None),
+                None => Failure::Unauthorized,
+            });
+        }
+        s if !s.is_success() => {
+            return Err(Failure::Unreadable(format!("the forge answered {s}")));
+        }
+        _ => {}
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| Failure::Unreachable(e.to_string()))?;
+    serde_json::from_slice(&body)
+        .map_err(|e| Failure::Unreadable(format!("the answer is not JSON: {e}")))
 }
 
 /// How long a rate-limited answer asks to wait: `Retry-After` in seconds,
@@ -170,6 +209,36 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("authorization: bearer t"));
         assert!(requests[1].contains("if-none-match: \"v1\""));
+    }
+
+    /// A POST sends its JSON body and caches nothing; its failures are those
+    /// of a GET.
+    #[tokio::test]
+    async fn a_post_sends_json_and_reads_json() {
+        let server = Server::start(|request| {
+            if request.contains("/limited") {
+                (429, vec![], String::new())
+            } else {
+                (200, vec![("ETag", "\"v1\"")], "{\"ok\":true}".into())
+            }
+        })
+        .await;
+        let http = Http::new().unwrap();
+        let body = serde_json::json!({ "query": "q" });
+        let url = server.url("/graphql");
+        for _ in 0..2 {
+            assert_eq!(http.post(&url, "t", &[], &body).await.unwrap()["ok"], true);
+        }
+        let requests = server.requests();
+        assert!(requests[0].starts_with("post /graphql"));
+        assert!(requests[0].contains("authorization: bearer t"));
+        assert!(requests[0].contains("content-type: application/json"));
+        assert!(requests[0].ends_with("{\"query\":\"q\"}"));
+        assert!(!requests[1].contains("if-none-match"));
+        assert_eq!(
+            http.post(&server.url("/limited"), "t", &[], &body).await,
+            Err(Failure::Limited(None))
+        );
     }
 
     #[tokio::test]

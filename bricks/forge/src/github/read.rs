@@ -10,7 +10,7 @@ use crate::model::{Ci, Job, Pipeline, Pr, State, Trigger};
 use crate::provider::BranchReading;
 use crate::tools::http::{Failure, Http};
 
-const HEADERS: &[(&str, &str)] = &[
+pub(super) const HEADERS: &[(&str, &str)] = &[
     ("accept", "application/vnd.github+json"),
     ("x-github-api-version", "2022-11-28"),
 ];
@@ -73,7 +73,7 @@ pub async fn read(
 }
 
 /// Percent-encodes what a path segment or a query value cannot hold as is.
-fn encode(s: &str) -> String {
+pub(super) fn encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {

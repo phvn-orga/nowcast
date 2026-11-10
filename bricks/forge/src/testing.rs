@@ -1,5 +1,6 @@
 //! A local HTTP server for tests: it answers each request with what its
-//! handler returns, and keeps every request's head in lowercase.
+//! handler returns, and keeps every request, its head then its body, in
+//! lowercase.
 
 use std::sync::{Arc, Mutex};
 
@@ -34,9 +35,14 @@ impl Server {
                             _ => return,
                         }
                     }
-                    let head = String::from_utf8_lossy(&head).to_lowercase();
-                    let (status, headers, body) = handler(&head);
-                    kept.lock().unwrap().push(head);
+                    let mut request = String::from_utf8_lossy(&head).to_lowercase();
+                    let mut body = vec![0u8; content_length(&request)];
+                    if socket.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    request.push_str(&String::from_utf8_lossy(&body).to_lowercase());
+                    let (status, headers, body) = handler(&request);
+                    kept.lock().unwrap().push(request);
                     let mut answer = format!(
                         "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n",
                         body.len()
@@ -65,4 +71,12 @@ impl Server {
     pub fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
+}
+
+/// The length of the body a lowercased request head announces.
+fn content_length(head: &str) -> usize {
+    head.lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
 }

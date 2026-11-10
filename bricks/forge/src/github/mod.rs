@@ -1,11 +1,13 @@
 //! The GitHub provider: recognises GitHub remotes and follows a branch
-//! through the REST API ([`read`]), at the pace of [`RHYTHM`]. A reading
+//! through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
+//! checks the base of its open PR requires ([`required`]). A reading
 //! that changes nothing costs no rate limit (`304`), hence a fast pace while
 //! a CI is expected or runs. The token comes from `gh` ([`token`]);
 //! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
 //! for tests.
 
 mod read;
+mod required;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,10 +16,11 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::provider::{Failure, Outcome, Provider, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
 use crate::tools::pace::{Pace, Rhythm};
 use crate::tools::remote;
+use required::{Base, Required};
 
 /// GitHub's REST API.
 pub const API: &str = "https://api.github.com";
@@ -42,6 +45,7 @@ pub struct GitHub {
     http: Http,
     api: String,
     tokens: Tokens,
+    required: Required,
 }
 
 impl GitHub {
@@ -51,6 +55,7 @@ impl GitHub {
             http,
             api,
             tokens: Tokens::default(),
+            required: Required::default(),
         }
     }
 }
@@ -74,6 +79,7 @@ impl Provider for GitHub {
             http: self.http.clone(),
             api: self.api.clone(),
             tokens: self.tokens.clone(),
+            required: self.required.clone(),
             owner,
             name,
             branch: branch.to_owned(),
@@ -87,6 +93,7 @@ struct Branch {
     http: Http,
     api: String,
     tokens: Tokens,
+    required: Required,
     owner: String,
     name: String,
     branch: String,
@@ -175,7 +182,10 @@ impl Branch {
         )
         .await
         {
-            Ok(reading) => return (Ok(reading), None),
+            Ok(mut reading) => {
+                self.mark_required(&token, &mut reading).await;
+                return (Ok(reading), None);
+            }
             Err(failure) => failure,
         };
         let at = || format!("github.com/{}/{}#{}", self.owner, self.name, self.branch);
@@ -198,6 +208,30 @@ impl Branch {
                 crate::log(format_args!("{}: unreachable: {why}", at()));
                 (Err(Failure::Unreachable), None)
             }
+        }
+    }
+}
+
+impl Branch {
+    /// Marks the jobs the base of the open PR requires. Without an open PR,
+    /// nothing is required: the requirement comes from the base's rules.
+    async fn mark_required(&self, token: &str, reading: &mut BranchReading) {
+        let (Some(pr), Some(ci)) = (
+            reading.pr.as_ref().filter(|p| p.is_open()),
+            reading.ci.as_mut(),
+        ) else {
+            return;
+        };
+        let base = Base {
+            http: &self.http,
+            api: &self.api,
+            token,
+            owner: &self.owner,
+            name: &self.name,
+            base: &pr.base,
+        };
+        if let Some(names) = self.required.names(&base).await {
+            required::mark(ci, &names);
         }
     }
 }
@@ -316,6 +350,7 @@ mod tests {
             http: Http::new().unwrap(),
             api: server.base(),
             tokens: Tokens::default(),
+            required: Required::default(),
             owner: owner.into(),
             name: "r".into(),
             branch: "feat".into(),
@@ -350,6 +385,97 @@ mod tests {
         assert_eq!(
             limited.read_once().await,
             (Err(Failure::RateLimited), Some(Duration::from_secs(300)))
+        );
+    }
+
+    /// A forge where `feat` has the open PR 7 on `main` when `pr` says so.
+    /// Its head has a workflow run with `check` and `lint`, and the commit
+    /// status `deploy`. `main` requires `check` by protection, and `e2e` and
+    /// `deploy` by a ruleset.
+    async fn forge(pr: bool) -> Server {
+        Server::start(move |request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.starts_with("post /graphql") {
+                json!({ "data": { "repository": { "ref": { "refUpdateRule": {
+                    "requiredStatusCheckContexts": ["check"] } } } } })
+            } else if line.contains("/rules/branches/main") {
+                json!([{ "type": "required_status_checks", "parameters": {
+                    "required_status_checks": [{ "context": "e2e" }, { "context": "deploy" }] } }])
+            } else if line.contains("/pulls?state=open") && pr {
+                json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } }])
+            } else if line.contains("/pulls?") {
+                json!([])
+            } else if line.contains("/branches/feat") {
+                json!({ "commit": { "sha": "abc" } })
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [{ "id": 1, "name": "CI", "path": "ci.yml",
+                    "event": "pull_request", "check_suite_id": 10, "status": "in_progress",
+                    "created_at": "t" }] })
+            } else if line.contains("/check-runs") {
+                let check = |id: u64, name: &str| {
+                    json!({ "id": id, "name": name,
+                    "status": "in_progress", "check_suite": { "id": 10 },
+                    "app": { "slug": "github-actions" } })
+                };
+                json!({ "check_runs": [check(1, "check"), check(2, "lint")] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [{ "id": 3, "context": "deploy", "state": "success" }] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await
+    }
+
+    fn required(reading: &BranchReading) -> Vec<(String, Option<bool>)> {
+        let ci = reading.ci.as_ref().unwrap();
+        ci.pipelines
+            .iter()
+            .flat_map(|p| &p.jobs)
+            .map(|j| (j.name.clone(), j.required))
+            .collect()
+    }
+
+    /// The jobs of an open PR are marked from the union of the base's
+    /// protection and rulesets; a required check nothing reported is listed.
+    #[tokio::test]
+    async fn the_jobs_of_an_open_pr_say_whether_they_are_required() {
+        let server = forge(true).await;
+        let branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(
+            required(&reading),
+            [
+                ("check".to_owned(), Some(true)),
+                ("lint".to_owned(), Some(false)),
+                ("deploy".to_owned(), Some(true)),
+            ]
+        );
+        assert_eq!(reading.ci.unwrap().missing_required, ["e2e"]);
+    }
+
+    /// Without an open PR, nothing is required, and the rules are not read.
+    #[tokio::test]
+    async fn without_an_open_pr_nothing_is_required() {
+        let server = forge(false).await;
+        let branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert!(required(&reading).iter().all(|(_, r)| r.is_none()));
+        assert!(reading.ci.unwrap().missing_required.is_empty());
+        assert!(
+            !server
+                .requests()
+                .iter()
+                .any(|r| r.starts_with("post") || r.contains("/rules/"))
         );
     }
 
