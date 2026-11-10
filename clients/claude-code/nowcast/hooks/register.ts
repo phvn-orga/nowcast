@@ -13,6 +13,7 @@ import { registerMeasures } from './measures'
 import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
 import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
+import { registerWorktrees } from './worktrees'
 
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
 
@@ -82,6 +83,8 @@ export const register: Register = on => {
 
   // The session's measures, for the claude-code brick when it is enabled.
   registerMeasures(on)
+  // The worktrees the session writes in, in the state and the measures.
+  registerWorktrees(on)
 
   // A backstop: a turn always runs under the session the service knows.
   on('turn.start', async ($, e, next) => {

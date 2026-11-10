@@ -67,8 +67,7 @@ impl Client {
     /// `GET /v1/service`: the `PATH` the service runs with, `None` when it
     /// has none. Needs no session.
     pub async fn service_path(&self) -> Result<Option<String>, CliError> {
-        let reply = self.call(Method::GET, "/v1/service", None).await?;
-        let body = reply.expect(StatusCode::OK)?.json()?;
+        let body = self.service().await?;
         match body.get("path") {
             Some(Value::String(path)) => Ok(Some(path.clone())),
             Some(Value::Null) => Ok(None),
@@ -76,6 +75,22 @@ impl Client {
                 "a service description without its path: {body}"
             ))),
         }
+    }
+
+    /// `GET /v1/service`: the version the service runs, `None` when it does
+    /// not tell it, being older than the field. Needs no session.
+    pub async fn service_version(&self) -> Result<Option<String>, CliError> {
+        let body = self.service().await?;
+        Ok(body
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    /// `GET /v1/service`'s body.
+    async fn service(&self) -> Result<Value, CliError> {
+        let reply = self.call(Method::GET, "/v1/service", None).await?;
+        reply.expect(StatusCode::OK)?.json()
     }
 
     /// `GET /v1/status`, which needs no session; `None` when nothing listens
@@ -95,8 +110,8 @@ impl Client {
         if reply.status == StatusCode::NOT_FOUND {
             return Err(CliError::Api {
                 code: "service_too_old".into(),
-                message: "the running service predates `nowcast status`: restart it to run \
-                          the installed version"
+                message: "the running service predates `nowcast status`: run `nowcast reload` \
+                          to run the installed version"
                     .into(),
             });
         }

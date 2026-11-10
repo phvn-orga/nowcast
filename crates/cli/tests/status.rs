@@ -100,7 +100,7 @@ async fn a_service_older_than_the_route_says_to_restart_it() {
         message.starts_with("nowcast: service_too_old: "),
         "{message}"
     );
-    assert!(message.contains("restart it"), "{message}");
+    assert!(message.contains("nowcast reload"), "{message}");
 }
 
 /// `nowcast` finding the fake's socket through `XDG_RUNTIME_DIR`, as when

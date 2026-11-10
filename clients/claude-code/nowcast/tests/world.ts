@@ -122,6 +122,8 @@ export type WorldOptions = {
   files?: string[]
   /** A flow whose writes are refused, as an observer of the state may. */
   refuse?: string
+  /** What a `git` command run in `cwd` answers; exit status 128 when absent. */
+  git?: (args: readonly string[], cwd: string | undefined) => { exitCode: number; stdout: string }
 }
 
 export type World = {
@@ -199,6 +201,10 @@ export function world(on: On, options: WorldOptions = {}): World {
     writes.push({ key: e.key, id: e.id, value: e.value })
     return next(e)
   })
+  on('state.set', { plugin: 'nowcast', key: 'worktrees' }, (_, e, next) => {
+    writes.push({ key: e.key, id: undefined, value: e.value })
+    return next(e)
+  })
   on('state.set', { plugin: 'nowcast', key: 'subscribed' }, (_, e, next) => {
     writes.push({ key: e.key, id: undefined, value: e.value })
     return next(e)
@@ -219,6 +225,10 @@ export function world(on: On, options: WorldOptions = {}): World {
   })
   on('process.run', async (_, e) => {
     if (options.spawnFails) return { deny: `${e.argv[0]}: not found` }
+    if (e.argv[0] === 'git') {
+      const answer = options.git?.(e.argv.slice(1), e.init?.cwd) ?? { exitCode: 128, stdout: '' }
+      return { value: { ...answer, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[1] === 'status') {
       const stdout = options.status ?? '{"installed":"0.1.0","running":null,"setup":"current"}'
       return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
