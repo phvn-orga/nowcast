@@ -22,7 +22,7 @@ use crate::error::CliError;
 use crate::native::{self, NATIVES, Native};
 
 const SOCKET: &str = "nowcast.socket";
-const SERVICE: &str = "nowcast.service";
+pub(crate) const SERVICE: &str = "nowcast.service";
 /// The link `systemctl enable` makes, relative to the units' directory.
 const WANTS: &str = "sockets.target.wants/nowcast.socket";
 
@@ -292,7 +292,7 @@ fn write_unit(path: &Path, text: &str) -> io::Result<Written> {
 }
 
 /// Runs `systemctl --user` with `args`, its failure carrying its message.
-fn systemctl(args: &[&str]) -> Result<(), CliError> {
+pub(crate) fn systemctl(args: &[&str]) -> Result<(), CliError> {
     let command = format!("systemctl --user {}", args.join(" "));
     let output = Command::new("systemctl")
         .arg("--user")

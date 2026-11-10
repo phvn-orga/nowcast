@@ -138,6 +138,23 @@ pub enum Command {
     /// "current" | "outdated" | "missing", null when it cannot tell}.
     Status,
 
+    /// Restart the service systemd runs, so that it runs the installed binary
+    ///
+    /// Prints the service's version before and after; it restarts even when
+    /// they are the same. Sessions see a short reconnection: systemd holds the
+    /// socket meanwhile, and clients declare their session and subscribe
+    /// again. Each flow's history is lost.
+    ///
+    /// A service stopped while systemd holds its socket is left stopped: the
+    /// next connection starts the installed binary. Refused with a socket
+    /// given (--socket, NOWCAST_SOCKET), without the units `nowcast setup`
+    /// writes, or with outdated ones: run `nowcast setup` first.
+    ///
+    /// With --json, prints {"before": <version>, "after": <version>}, a
+    /// version null when the service does not tell it, both null when the
+    /// service was stopped.
+    Reload,
+
     /// Enable or disable a brick
     ///
     /// Acts on the bricks directory the service follows,
