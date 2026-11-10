@@ -59,6 +59,19 @@ impl Home {
         std::fs::write(self.path("go"), "").unwrap();
     }
 
+    /// Waits for `nowcast` to call `systemctl restart`, failing the test
+    /// rather than hanging when it never does.
+    async fn restart_called(&self) {
+        let called = async {
+            while !self.calls().iter().any(|c| c == RESTART) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), called)
+            .await
+            .expect("systemctl restart is called");
+    }
+
     fn calls(&self) -> Vec<String> {
         let text = std::fs::read_to_string(self.path("systemctl.log")).unwrap_or_default();
         text.lines().map(str::to_owned).collect()
@@ -118,9 +131,7 @@ async fn restarts_the_service_and_prints_the_version_before_and_after() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    while !home.calls().iter().any(|c| c == RESTART) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    home.restart_called().await;
     fake.can("/v1/service", 200, "application/json", &service(INSTALLED));
     home.let_restart_return();
     let output = child.wait_with_output().await.unwrap();
@@ -164,9 +175,7 @@ async fn a_service_that_does_not_answer_is_restarted_all_the_same() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    while !home.calls().iter().any(|c| c == RESTART) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    home.restart_called().await;
     fake.can("/v1/service", 200, "application/json", &service(INSTALLED));
     home.let_restart_return();
     let output = child.wait_with_output().await.unwrap();

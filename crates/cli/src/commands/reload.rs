@@ -57,12 +57,12 @@ pub async fn reload(
     if json {
         writeln!(out, "{}", json!({ "before": before, "after": after }))?;
     } else {
-        let name = |v: &Option<String>| v.clone().unwrap_or_else(|| "an unknown version".into());
+        const UNKNOWN: &str = "an unknown version";
         writeln!(
             out,
             "service restarted: {} → {}",
-            name(&before),
-            name(&after)
+            before.as_deref().unwrap_or(UNKNOWN),
+            after.as_deref().unwrap_or(UNKNOWN)
         )?;
     }
     Ok(())
