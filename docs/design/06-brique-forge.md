@@ -430,7 +430,8 @@ réel).
   `closed` ; `isDraft` donne `draft`. La complétion automatique se lit sur
   `autoCompleteSetBy` (qui l'a demandée) et `completionOptions.mergeStrategy`.
 - **La CI d'une PR est celle de ses politiques de build et de statut.** Une
-  politique de build désigne un pipeline (`settings.buildDefinitionId`), et
+  politique de build (type `0609b952-1397-4640-95ec-e00a01b2c241`, vérifié le
+  2026-11-10) désigne un pipeline (`settings.buildDefinitionId`), et
   `configuration.isBlocking` dit s'il est obligatoire. Le build retenu est celui
   que l'évaluation désigne (`context.buildId`), celui qu'Azure DevOps montre sur la
   PR. Une politique sans build publie un pipeline sans job, à l'état de la
