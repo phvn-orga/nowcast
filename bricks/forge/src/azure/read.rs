@@ -920,7 +920,12 @@ mod tests {
     }
 
     fn context(server: &Server) -> Context {
-        Azure::new(Http::new().unwrap(), server.base()).context
+        Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            crate::credentials::testing::none(),
+        )
+        .context
     }
 
     async fn read_feat(context: &Context) -> BranchReading {

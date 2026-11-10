@@ -4,9 +4,10 @@
 //! entry in the base's merge queue ([`queue`]). A reading
 //! that changes nothing costs no rate limit (`304`), hence a fast pace while
 //! a CI is expected or runs. A repository's open issues, and one issue, are
-//! followed at the normal pace ([`issues`]). The token comes from `gh`
-//! ([`token`]); [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and
-//! the token, for tests.
+//! followed at the normal pace ([`issues`]). The token comes from the
+//! source the user chose, `gh` or a token of theirs ([`token`]);
+//! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
+//! for tests.
 
 mod issues;
 mod queue;
@@ -20,6 +21,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
+use crate::credentials::{Credentials, Forge, Source};
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
@@ -33,7 +35,7 @@ use required::{Base, Required};
 pub const API: &str = "https://api.github.com";
 /// Replaces [`API`], for tests.
 pub const API_VAR: &str = "NOWCAST_FORGE_GITHUB_API";
-/// A token to use instead of asking `gh`, for tests.
+/// A token to use instead of the source chosen, for tests.
 pub const TOKEN_VAR: &str = "NOWCAST_FORGE_GITHUB_TOKEN";
 
 /// A reading that changes nothing is free: fast while something moves.
@@ -45,12 +47,13 @@ pub const RHYTHM: Rhythm = Rhythm {
     normal: Duration::from_secs(60),
 };
 
-/// Tokens by login, shared by every branch followed.
+/// The `Authorization` header by login, shared by every branch followed.
 type Tokens = Arc<Mutex<HashMap<String, String>>>;
 
 pub struct GitHub {
     http: Http,
     api: String,
+    credentials: Credentials,
     tokens: Tokens,
     accounts: Accounts,
     required: Required,
@@ -58,11 +61,13 @@ pub struct GitHub {
 }
 
 impl GitHub {
-    /// Reads `api`, through `http`, whose cache it shares with every branch.
-    pub fn new(http: Http, api: String) -> Self {
+    /// Reads `api`, through `http`, whose cache it shares with every branch,
+    /// with the token `credentials` lead to.
+    pub fn new(http: Http, api: String, credentials: Credentials) -> Self {
         Self {
             http,
             api,
+            credentials,
             tokens: Tokens::default(),
             accounts: Accounts::default(),
             required: Required::default(),
@@ -76,6 +81,7 @@ impl GitHub {
         let tracker = Tracker {
             http: self.http.clone(),
             api: self.api.clone(),
+            credentials: self.credentials.clone(),
             tokens: self.tokens.clone(),
             accounts: self.accounts.clone(),
             owner,
@@ -112,6 +118,7 @@ impl Provider for GitHub {
         let branch = Branch {
             http: self.http.clone(),
             api: self.api.clone(),
+            credentials: self.credentials.clone(),
             tokens: self.tokens.clone(),
             required: self.required.clone(),
             queues: self.queues.clone(),
@@ -136,6 +143,7 @@ impl Provider for GitHub {
 struct Branch {
     http: Http,
     api: String,
+    credentials: Credentials,
     tokens: Tokens,
     required: Required,
     queues: Queues,
@@ -197,7 +205,7 @@ impl Branch {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&mut self) -> (Result<BranchReading, Failure>, Option<Duration>) {
-        let Some(token) = owner_token(&self.tokens, &self.owner).await else {
+        let Some(token) = owner_token(&self.tokens, &self.credentials, &self.owner).await else {
             return (Err(Failure::NoCredentials), None);
         };
         let read = read::read(
@@ -223,14 +231,15 @@ impl Branch {
     }
 }
 
-/// The token that reads `owner`'s repositories, kept in `tokens` once `gh`
-/// gave it; `None` without one.
-async fn owner_token(tokens: &Tokens, owner: &str) -> Option<String> {
+/// The token that reads `owner`'s repositories, kept in `tokens` once its
+/// source gave it; `None` without one. Until then, each reading reads the
+/// configuration again.
+async fn owner_token(tokens: &Tokens, credentials: &Credentials, owner: &str) -> Option<String> {
     let kept = tokens.lock().unwrap().get(owner).cloned();
     if kept.is_some() {
         return kept;
     }
-    let token = token(owner).await?;
+    let token = token(credentials, owner).await?;
     tokens
         .lock()
         .unwrap()
@@ -240,7 +249,7 @@ async fn owner_token(tokens: &Tokens, owner: &str) -> Option<String> {
 
 /// What `failure`, in a reading of `at` with `owner`'s token, says in
 /// `source.status`, and how long a rate limit asks to wait. A refused token
-/// is forgotten: the next reading asks `gh` again.
+/// is forgotten: the next reading asks its source again.
 fn failed(
     tokens: &Tokens,
     owner: &str,
@@ -477,17 +486,23 @@ fn is_github(host: &str) -> bool {
     host == "github.com" || host == "www.github.com"
 }
 
-/// The account `gh` holds for the repository's owner, or else its active
-/// one: an organization is not an account. `None` without `gh` or without a
-/// login.
-async fn token(owner: &str) -> Option<String> {
-    if let Ok(token) = std::env::var(TOKEN_VAR) {
-        return Some(token);
-    }
-    match gh_token(Some(owner)).await {
-        Some(token) => Some(token),
-        None => gh_token(None).await,
-    }
+/// The `Authorization` header for `owner`'s repositories, from the source
+/// the user chose, and no other. From `gh`, the account it holds for the
+/// owner, or else its active one: an organization is not an account. From
+/// the keyring, the user's token. `None` when nothing is chosen, or the
+/// source gives no token.
+async fn token(credentials: &Credentials, owner: &str) -> Option<String> {
+    let token = match std::env::var(TOKEN_VAR) {
+        Ok(token) => token,
+        Err(_) => match credentials.source(Forge::GitHub)? {
+            Source::Cli => match gh_token(Some(owner)).await {
+                Some(token) => token,
+                None => gh_token(None).await?,
+            },
+            Source::Token => credentials.token(Forge::GitHub).await?,
+        },
+    };
+    Some(format!("Bearer {token}"))
 }
 
 async fn gh_token(user: Option<&str>) -> Option<String> {
@@ -513,6 +528,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+    use crate::credentials::testing;
     use crate::model::Pr;
     use crate::testing::Server;
 
@@ -565,6 +581,7 @@ mod tests {
         Branch {
             http: Http::new().unwrap(),
             api: server.base(),
+            credentials: crate::credentials::testing::none(),
             tokens: Tokens::default(),
             required: Required::default(),
             queues: Queues::default(),
@@ -573,6 +590,36 @@ mod tests {
             name: "r".into(),
             branch: "feat".into(),
         }
+    }
+
+    /// Only the source chosen is read: nothing chosen, or no token kept,
+    /// is `no_credentials`; the user's token goes as a bearer; after a
+    /// refusal, the configuration is read again.
+    #[tokio::test]
+    async fn the_token_comes_from_the_source_chosen() {
+        if std::env::var(TOKEN_VAR).is_ok() {
+            return;
+        }
+        let server = Server::start(|request| {
+            if request.contains("authorization: bearer good") {
+                (404, vec![], String::new())
+            } else {
+                (401, vec![], String::new())
+            }
+        })
+        .await;
+        let fake = testing::Fake::new();
+        let mut branch = branch(&server, "o");
+        branch.credentials = fake.credentials.clone();
+        let no_credentials = (Err(Failure::NoCredentials), None);
+        assert_eq!(branch.read_once().await, no_credentials);
+        fake.choose(Forge::GitHub, Some(Source::Token), None);
+        assert_eq!(branch.read_once().await, no_credentials);
+        fake.choose(Forge::GitHub, Some(Source::Token), Some("bad"));
+        assert_eq!(branch.read_once().await, (Err(Failure::Unauthorized), None));
+        fake.choose(Forge::GitHub, Some(Source::Token), Some("good"));
+        assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
+        assert_eq!(server.requests().len(), 2, "nothing sent without a token");
     }
 
     /// A refused token is asked for again; a rate limit is waited out.
@@ -972,7 +1019,7 @@ mod tests {
             }
         })
         .await;
-        let github = GitHub::new(Http::new().unwrap(), server.base());
+        let github = GitHub::new(Http::new().unwrap(), server.base(), testing::none());
         github.tokens.lock().unwrap().insert("o".into(), "t".into());
         let repo = github.recognise("git@github.com:o/r.git").unwrap();
         assert_eq!(repo.id, "github.com/o/r");

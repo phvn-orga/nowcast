@@ -6,8 +6,9 @@
 //! ([`issues`]). Azure DevOps gives no `ETag` and counts every request
 //! against a budget: the core publishes only what changed, and a reading
 //! whose answer asks to slow down is a rate limit ([`slow_down`]). The token
-//! comes from `az` ([`token`]); [`API_VAR`] and [`TOKEN_VAR`] replace the
-//! API's address and the token, for tests.
+//! comes from the source the user chose, `az` or a personal access token
+//! ([`token`]); [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and
+//! the token, for tests.
 
 mod issues;
 mod read;
@@ -22,6 +23,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
+use crate::credentials::{Credentials, Forge, Source};
 use crate::model::State;
 use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http, encode};
@@ -33,7 +35,7 @@ use issues::Tracker;
 pub const API: &str = "https://dev.azure.com";
 /// Replaces [`API`], for tests.
 pub const API_VAR: &str = "NOWCAST_FORGE_AZURE_API";
-/// A token to use instead of asking `az`, for tests.
+/// A token to use instead of the source chosen, for tests.
 pub const TOKEN_VAR: &str = "NOWCAST_FORGE_AZURE_TOKEN";
 /// Where people open what the API reads.
 const WEB: &str = "https://dev.azure.com";
@@ -64,8 +66,8 @@ const FRESH_FOR: Duration = Duration::from_secs(3);
 /// The budget of a 5-minute window, in TSTU, when an answer does not say.
 const BUDGET: f64 = 200.0;
 
-/// The token every reading shares, and when to ask for a new one: `None`
-/// for a token that does not expire. `None` until asked.
+/// The `Authorization` header every reading shares, and when to ask for a
+/// new one: `None` for a token that does not expire. `None` until asked.
 type Token = Arc<tokio::sync::Mutex<Option<(String, Option<Instant>)>>>;
 
 /// Answers read for one branch that serve the others for a while: each
@@ -77,6 +79,7 @@ type Fresh = Arc<Mutex<HashMap<String, (Instant, Arc<Value>)>>>;
 struct Context {
     http: Http,
     api: String,
+    credentials: Credentials,
     token: Token,
     fresh: Fresh,
     timelines: timeline::Timelines,
@@ -89,12 +92,13 @@ pub struct Azure {
 }
 
 impl Azure {
-    /// Reads `api`, through `http`.
-    pub fn new(http: Http, api: String) -> Self {
+    /// Reads `api`, through `http`, with the token `credentials` lead to.
+    pub fn new(http: Http, api: String, credentials: Credentials) -> Self {
         Self {
             context: Context {
                 http,
                 api,
+                credentials,
                 token: Token::default(),
                 fresh: Fresh::default(),
                 timelines: timeline::Timelines::default(),
@@ -286,24 +290,47 @@ fn decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// The token, kept until shortly before it expires, then asked for again;
-/// `None` without `az` or without a login.
-async fn token(kept: &Token) -> Option<String> {
-    let mut kept = kept.lock().await;
+/// The `Authorization` header, kept until shortly before its token
+/// expires, then asked for again; `None` when no source is chosen, or the
+/// source gives no token. Until one comes, each reading reads the
+/// configuration again.
+async fn token(context: &Context) -> Option<String> {
+    let mut kept = context.token.lock().await;
     if let Some((token, renew)) = kept.as_ref()
         && renew.is_none_or(|at| Instant::now() < at)
     {
         return Some(token.clone());
     }
-    *kept = ask().await;
+    *kept = ask(&context.credentials).await;
     kept.as_ref().map(|(token, _)| token.clone())
 }
 
-/// A token from [`TOKEN_VAR`], which does not expire, or from `az`.
-async fn ask() -> Option<(String, Option<Instant>)> {
+/// The header from [`TOKEN_VAR`], or else from the source the user chose,
+/// and no other: `az`'s token, which expires, as a bearer; a personal access
+/// token, which does not, in Basic authentication.
+async fn ask(credentials: &Credentials) -> Option<(String, Option<Instant>)> {
     if let Ok(token) = std::env::var(TOKEN_VAR) {
-        return Some((token, None));
+        return Some((format!("Bearer {token}"), None));
     }
+    match credentials.source(Forge::Azure)? {
+        Source::Cli => az_token().await,
+        Source::Token => {
+            let pat = credentials.token(Forge::Azure).await?;
+            Some((basic(&pat), None))
+        }
+    }
+}
+
+/// A personal access token as Azure DevOps takes it: Basic, with an empty
+/// user name.
+fn basic(pat: &str) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
+    format!("Basic {encoded}")
+}
+
+/// `az`'s token as a bearer, and when to ask for a new one.
+async fn az_token() -> Option<(String, Option<Instant>)> {
     let output = tokio::process::Command::new("az")
         .args(["account", "get-access-token", "--resource", RESOURCE])
         .args(["--output", "json"])
@@ -317,7 +344,7 @@ async fn ask() -> Option<(String, Option<Instant>)> {
         return None;
     }
     let (token, lasts) = parse_token(&output.stdout, unix_now())?;
-    Some((token, Some(Instant::now() + lasts)))
+    Some((format!("Bearer {token}"), Some(Instant::now() + lasts)))
 }
 
 /// The token in `az`'s answer, and how long until it is asked for again:
@@ -425,7 +452,7 @@ fn slow_down(headers: &HeaderMap, now: u64) -> Option<Duration> {
 
 /// What `failure`, in a reading of `at`, says in `source.status`, and how
 /// long a rate limit asks to wait. A refused token is forgotten: the next
-/// reading asks `az` again.
+/// reading asks its source again.
 async fn failed(
     context: &Context,
     at: &str,
@@ -489,7 +516,7 @@ impl Branch {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&mut self) -> (Result<BranchReading, Failure>, Option<Duration>) {
-        let Some(token) = token(&self.context.token).await else {
+        let Some(token) = token(&self.context).await else {
             return (Err(Failure::NoCredentials), None);
         };
         let client = Client {
@@ -546,6 +573,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+    use crate::credentials;
     use crate::model::tests::pipeline;
     use crate::model::{Ci, Pr};
     use crate::testing::Server;
@@ -712,7 +740,11 @@ mod tests {
             }
         })
         .await;
-        let azure = Azure::new(Http::new().unwrap(), server.base());
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            credentials::testing::none(),
+        );
         let branch = |org: &str| Branch {
             context: azure.context.clone(),
             names: names(org, "p", "r").unwrap(),
@@ -732,21 +764,55 @@ mod tests {
         );
         let expired = Some(("t".into(), Some(Instant::now())));
         *azure.context.token.lock().await = expired;
-        if std::env::var(TOKEN_VAR).is_err() && which_az().is_none() {
+        if std::env::var(TOKEN_VAR).is_err() {
             assert_eq!(
                 branch("busy").read_once().await,
                 (Err(Failure::NoCredentials), None),
-                "an expired token is asked again, from no az"
+                "an expired token is asked again, from no source chosen"
             );
         }
     }
 
-    fn which_az() -> Option<()> {
-        std::process::Command::new("az")
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|_| ())
+    /// A personal access token goes in Basic authentication, read from the
+    /// keyring only once chosen, and again after a refusal.
+    #[tokio::test]
+    async fn a_personal_access_token_goes_in_basic_authentication() {
+        if std::env::var(TOKEN_VAR).is_ok() {
+            return;
+        }
+        assert_eq!(basic("good"), "Basic Omdvb2Q=");
+        let server = Server::start(|request| {
+            if request.contains("authorization: basic omdvb2q=") {
+                (404, vec![], String::new())
+            } else {
+                (401, vec![], String::new())
+            }
+        })
+        .await;
+        let fake = credentials::testing::Fake::new();
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            fake.credentials.clone(),
+        );
+        let mut branch = Branch {
+            context: azure.context.clone(),
+            names: names("o", "p", "r").unwrap(),
+            branch: "feat".into(),
+            memory: read::Memory::default(),
+        };
+        let no_credentials = (Err(Failure::NoCredentials), None);
+        assert_eq!(branch.read_once().await, no_credentials);
+        fake.choose(Forge::Azure, Some(Source::Token), Some("bad"));
+        assert_eq!(branch.read_once().await, (Err(Failure::Unauthorized), None));
+        fake.choose(Forge::Azure, Some(Source::Token), Some("good"));
+        assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
+        fake.choose(Forge::Azure, None, None);
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::NotFound), None),
+            "a token that serves is kept"
+        );
     }
 
     /// The provider follows a branch: its first reading reaches the core.
@@ -762,7 +828,11 @@ mod tests {
             (200, vec![], body.to_string())
         })
         .await;
-        let azure = Azure::new(Http::new().unwrap(), server.base());
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            credentials::testing::none(),
+        );
         *azure.context.token.lock().await = Some(("t".into(), None));
         let repo = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
         assert_eq!(repo.id, "dev.azure.com/o/p/r");

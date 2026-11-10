@@ -1,6 +1,8 @@
 //! The forge brick, native to nowcast: a branch's PR and its pipelines, and
 //! a repository's issues, whatever the forge. The `nowcast` binary runs it
-//! as `nowcast brick forge`; its declaration and schemas are [`FILES`].
+//! as `nowcast brick forge`, and its configuration, which tells where each
+//! forge's token comes from, as `nowcast brick forge configure`; its
+//! declaration and schemas are [`FILES`].
 //!
 //! The brick is organised by usages, not by forges:
 //!
@@ -10,9 +12,13 @@
 //!   output every provider maps its forge onto;
 //! - [`tools`] holds what a provider may use (conditional HTTP, a pace
 //!   machine, remote parsing), and nothing obliges it to;
-//! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one.
+//! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one;
+//! - [`credentials`] reads the token source each forge's user chose, which
+//!   [`configure`] asks for.
 
 mod azure;
+mod configure;
+mod credentials;
 mod github;
 mod model;
 mod provider;
@@ -31,6 +37,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::Instant;
 
 use crate::azure::Azure;
+use crate::credentials::Credentials;
 use crate::github::GitHub;
 use crate::provider::Provider;
 use crate::registry::Core;
@@ -92,16 +99,32 @@ pub fn run() -> ExitCode {
     status
 }
 
+/// Asks, in the user's terminal, where each forge's token comes from, as
+/// `nowcast brick forge configure`. Fails when cancelled or not saved.
+pub fn configure() -> ExitCode {
+    configure::run()
+}
+
 fn log(message: impl std::fmt::Display) {
     eprintln!("{NAME}: {message}");
 }
 
-/// The providers the brick carries.
+/// The providers the brick carries, each reading the token the user chose
+/// for its forge.
 fn providers(http: &Http) -> Vec<Box<dyn Provider>> {
     let api = |var, default: &str| std::env::var(var).unwrap_or_else(|_| default.to_owned());
+    let credentials = Credentials::system();
     vec![
-        Box::new(GitHub::new(http.clone(), api(github::API_VAR, github::API))),
-        Box::new(Azure::new(http.clone(), api(azure::API_VAR, azure::API))),
+        Box::new(GitHub::new(
+            http.clone(),
+            api(github::API_VAR, github::API),
+            credentials.clone(),
+        )),
+        Box::new(Azure::new(
+            http.clone(),
+            api(azure::API_VAR, azure::API),
+            credentials,
+        )),
     ]
 }
 

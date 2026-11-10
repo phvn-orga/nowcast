@@ -172,10 +172,16 @@ pub enum Command {
     },
 
     /// Run a brick native to nowcast on stdin and stdout, as the service launches it
+    ///
+    /// With `configure`, run its configuration in this terminal instead, as
+    /// `nowcast bricks configure <name>` does.
     #[command(hide = true)]
     Brick {
         /// The native brick's name
         name: String,
+        /// Run the brick's configuration instead
+        #[arg(value_parser = ["configure"])]
+        action: Option<String>,
     },
 
     /// Run the service, as systemd starts it on the first connection
@@ -378,6 +384,16 @@ mod tests {
             cli.command,
             Command::Bricks { action: BricksAction::Configure { ref brick } } if brick == "forge"
         ));
+    }
+
+    #[test]
+    fn brick_takes_configure_and_nothing_else() {
+        let cli = Cli::try_parse_from(["nowcast", "brick", "forge", "configure"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Brick { ref name, action: Some(ref a) } if name == "forge" && a == "configure"
+        ));
+        assert!(Cli::try_parse_from(["nowcast", "brick", "forge", "other"]).is_err());
     }
 
     #[test]

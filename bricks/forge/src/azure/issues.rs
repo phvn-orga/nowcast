@@ -80,7 +80,7 @@ impl Tracker {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&self) -> (Outcome, Option<Duration>) {
-        let Some(token) = token(&self.context.token).await else {
+        let Some(token) = token(&self.context).await else {
             return (Err(Failure::NoCredentials), None);
         };
         let client = Client {
@@ -425,7 +425,11 @@ mod tests {
     }
 
     async fn tracker(server: &Server, number: Option<u64>) -> Tracker {
-        let azure = Azure::new(Http::new().unwrap(), server.base());
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            crate::credentials::testing::none(),
+        );
         *azure.context.token.lock().await = Some(("t".into(), None));
         Tracker {
             context: azure.context,

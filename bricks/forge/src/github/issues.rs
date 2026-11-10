@@ -14,6 +14,7 @@ use tokio::time::Instant;
 
 use super::read::HEADERS;
 use super::{RHYTHM, Tokens, failed, owner_token};
+use crate::credentials::Credentials;
 use crate::model::{Issue, Issues};
 use crate::provider::{Failure, Outcome, Reading, Updates};
 use crate::tools::http::{self, Http};
@@ -29,6 +30,7 @@ pub type Accounts = Arc<Mutex<HashMap<String, String>>>;
 pub struct Tracker {
     pub http: Http,
     pub api: String,
+    pub credentials: Credentials,
     pub tokens: Tokens,
     pub accounts: Accounts,
     pub owner: String,
@@ -56,7 +58,7 @@ impl Tracker {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&self) -> (Outcome, Option<Duration>) {
-        let Some(token) = owner_token(&self.tokens, &self.owner).await else {
+        let Some(token) = owner_token(&self.tokens, &self.credentials, &self.owner).await else {
             return (Err(Failure::NoCredentials), None);
         };
         let read = match self.number {
@@ -206,6 +208,7 @@ mod tests {
         Tracker {
             http: Http::new().unwrap(),
             api: server.base(),
+            credentials: crate::credentials::testing::none(),
             tokens,
             accounts: Accounts::default(),
             owner: "o".into(),
@@ -398,7 +401,8 @@ mod tests {
     #[tokio::test]
     async fn a_followed_issue_sends_its_readings() {
         let server = Server::start(|_| (200, vec![], item(52, &[]).to_string())).await;
-        let github = GitHub::new(Http::new().unwrap(), server.base());
+        let credentials = crate::credentials::testing::none();
+        let github = GitHub::new(Http::new().unwrap(), server.base(), credentials);
         let repo = github.recognise("git@github.com:O/R.git").unwrap();
         assert_eq!(repo.tracker, "github.com/o/r");
         github.tokens.lock().unwrap().insert("O".into(), "t".into());

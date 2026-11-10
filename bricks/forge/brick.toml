@@ -11,6 +11,11 @@ protocol = 1
 [run]
 command = ["nowcast", "brick", "forge"]
 
+# Where each forge's token comes from: run in the user's terminal by
+# `nowcast bricks enable forge` and `nowcast bricks configure forge`.
+[configure]
+command = ["nowcast", "brick", "forge", "configure"]
+
 [subscriptions.pr]
 description = "A branch's PR, open first, with the rollup of its CI."
 schema = "schemas/params-branch.json"

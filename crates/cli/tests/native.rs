@@ -122,6 +122,8 @@ async fn an_unknown_native_brick_exits_2() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let output = run(&mut bare(), &["brick", "nope"]).await;
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let output = run(&mut bare(), &["brick", "claude-code", "configure"]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 /// `nowcast bricks` against `fake`, a service whose `PATH` is `path`.
@@ -314,7 +316,10 @@ async fn a_failed_configuration_refuses_the_brick_unless_forced() {
     let output = bricks_in(root.path(), true, &["enable", path]).await;
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let message = stderr(&output);
-    assert!(message.contains("configure\" failed (exit status: 3)"), "{message}");
+    assert!(
+        message.contains("configure\" failed (exit status: 3)"),
+        "{message}"
+    );
     assert!(message.contains("--force"), "{message}");
     assert!(std::fs::symlink_metadata(configured_link(root.path())).is_err());
 

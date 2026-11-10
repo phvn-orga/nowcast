@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{
-    AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT,
+    AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, RETRY_AFTER,
+    USER_AGENT,
 };
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde_json::Value;
@@ -57,14 +58,15 @@ impl Http {
         })
     }
 
-    /// GETs `url` as JSON, with `headers` and the bearer `token`.
+    /// GETs `url` as JSON, with `headers` and the `authorization` header
+    /// (`Bearer <token>`, for one).
     pub async fn get(
         &self,
         url: &str,
-        token: &str,
+        authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<Arc<Value>, Failure> {
-        Ok(self.get_answer(url, token, headers).await?.0)
+        Ok(self.get_answer(url, authorization, headers).await?.0)
     }
 
     /// [`Http::get`], with the answer's headers, for a forge that says on a
@@ -72,13 +74,13 @@ impl Http {
     pub async fn get_answer(
         &self,
         url: &str,
-        token: &str,
+        authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<(Arc<Value>, HeaderMap), Failure> {
         // The body is taken with its ETag: a 304 gives back this one, even if
         // the cache was cleared meanwhile.
         let kept = self.cache.lock().unwrap().get(url).cloned();
-        let mut request = self.request(self.client.get(url), token, headers);
+        let mut request = self.request(self.client.get(url), authorization, headers);
         if let Some((etag, _)) = &kept {
             request = request.header(IF_NONE_MATCH, etag);
         }
@@ -105,28 +107,28 @@ impl Http {
         Ok((body, answer_headers))
     }
 
-    /// POSTs `body` as JSON to `url`, with `headers` and the bearer `token`,
-    /// and reads the answer as JSON. Nothing is cached.
+    /// POSTs `body` as JSON to `url`, with `headers` and the `authorization`
+    /// header, and reads the answer as JSON. Nothing is cached.
     pub async fn post(
         &self,
         url: &str,
-        token: &str,
+        authorization: &str,
         headers: &[(&str, &str)],
         body: &Value,
     ) -> Result<Value, Failure> {
-        Ok(self.post_answer(url, token, headers, body).await?.0)
+        Ok(self.post_answer(url, authorization, headers, body).await?.0)
     }
 
     /// [`Http::post`], with the answer's headers.
     pub async fn post_answer(
         &self,
         url: &str,
-        token: &str,
+        authorization: &str,
         headers: &[(&str, &str)],
         body: &Value,
     ) -> Result<(Value, HeaderMap), Failure> {
         let request = self
-            .request(self.client.post(url), token, headers)
+            .request(self.client.post(url), authorization, headers)
             .header(CONTENT_TYPE, "application/json")
             .body(body.to_string());
         let response = send(request).await?;
@@ -134,19 +136,23 @@ impl Http {
         Ok((json(response).await?, answer_headers))
     }
 
-    /// `request` with the bearer `token`, the user agent and `headers`.
+    /// `request` with the `authorization` header, the user agent and
+    /// `headers`. The authorization is marked sensitive, and left out when
+    /// it cannot be a header: the forge then refuses the request.
     fn request(
         &self,
         request: RequestBuilder,
-        token: &str,
+        authorization: &str,
         headers: &[(&str, &str)],
     ) -> RequestBuilder {
-        let mut request = request
-            .header(AUTHORIZATION, format!("Bearer {token}"))
-            .header(
-                USER_AGENT,
-                concat!("nowcast-brick-forge/", env!("CARGO_PKG_VERSION")),
-            );
+        let mut request = request.header(
+            USER_AGENT,
+            concat!("nowcast-brick-forge/", env!("CARGO_PKG_VERSION")),
+        );
+        if let Ok(mut value) = HeaderValue::from_str(authorization) {
+            value.set_sensitive(true);
+            request = request.header(AUTHORIZATION, value);
+        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -249,8 +255,8 @@ mod tests {
         .await;
         let http = Http::new().unwrap();
         let url = server.url("/a");
-        assert_eq!(http.get(&url, "t", &[]).await.unwrap()["n"], 1);
-        assert_eq!(http.get(&url, "t", &[]).await.unwrap()["n"], 1);
+        assert_eq!(http.get(&url, "Bearer t", &[]).await.unwrap()["n"], 1);
+        assert_eq!(http.get(&url, "Bearer t", &[]).await.unwrap()["n"], 1);
         let requests = server.requests();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("authorization: bearer t"));
@@ -273,11 +279,12 @@ mod tests {
         let body = serde_json::json!({ "query": "q" });
         let url = server.url("/graphql");
         for _ in 0..2 {
-            assert_eq!(http.post(&url, "t", &[], &body).await.unwrap()["ok"], true);
+            let answer = http.post(&url, "Basic dA==", &[], &body).await.unwrap();
+            assert_eq!(answer["ok"], true);
         }
         let requests = server.requests();
         assert!(requests[0].starts_with("post /graphql"));
-        assert!(requests[0].contains("authorization: bearer t"));
+        assert!(requests[0].contains("authorization: basic da=="));
         assert!(requests[0].contains("content-type: application/json"));
         assert!(requests[0].ends_with("{\"query\":\"q\"}"));
         assert!(!requests[1].contains("if-none-match"));
