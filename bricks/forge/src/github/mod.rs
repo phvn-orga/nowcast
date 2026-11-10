@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::model::{Dequeued, QueueEntry};
+use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
 use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
@@ -197,10 +197,8 @@ impl Branch {
         let failure = match read {
             Ok(mut reading) => {
                 let names = self.mark_required(&token, &mut reading).await;
-                match self.read_queue(&token, &mut reading, names.as_ref()).await {
-                    Ok(()) => return (Ok(reading), None),
-                    Err(failure) => failure,
-                }
+                self.read_queue(&token, &mut reading, names.as_ref()).await;
+                return (Ok(reading), None);
             }
             Err(failure) => failure,
         };
@@ -239,6 +237,8 @@ struct Memory {
     /// The commit the queue tests, and since when: its CI is expected for a
     /// while before it shows up.
     tested: Option<(String, Instant)>,
+    /// The last CI read for that commit, kept when a reading of it fails.
+    queue_ci: Option<Ci>,
 }
 
 /// Whether RFC 3339 time `a` comes before `b`; `false` when either does not
@@ -284,17 +284,19 @@ impl Branch {
     /// the commit the queue tests, marked from the base's `names` and
     /// expected for a while after that commit shows up. A PR that left the
     /// queue unmerged gets why, read once it is read without failure, kept
-    /// while its head is the one that was queued. Only that CI's reading
-    /// can fail.
+    /// while its head is the one that was queued. Nothing here fails the
+    /// branch's reading: the queue is secondary to the PR and its own CI. A
+    /// queue CI that cannot be read keeps the last one read for that commit,
+    /// or none.
     async fn read_queue(
         &mut self,
         token: &str,
         reading: &mut BranchReading,
         names: Option<&BTreeSet<String>>,
-    ) -> Result<(), http::Failure> {
+    ) {
         let Some(pr) = reading.pr.as_mut().filter(|p| p.is_open()) else {
             self.memory = Memory::default();
-            return Ok(());
+            return;
         };
         let pr_base = pr.base.clone();
         let base = Base {
@@ -312,23 +314,7 @@ impl Branch {
                     Some((pr.number, pr.head_sha.clone(), entry.enqueued_at.clone()));
                 self.memory.dequeued = None;
                 let ci = match &entry.sha {
-                    Some(sha) => {
-                        let since = match &self.memory.tested {
-                            Some((tested, since)) if tested == sha => *since,
-                            _ => Instant::now(),
-                        };
-                        self.memory.tested = Some((sha.clone(), since));
-                        let read =
-                            read::ci(base.http, base.api, token, base.owner, base.name, sha, None);
-                        let mut ci = read.await?;
-                        if ci.pipelines.is_empty() {
-                            ci.expected_until = Some(since + EXPECTED_FOR);
-                        }
-                        if let Some(names) = names {
-                            required::mark(&mut ci, names);
-                        }
-                        Some(ci)
-                    }
+                    Some(sha) => queue_ci(&mut self.memory, &base, sha, names).await,
                     None => None,
                 };
                 pr.queue = Some(QueueEntry {
@@ -342,6 +328,7 @@ impl Branch {
             }
             Some(None) => {
                 self.memory.tested = None;
+                self.memory.queue_ci = None;
                 let left = self.memory.queued.take();
                 if let Some((number, head, enqueued_at)) = left
                     && number == pr.number
@@ -373,8 +360,46 @@ impl Branch {
             .as_ref()
             .filter(|(number, head, _)| *number == pr.number && *head == pr.head_sha)
             .map(|(_, _, why)| why.clone());
-        Ok(())
     }
+}
+
+/// The CI of `sha`, the commit the queue of `base` tests, marked from the
+/// base's `names` and expected for a while after that commit shows up. A
+/// reading that fails is logged and gives the last CI `memory` holds for
+/// that commit, or none.
+async fn queue_ci(
+    memory: &mut Memory,
+    base: &Base<'_>,
+    sha: &str,
+    names: Option<&BTreeSet<String>>,
+) -> Option<Ci> {
+    let since = match &memory.tested {
+        Some((tested, since)) if tested == sha => *since,
+        _ => {
+            memory.queue_ci = None;
+            Instant::now()
+        }
+    };
+    memory.tested = Some((sha.to_owned(), since));
+    let read = read::ci(
+        base.http, base.api, base.token, base.owner, base.name, sha, None,
+    );
+    match read.await {
+        Ok(mut ci) => {
+            if ci.pipelines.is_empty() {
+                ci.expected_until = Some(since + EXPECTED_FOR);
+            }
+            if let Some(names) = names {
+                required::mark(&mut ci, names);
+            }
+            memory.queue_ci = Some(ci);
+        }
+        Err(failure) => crate::log(format_args!(
+            "github.com/{}/{}@{sha}: merge queue CI unread: {failure:?}",
+            base.owner, base.name
+        )),
+    }
+    memory.queue_ci.clone()
 }
 
 /// The owner and name of a GitHub repository, in lowercase: GitHub ignores
@@ -632,6 +657,8 @@ mod tests {
         broken: bool,
         /// Whether the commit the queue tests has its CI yet.
         queue_ci: bool,
+        /// Whether reading that CI answers `404`.
+        queue_ci_lost: bool,
         /// When PR 7 left the queue; `None` fails the query.
         removed_at: Option<&'static str>,
     }
@@ -670,6 +697,8 @@ mod tests {
                 json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
                     "merged_at": null, "base": { "ref": "main" },
                     "head": { "ref": "feat", "sha": q.head, "repo": { "full_name": "o/r" } } }])
+            } else if line.contains("q1") && q.queue_ci_lost {
+                return (404, vec![], String::new());
             } else if line.contains("/actions/runs?head_sha=q1") && q.queue_ci {
                 json!({ "workflow_runs": [{ "id": 2, "name": "CI", "path": "ci.yml",
                     "event": "merge_group", "check_suite_id": 20, "status": "in_progress",
@@ -698,6 +727,7 @@ mod tests {
             head: "abc",
             broken: false,
             queue_ci: true,
+            queue_ci_lost: false,
             removed_at: Some("2026-11-09T07:45:00Z"),
         }))
     }
@@ -808,6 +838,30 @@ mod tests {
         assert_eq!(asked(&server, "timelineitems"), 1, "asked once");
         world.lock().unwrap().head = "def";
         assert_eq!(read_pr(&mut branch).await.dequeued, None, "a new head");
+    }
+
+    /// A queue CI that cannot be read fails nothing, `404` included: the
+    /// PR and its own CI are read, and the queue CI last read is kept, or
+    /// none.
+    #[tokio::test]
+    async fn a_failing_queue_ci_keeps_the_reading_and_the_last_queue_ci() {
+        let world = queue(true, true);
+        world.lock().unwrap().queue_ci_lost = true;
+        let server = queue_forge(world.clone()).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(reading.ci.unwrap().sha, "abc", "the PR's own CI");
+        let entry = reading.pr.unwrap().queue.unwrap();
+        assert_eq!(entry.sha.as_deref(), Some("q1"));
+        assert_eq!(entry.ci, None, "never read");
+        world.lock().unwrap().queue_ci_lost = false;
+        let read = read_pr(&mut branch).await.queue.unwrap().ci;
+        assert_eq!(read.as_ref().unwrap().pipelines.len(), 1);
+        world.lock().unwrap().queue_ci_lost = true;
+        assert_eq!(read_pr(&mut branch).await.queue.unwrap().ci, read, "kept");
     }
 
     /// The commit the queue tests, before its CI shows up, expects one: a
