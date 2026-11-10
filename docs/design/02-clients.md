@@ -50,7 +50,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   JSON lu sur l'entrée standard), `nowcast bricks enable <nom>`,
   `nowcast bricks disable <nom>` (activer ou désactiver une brique) et `nowcast bricks
   configure <nom>` (la configurer à nouveau), `nowcast status`
-  (ce qui tourne, voir plus bas). La reconnexion et la conduite à tenir
+  (ce qui tourne, voir plus bas), `nowcast reload` (redémarrer le service sur le
+  binaire installé, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast status` dit ce qui tourne, et à quelle version.** Il affiche, lisible
   par défaut, l'état que rend `GET /v1/status` (`03-contrats.md` section 3) : la
@@ -111,6 +112,39 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   - **Écarté : `brew services`.** Sous Linux, Homebrew ne génère qu'un `.service`
     lancé à l'ouverture de session, sans unité socket : le service tournerait en
     permanence au lieu de démarrer à la première connexion.
+- **`nowcast reload` redémarre le service sur le binaire installé.** Après une mise à
+  jour, le service en marche garde l'ancien binaire, et ne s'arrête pas seul tant
+  qu'une session tient `watch`. `reload` lance `systemctl --user restart
+  nowcast.service`, puis lit `GET /v1/service` et affiche la version d'avant et celle
+  d'après (`0.1.0-alpha.5 → 0.1.0-alpha.6`) ; sous `--json`, `{"before": <version ou
+  null>, "after": <version>}`. Il redémarre même à version égale : un binaire
+  reconstruit depuis les sources garde la sienne.
+  - **Un service arrêté n'est pas réveillé.** Quand systemd tient le socket sans que
+    le service tourne, la prochaine connexion lancera déjà le binaire installé :
+    `reload` le dit et sort en 0, comme `status` ne se connecte pas dans ce cas.
+  - **Il ne vaut que sous systemd, avec des unités à jour.** Sans les unités de
+    `setup`, ou avec un socket donné explicitement, il n'y a rien à redémarrer pour
+    lui : il le dit et sort en erreur. Des unités `outdated` le font refuser aussi, en
+    renvoyant à `nowcast setup` puis `nowcast reload` : redémarrer d'abord ferait
+    tourner le nouveau binaire sous les anciennes unités, et demanderait un second
+    redémarrage.
+  - **« Sans perte » couvre ce que les clients gardent.** Pendant le redémarrage,
+    systemd garde le socket : une connexion attend le nouveau service au lieu
+    d'échouer. Les clients refont le reste, comme après un arrêt à vide : le mod
+    central déclare à nouveau la session sur le `428`, reprend ses abonnements et
+    relance `watch` ; son état garde chaque dernière valeur jusqu'à ce que la brique
+    réabonnée en publie une nouvelle. Sont perdus l'historique de chaque flux, que
+    signale le `flow-gap` de la reprise (`03-contrats.md` section 3), et ce qu'une
+    brique ne garde qu'en mémoire, qu'elle relit.
+  - **Ce qui renvoie à `reload`.** `nowcast status`, quand la version en marche
+    diffère de l'installée, et le mod central, quand il refuse un service trop
+    ancien, nomment la commande plutôt qu'un redémarrage à faire soi-même.
+  - **Écartés pour l'instant**, faute d'un consommateur qui souffre de la perte de
+    l'historique : un service qui écrit ses flux (dernières valeurs, historique) sur
+    disque à l'arrêt et les relit au démarrage, à reprendre avec la trace des flux
+    terminés (issue #58) si le besoin vient ; une passation du socket et de l'état
+    d'un processus à l'autre, dont le seul gain sur le précédent est d'éviter une
+    reconnexion que les clients font déjà.
 - **Un adaptateur mince par agent, dans le dépôt de nowcast** (par exemple
   `clients/claude-code/`, plus tard `clients/codex/`). Il traduit les événements de
   l'agent (début de session, changement de session, fin) en requêtes au service, et
