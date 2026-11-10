@@ -80,12 +80,55 @@ pub struct Pr {
     pub url: String,
     /// Who asked for the PR to merge by itself, and the merge method.
     pub auto_merge: Option<(Option<String>, Option<String>)>,
+    /// The PR's entry in its base's merge queue; always `None` on a forge
+    /// without one.
+    pub queue: Option<QueueEntry>,
+    /// Why the PR last left the merge queue without being merged, while its
+    /// head is the one that was queued.
+    pub dequeued: Option<Dequeued>,
 }
 
 impl Pr {
     pub fn is_open(&self) -> bool {
         self.state == "open"
     }
+}
+
+/// A PR's entry in a merge queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEntry {
+    /// `queued`, `awaiting_checks`, `mergeable`, `unmergeable` or `locked`.
+    pub state: String,
+    pub position: u64,
+    pub enqueued_at: String,
+    pub estimated_merge_at: Option<String>,
+    /// The commit the queue tests: the PR merged with its base and the PRs
+    /// ahead of it. `None` while the forge has not made it.
+    pub sha: Option<String>,
+    /// The CI of that commit.
+    pub ci: Option<Ci>,
+}
+
+impl QueueEntry {
+    /// The entry `forge.pr/v1` carries, as of `now`.
+    pub fn detail(&self, now: Instant) -> Value {
+        json!({
+            "state": self.state,
+            "position": self.position,
+            "enqueued_at": self.enqueued_at,
+            "estimated_merge_at": self.estimated_merge_at,
+            "sha": self.sha,
+            "ci": self.ci.as_ref().map(|c| c.synthesis(now)),
+        })
+    }
+}
+
+/// Why a PR left a merge queue without being merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dequeued {
+    /// The reason as the forge gives it.
+    pub reason: Option<String>,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

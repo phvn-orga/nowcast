@@ -2,7 +2,16 @@
   "type": "object",
   "required": ["repo", "branch", "head_sha", "pr", "ci", "source"],
   "$defs": {
-    "time": { "type": ["string", "null"], "description": "RFC 3339." }
+    "time": { "type": ["string", "null"], "description": "RFC 3339." },
+    "ci": {
+      "type": "object",
+      "required": ["state", "required_state", "sha"],
+      "properties": {
+        "state": { "enum": ["none", "waiting", "running", "pass", "fail"] },
+        "required_state": { "enum": ["none", "waiting", "running", "missing", "pass", "fail", null] },
+        "sha": { "type": "string", "description": "The commit the CI is about." }
+      }
+    }
   },
   "properties": {
     "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>." },
@@ -23,19 +32,30 @@
           "required": ["enabled_by", "method"],
           "properties": { "enabled_by": { "type": ["string", "null"] }, "method": { "type": ["string", "null"] } }
         },
-        "queue": { "type": ["object", "null"], "description": "The PR's entry in its base's merge queue; always null on a forge without one." },
-        "dequeued": { "type": ["object", "null"], "description": "Why the PR left the merge queue without being merged." }
+        "queue": {
+          "type": ["object", "null"],
+          "description": "The PR's entry in its base's merge queue; always null on a forge without one.",
+          "required": ["state", "position", "enqueued_at", "estimated_merge_at", "sha", "ci"],
+          "properties": {
+            "state": { "enum": ["queued", "awaiting_checks", "mergeable", "unmergeable", "locked"] },
+            "position": { "type": "integer" },
+            "enqueued_at": { "type": "string", "description": "RFC 3339." },
+            "estimated_merge_at": { "$ref": "#/$defs/time" },
+            "sha": { "type": ["string", "null"], "description": "The commit the queue tests: the PR merged with its base and the PRs ahead of it." },
+            "ci": { "anyOf": [{ "$ref": "#/$defs/ci" }, { "type": "null" }], "description": "The rollup of that commit's CI." }
+          }
+        },
+        "dequeued": {
+          "type": ["object", "null"],
+          "description": "Why the PR left the merge queue without being merged; gone once it enters it again or its head changes.",
+          "required": ["reason", "at"],
+          "properties": { "reason": { "type": ["string", "null"], "description": "As the forge gives it." }, "at": { "type": "string", "description": "RFC 3339." } }
+        }
       }
     },
     "ci": {
-      "type": ["object", "null"],
-      "description": "The rollup of the CI, the same as forge.pipelines/v1 for this branch; null without a commit to read.",
-      "required": ["state", "required_state", "sha"],
-      "properties": {
-        "state": { "enum": ["none", "waiting", "running", "pass", "fail"] },
-        "required_state": { "enum": ["none", "waiting", "running", "missing", "pass", "fail", null] },
-        "sha": { "type": "string", "description": "The commit the CI is about." }
-      }
+      "anyOf": [{ "$ref": "#/$defs/ci" }, { "type": "null" }],
+      "description": "The rollup of the CI, the same as forge.pipelines/v1 for this branch; null without a commit to read."
     },
     "source": {
       "type": "object",

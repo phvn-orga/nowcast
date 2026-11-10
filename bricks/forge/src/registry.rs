@@ -306,8 +306,8 @@ fn pr_detail(target: &Target, now: Instant) -> Value {
             "head_sha": p.head_sha,
             "url": p.url,
             "auto_merge": p.auto_merge.as_ref().map(|(by, method)| json!({ "enabled_by": by, "method": method })),
-            "queue": null,
-            "dequeued": null,
+            "queue": p.queue.as_ref().map(|q| q.detail(now)),
+            "dequeued": p.dequeued.as_ref().map(|d| json!({ "reason": d.reason, "at": d.at })),
         })
     });
     json!({
@@ -347,7 +347,7 @@ mod tests {
 
     use super::*;
     use crate::model::tests::{ci, job, pipeline};
-    use crate::model::{Pr, State};
+    use crate::model::{Dequeued, Pr, QueueEntry, State};
 
     /// Recognises `https://forge/<repo>`; records what it follows and each
     /// `refresh` it receives.
@@ -405,6 +405,8 @@ mod tests {
                 head_sha: sha.into(),
                 url: "u".into(),
                 auto_merge: None,
+                queue: None,
+                dequeued: None,
             }),
             ci: Some(ci),
         })
@@ -497,6 +499,40 @@ mod tests {
                 .is_empty(),
             "only as_of moved"
         );
+    }
+
+    /// The PR's entry in the merge queue carries the rollup of its CI.
+    #[tokio::test]
+    async fn the_pr_publishes_its_queue_entry_and_why_it_left() {
+        let (mut core, _) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        let Ok(mut read) = reading("a", State::Pass) else {
+            unreachable!()
+        };
+        let mut queue_ci = ci(vec![pipeline(State::Running, vec![])]);
+        queue_ci.sha = "q".into();
+        let pr = read.pr.as_mut().unwrap();
+        pr.queue = Some(QueueEntry {
+            state: "queued".into(),
+            position: 1,
+            enqueued_at: "t0".into(),
+            estimated_merge_at: None,
+            sha: Some("q".into()),
+            ci: Some(queue_ci),
+        });
+        pr.dequeued = Some(Dequeued {
+            reason: Some("conflict".into()),
+            at: "t1".into(),
+        });
+        let out = published(&core.update(1, Ok(read), Timestamp::now(), Instant::now()));
+        let pr = &out[0].1["pr"];
+        assert_eq!(
+            pr["queue"],
+            json!({ "state": "queued", "position": 1, "enqueued_at": "t0",
+                "estimated_merge_at": null, "sha": "q",
+                "ci": { "state": "running", "required_state": null, "sha": "q" } })
+        );
+        assert_eq!(pr["dequeued"], json!({ "reason": "conflict", "at": "t1" }));
     }
 
     #[tokio::test]

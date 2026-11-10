@@ -54,22 +54,47 @@ pub async fn read(
         },
     };
     let ci = match &head_sha {
-        Some(sha) => {
-            let (runs, checks, statuses) = tokio::try_join!(
-                get(format!("{repo}/actions/runs?head_sha={sha}&per_page=100")),
-                get(format!("{repo}/commits/{sha}/check-runs?per_page=100")),
-                get(format!("{repo}/commits/{sha}/status")),
-            )?;
-            Some(Ci {
-                sha: sha.clone(),
-                pipelines: pipelines(&runs, &checks, &statuses, open_one.map(|p| p.number)),
-                missing_required: Vec::new(),
-                expected_until: None,
-            })
-        }
+        Some(sha) => Some(
+            ci(
+                http,
+                api,
+                token,
+                owner,
+                name,
+                sha,
+                open_one.map(|p| p.number),
+            )
+            .await?,
+        ),
         None => None,
     };
     Ok(BranchReading { head_sha, pr, ci })
+}
+
+/// Reads the CI of commit `sha` in `owner/name`, which `pr`, when open,
+/// is about.
+pub async fn ci(
+    http: &Http,
+    api: &str,
+    token: &str,
+    owner: &str,
+    name: &str,
+    sha: &str,
+    pr: Option<u64>,
+) -> Result<Ci, Failure> {
+    let repo = format!("{api}/repos/{owner}/{name}");
+    let get = |url: String| async move { http.get(&url, token, HEADERS).await };
+    let (runs, checks, statuses) = tokio::try_join!(
+        get(format!("{repo}/actions/runs?head_sha={sha}&per_page=100")),
+        get(format!("{repo}/commits/{sha}/check-runs?per_page=100")),
+        get(format!("{repo}/commits/{sha}/status")),
+    )?;
+    Ok(Ci {
+        sha: sha.to_owned(),
+        pipelines: pipelines(&runs, &checks, &statuses, pr),
+        missing_required: Vec::new(),
+        expected_until: None,
+    })
 }
 
 /// Percent-encodes what a path segment or a query value cannot hold as is.
@@ -123,6 +148,8 @@ fn pr_of(p: &Value) -> Option<Pr> {
         head_sha: p["head"]["sha"].as_str()?.to_owned(),
         url: p["html_url"].as_str().unwrap_or_default().to_owned(),
         auto_merge,
+        queue: None,
+        dequeued: None,
     })
 }
 

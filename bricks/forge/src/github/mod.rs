@@ -1,25 +1,29 @@
 //! The GitHub provider: recognises GitHub remotes and follows a branch
 //! through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
-//! checks the base of its open PR requires ([`required`]). A reading
+//! checks the base of its open PR requires ([`required`]) and the PR's
+//! entry in the base's merge queue ([`queue`]). A reading
 //! that changes nothing costs no rate limit (`304`), hence a fast pace while
 //! a CI is expected or runs. The token comes from `gh` ([`token`]);
 //! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
 //! for tests.
 
+mod queue;
 mod read;
 mod required;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
+use crate::model::{Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
 use crate::tools::pace::{Pace, Rhythm};
 use crate::tools::remote;
+use queue::Queues;
 use required::{Base, Required};
 
 /// GitHub's REST API.
@@ -46,6 +50,7 @@ pub struct GitHub {
     api: String,
     tokens: Tokens,
     required: Required,
+    queues: Queues,
 }
 
 impl GitHub {
@@ -56,6 +61,7 @@ impl GitHub {
             api,
             tokens: Tokens::default(),
             required: Required::default(),
+            queues: Queues::default(),
         }
     }
 }
@@ -80,6 +86,8 @@ impl Provider for GitHub {
             api: self.api.clone(),
             tokens: self.tokens.clone(),
             required: self.required.clone(),
+            queues: self.queues.clone(),
+            memory: Memory::default(),
             owner,
             name,
             branch: branch.to_owned(),
@@ -94,6 +102,8 @@ struct Branch {
     api: String,
     tokens: Tokens,
     required: Required,
+    queues: Queues,
+    memory: Memory,
     owner: String,
     name: String,
     branch: String,
@@ -104,7 +114,7 @@ impl Branch {
     /// `refresh`, and again, until the core is gone. A `refresh` that comes
     /// during a reading is answered by the next one. A rate limit is waited
     /// out whatever the refreshes.
-    async fn follow(self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    async fn follow(mut self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
         let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
@@ -120,12 +130,15 @@ impl Branch {
                             .filter(|p| p.is_open())
                             .map(|p| p.number),
                     );
+                    // A PR in the merge queue moves as its queue CI runs.
+                    let queued = reading.pr.as_ref().is_some_and(|p| p.queue.is_some());
                     let delay = match &mut reading.ci {
                         Some(ci) => {
                             ci.expected_until = pace.expected_until(ci.pipelines.len());
-                            pace.next(&RHYTHM, now, ci.pipelines.len(), ci.is_running())
+                            let running = ci.is_running() || queued;
+                            pace.next(&RHYTHM, now, ci.pipelines.len(), running)
                         }
-                        None => pace.next(&RHYTHM, now, 0, false),
+                        None => pace.next(&RHYTHM, now, 0, queued),
                     };
                     (Ok(reading), delay)
                 }
@@ -159,7 +172,7 @@ impl Branch {
     }
 
     /// One reading, and how long a rate limit asks to wait.
-    async fn read_once(&self) -> (Outcome, Option<Duration>) {
+    async fn read_once(&mut self) -> (Outcome, Option<Duration>) {
         let kept = self.tokens.lock().unwrap().get(&self.owner).cloned();
         let token = match kept {
             Some(token) => Some(token),
@@ -172,7 +185,7 @@ impl Branch {
             .lock()
             .unwrap()
             .insert(self.owner.clone(), token.clone());
-        let failure = match read::read(
+        let read = read::read(
             &self.http,
             &self.api,
             &token,
@@ -180,11 +193,14 @@ impl Branch {
             &self.name,
             &self.branch,
         )
-        .await
-        {
+        .await;
+        let failure = match read {
             Ok(mut reading) => {
-                self.mark_required(&token, &mut reading).await;
-                return (Ok(reading), None);
+                let names = self.mark_required(&token, &mut reading).await;
+                match self.read_queue(&token, &mut reading, names.as_ref()).await {
+                    Ok(()) => return (Ok(reading), None),
+                    Err(failure) => failure,
+                }
             }
             Err(failure) => failure,
         };
@@ -212,15 +228,29 @@ impl Branch {
     }
 }
 
+/// What a branch remembers of its PR's passage through the merge queue.
+#[derive(Default)]
+struct Memory {
+    /// The PR and its head, as the last reading found them in the queue.
+    queued: Option<(u64, String)>,
+    /// Why that PR left the queue with that head.
+    dequeued: Option<(u64, String, Dequeued)>,
+}
+
 impl Branch {
-    /// Marks the jobs the base of the open PR requires. Without an open PR,
-    /// nothing is required: the requirement comes from the base's rules.
-    async fn mark_required(&self, token: &str, reading: &mut BranchReading) {
+    /// Marks the jobs the base of the open PR requires, and gives the
+    /// names it requires. Without an open PR, nothing is required: the
+    /// requirement comes from the base's rules.
+    async fn mark_required(
+        &self,
+        token: &str,
+        reading: &mut BranchReading,
+    ) -> Option<BTreeSet<String>> {
         let (Some(pr), Some(ci)) = (
             reading.pr.as_ref().filter(|p| p.is_open()),
             reading.ci.as_mut(),
         ) else {
-            return;
+            return None;
         };
         let base = Base {
             http: &self.http,
@@ -230,9 +260,86 @@ impl Branch {
             name: &self.name,
             base: &pr.base,
         };
-        if let Some(names) = self.required.names(&base).await {
-            required::mark(ci, &names);
+        let names = self.required.names(&base).await;
+        if let Some(names) = &names {
+            required::mark(ci, names);
         }
+        names
+    }
+
+    /// Reads the open PR's entry in its base's merge queue, with the CI of
+    /// the commit the queue tests, marked from the base's `names`. A PR
+    /// that left the queue unmerged gets why, read once, kept while its
+    /// head is the one that was queued. Only that CI's reading can fail.
+    async fn read_queue(
+        &mut self,
+        token: &str,
+        reading: &mut BranchReading,
+        names: Option<&BTreeSet<String>>,
+    ) -> Result<(), http::Failure> {
+        let Some(pr) = reading.pr.as_mut().filter(|p| p.is_open()) else {
+            self.memory = Memory::default();
+            return Ok(());
+        };
+        let pr_base = pr.base.clone();
+        let base = Base {
+            http: &self.http,
+            api: &self.api,
+            token,
+            owner: &self.owner,
+            name: &self.name,
+            base: &pr_base,
+        };
+        // `None`: the base never answered, nothing is known yet.
+        match self.queues.entry(&base, pr.number).await {
+            Some(Some(entry)) => {
+                self.memory.queued = Some((pr.number, pr.head_sha.clone()));
+                self.memory.dequeued = None;
+                let ci = match &entry.sha {
+                    Some(sha) => {
+                        let read =
+                            read::ci(base.http, base.api, token, base.owner, base.name, sha, None);
+                        let mut ci = read.await?;
+                        if let Some(names) = names {
+                            required::mark(&mut ci, names);
+                        }
+                        Some(ci)
+                    }
+                    None => None,
+                };
+                pr.queue = Some(QueueEntry {
+                    state: entry.state,
+                    position: entry.position,
+                    enqueued_at: entry.enqueued_at,
+                    estimated_merge_at: entry.estimated_merge_at,
+                    sha: entry.sha,
+                    ci,
+                });
+            }
+            Some(None) => {
+                let left = self.memory.queued.take();
+                if let Some((number, head)) = left
+                    && number == pr.number
+                    && head == pr.head_sha
+                {
+                    match queue::removal(&base, number).await {
+                        Ok(why) => self.memory.dequeued = why.map(|d| (number, head, d)),
+                        Err(failure) => crate::log(format_args!(
+                            "github.com/{}/{}#{number}: merge queue removal unread: {failure:?}",
+                            self.owner, self.name
+                        )),
+                    }
+                }
+            }
+            None => {}
+        }
+        pr.dequeued = self
+            .memory
+            .dequeued
+            .as_ref()
+            .filter(|(number, head, _)| *number == pr.number && *head == pr.head_sha)
+            .map(|(_, _, why)| why.clone());
+        Ok(())
     }
 }
 
@@ -298,6 +405,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+    use crate::model::Pr;
     use crate::testing::Server;
 
     fn none(_: &str) -> Option<String> {
@@ -351,6 +459,8 @@ mod tests {
             api: server.base(),
             tokens: Tokens::default(),
             required: Required::default(),
+            queues: Queues::default(),
+            memory: Memory::default(),
             owner: owner.into(),
             name: "r".into(),
             branch: "feat".into(),
@@ -368,7 +478,7 @@ mod tests {
             }
         })
         .await;
-        let denied = branch(&server, "denied");
+        let mut denied = branch(&server, "denied");
         denied
             .tokens
             .lock()
@@ -376,7 +486,7 @@ mod tests {
             .insert("denied".into(), "old".into());
         assert_eq!(denied.read_once().await, (Err(Failure::Unauthorized), None));
         assert!(denied.tokens.lock().unwrap().is_empty());
-        let limited = branch(&server, "busy");
+        let mut limited = branch(&server, "busy");
         limited
             .tokens
             .lock()
@@ -444,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn the_jobs_of_an_open_pr_say_whether_they_are_required() {
         let server = forge(true).await;
-        let branch = branch(&server, "o");
+        let mut branch = branch(&server, "o");
         branch.tokens.lock().unwrap().insert("o".into(), "t".into());
         let (Ok(reading), None) = branch.read_once().await else {
             panic!("the reading failed");
@@ -464,7 +574,7 @@ mod tests {
     #[tokio::test]
     async fn without_an_open_pr_nothing_is_required() {
         let server = forge(false).await;
-        let branch = branch(&server, "o");
+        let mut branch = branch(&server, "o");
         branch.tokens.lock().unwrap().insert("o".into(), "t".into());
         let (Ok(reading), None) = branch.read_once().await else {
             panic!("the reading failed");
@@ -477,6 +587,184 @@ mod tests {
                 .iter()
                 .any(|r| r.starts_with("post") || r.contains("/rules/"))
         );
+    }
+
+    /// What the queue forge shows: whether `main` has a merge queue, whether
+    /// PR 7 is in it, PR 7's head, and whether GraphQL fails.
+    struct Queue {
+        exists: bool,
+        queued: bool,
+        head: &'static str,
+        broken: bool,
+    }
+
+    /// A forge where `feat` has the open PR 7 on `main`, which requires
+    /// `check`. The queue tests PR 7 on the commit `q1`, whose `merge_group`
+    /// run has `check` running; PR 7 left the queue because its CI failed.
+    async fn queue_forge(queue: Arc<Mutex<Queue>>) -> Server {
+        Server::start(move |request| {
+            let q = queue.lock().unwrap();
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.starts_with("post /graphql") && q.broken {
+                return (502, vec![], String::new());
+            } else if line.starts_with("post /graphql") && request.contains("mergequeue(branch") {
+                let nodes = if q.queued {
+                    json!([{ "position": 2, "state": "AWAITING_CHECKS",
+                        "enqueuedAt": "2026-11-09T07:40:00Z", "estimatedTimeToMerge": 720,
+                        "headCommit": { "oid": "q1" }, "pullRequest": { "number": 7 } }])
+                } else {
+                    json!([])
+                };
+                let queue = q.exists.then(|| json!({ "entries": { "nodes": nodes } }));
+                json!({ "data": { "repository": { "mergeQueue": queue } } })
+            } else if line.starts_with("post /graphql") && request.contains("timelineitems") {
+                json!({ "data": { "repository": { "pullRequest": { "timelineItems": { "nodes": [
+                    { "reason": "CI failed", "createdAt": "2026-11-09T07:45:00Z" }] } } } } })
+            } else if line.starts_with("post /graphql") {
+                json!({ "data": { "repository": { "ref": { "refUpdateRule": {
+                    "requiredStatusCheckContexts": ["check"] } } } } })
+            } else if line.contains("/rules/branches/main") {
+                json!([])
+            } else if line.contains("/pulls?state=open") {
+                json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": q.head, "repo": { "full_name": "o/r" } } }])
+            } else if line.contains("/actions/runs?head_sha=q1") {
+                json!({ "workflow_runs": [{ "id": 2, "name": "CI", "path": "ci.yml",
+                    "event": "merge_group", "check_suite_id": 20, "status": "in_progress",
+                    "head_branch": "gh-readonly-queue/main/pr-7-abc", "created_at": "t" }] })
+            } else if line.contains("/commits/q1/check-runs") {
+                json!({ "check_runs": [{ "id": 1, "name": "check", "status": "in_progress",
+                    "check_suite": { "id": 20 }, "app": { "slug": "github-actions" } }] })
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] })
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await
+    }
+
+    fn queue(exists: bool, queued: bool) -> Arc<Mutex<Queue>> {
+        Arc::new(Mutex::new(Queue {
+            exists,
+            queued,
+            head: "abc",
+            broken: false,
+        }))
+    }
+
+    async fn read_pr(branch: &mut Branch) -> Pr {
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        reading.pr.unwrap()
+    }
+
+    fn asked(server: &Server, what: &str) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.contains(what))
+            .count()
+    }
+
+    /// A PR in the queue carries its entry and the CI of the commit the
+    /// queue tests, marked from the base's rules; the base is read again
+    /// every 10 s while the PR is in it.
+    #[tokio::test]
+    async fn a_pr_in_the_queue_carries_its_entry_and_the_queue_ci() {
+        let server = queue_forge(queue(true, true)).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let pr = read_pr(&mut branch).await;
+        let mut entry = pr.queue.unwrap().detail(Instant::now());
+        assert!(entry["estimated_merge_at"].is_string());
+        entry["estimated_merge_at"] = json!(null);
+        assert_eq!(
+            entry,
+            json!({ "state": "awaiting_checks", "position": 2,
+                "enqueued_at": "2026-11-09T07:40:00Z", "estimated_merge_at": null, "sha": "q1",
+                "ci": { "state": "running", "required_state": "running", "sha": "q1" } })
+        );
+        assert_eq!(pr.dequeued, None);
+        let query = server
+            .requests()
+            .into_iter()
+            .find(|r| r.contains("mergequeue(branch"))
+            .unwrap();
+        assert!(query.contains(r#""branch":"main""#));
+        read_pr(&mut branch).await;
+        assert_eq!(asked(&server, "mergequeue(branch"), 1, "not before 10 s");
+        branch.queues.age(queue::FAST);
+        read_pr(&mut branch).await;
+        assert_eq!(asked(&server, "mergequeue(branch"), 2);
+    }
+
+    /// A base without a queue gives no entry, and is asked again only at
+    /// the normal pace.
+    #[tokio::test]
+    async fn a_base_without_a_queue_is_asked_at_the_normal_pace() {
+        let server = queue_forge(queue(false, false)).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let pr = read_pr(&mut branch).await;
+        assert_eq!((pr.queue, pr.dequeued), (None, None));
+        read_pr(&mut branch).await;
+        branch.queues.age(queue::FAST);
+        read_pr(&mut branch).await;
+        assert_eq!(asked(&server, "mergequeue(branch"), 1);
+        branch.queues.age(RHYTHM.normal);
+        read_pr(&mut branch).await;
+        assert_eq!(asked(&server, "mergequeue(branch"), 2);
+    }
+
+    /// A queue GraphQL cannot read fails nothing: the branch is read.
+    #[tokio::test]
+    async fn a_failing_queue_query_keeps_the_reading() {
+        let world = queue(true, true);
+        world.lock().unwrap().broken = true;
+        let server = queue_forge(world).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        assert_eq!(read_pr(&mut branch).await.queue, None);
+    }
+
+    /// A PR that left the queue unmerged says why, asked once, until it
+    /// gets a new head.
+    #[tokio::test]
+    async fn a_pr_out_of_the_queue_says_why_until_a_new_head() {
+        let world = queue(true, true);
+        let server = queue_forge(world.clone()).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        read_pr(&mut branch).await;
+        world.lock().unwrap().queued = false;
+        branch.queues.age(queue::FAST);
+        let pr = read_pr(&mut branch).await;
+        assert_eq!(pr.queue, None);
+        let why = Dequeued {
+            reason: Some("CI failed".into()),
+            at: "2026-11-09T07:45:00Z".into(),
+        };
+        assert_eq!(pr.dequeued, Some(why.clone()));
+        let removal = server
+            .requests()
+            .into_iter()
+            .find(|r| r.contains("timelineitems"))
+            .unwrap();
+        assert!(removal.contains("itemtypes: [removed_from_merge_queue_event]"));
+        assert!(removal.contains(r#""number":7"#));
+        branch.queues.age(RHYTHM.normal);
+        assert_eq!(read_pr(&mut branch).await.dequeued, Some(why));
+        assert_eq!(asked(&server, "timelineitems"), 1, "asked once");
+        world.lock().unwrap().head = "def";
+        assert_eq!(read_pr(&mut branch).await.dequeued, None, "a new head");
     }
 
     /// The provider follows a branch: its first reading reaches the core.
