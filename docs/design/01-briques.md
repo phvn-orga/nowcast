@@ -57,6 +57,14 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
   service lit, comme une unité systemd. Le service ne connaît les briques que par ce
   répertoire, jamais dans son code. Emplacement et activation par lien symbolique :
   voir `03-contrats.md`.
+- **Une brique se configure à son activation, hors du service.** Native ou externe,
+  elle peut déclarer une commande de configuration (ses identifiants, par exemple),
+  que `nowcast bricks enable` lance dans le terminal de l'utilisateur avant de
+  l'activer, et que `nowcast bricks configure <nom>` relance plus tard. Ce qu'elle
+  enregistre lui appartient : le service ne le lit jamais. Une configuration en
+  échec bloque l'activation, sauf `--force` ; sans terminal, la brique est activée
+  sans configuration (`03-contrats.md`). Le nom `configure` la distingue de
+  `nowcast setup`, qui installe le service.
 - **Le service observe, il n'agit pas.** Une action sur une source (cocher une tâche,
   par exemple) reste dans le mod client, qui agit directement sur la source avec ses
   propres identifiants. Ces identifiants se partagent par l'outillage de la source ou

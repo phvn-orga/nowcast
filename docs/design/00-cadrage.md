@@ -181,9 +181,9 @@ même processus.
 ## La brique forge
 
 Un premier contrat, tenu dans un client sur GitHub (`gh`) et Azure DevOps (`az`), a
-servi de point de départ. La brique est conçue dans `06-brique-forge.md` : PR, CI par
-pipeline et par job, issues, lues par les API publiques avec un polling qui accélère
-quand quelque chose bouge. Le push par webhook y est écarté pour l'instant, porte
+servi de point de départ. La brique est conçue dans `06-brique-forge.md` : organisée par
+usages (PR, pipelines, issues), chaque forge derrière une même interface, lue par les
+API publiques avec un polling qui accélère quand quelque chose bouge. Le push par webhook y est écarté pour l'instant, porte
 ouverte.
 
 ## À trancher

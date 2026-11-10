@@ -47,8 +47,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   valeur, en un appel ; avec `--after <id>`, l'historique après cet identifiant), `nowcast subscribe`, `nowcast refresh <flux>` (rafraîchissement
   immédiat, rien d'affiché en cas de succès ; `nowcast refresh --brick <nom> [--kind
   <sorte>]` pour tous les flux d'une brique), `nowcast input <flux>` (envoie le détail
-  JSON lu sur l'entrée standard), `nowcast bricks enable <nom>` et
-  `nowcast bricks disable <nom>` (activer ou désactiver une brique), `nowcast status`
+  JSON lu sur l'entrée standard), `nowcast bricks enable <nom>`,
+  `nowcast bricks disable <nom>` (activer ou désactiver une brique) et `nowcast bricks
+  configure <nom>` (la configurer à nouveau), `nowcast status`
   (ce qui tourne, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **`nowcast status` dit ce qui tourne, et à quelle version.** Il affiche, lisible
@@ -100,7 +101,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
     rien à relancer après une mise à jour qui ne change pas les unités.
   - **Les briques se cochent dans une liste.** Dans un terminal, sans brique en
     argument, elle propose les briques natives, celles déjà actives cochées ; décocher
-    en désactive une. Sans terminal (un script, une CI), seules les briques nommées en
+    en désactive une. Une brique cochée passe par sa configuration, comme avec
+    `enable`. Sans terminal (un script, une CI), seules les briques nommées en
     argument sont activées. Les briques externes s'installent de leur côté, par
     `nowcast bricks enable`.
   - **`nowcast setup --remove` défait la partie systemd**, avant `brew uninstall` :
@@ -145,7 +147,7 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   même nom, ce qui remplace l'abonnement à l'ancien.
 - **Le mod central rafraîchit la brique forge après une action de sa session** :
   après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
-  `az repos pr`…), il demande le rafraîchissement de tous les flux de la sorte
+  `az repos pr`, `gh issue`, `az boards work-item`…), il demande le rafraîchissement de tous les flux de la sorte
   concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
   dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
   Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
