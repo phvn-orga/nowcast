@@ -69,8 +69,11 @@ impl Kept {
             Value::Null => None,
             since => Some(since.as_str()?.parse().ok()?),
         };
+        let mut entry = value.get("entry")?.as_object()?.clone();
+        // A file kept before the brick published `worktrees`.
+        entry.entry("worktrees").or_insert_with(|| json!([]));
         Some(Self {
-            entry: value.get("entry")?.as_object()?.clone(),
+            entry,
             side_done: sum(value.get("side_done")?, &Value::Null),
             side_since,
             side_last: sum(value.get("side_last")?, &Value::Null),
@@ -816,6 +819,27 @@ mod tests {
         assert_eq!(entry["model"], "m");
         assert_eq!(entry["ended_at"], Value::Null);
         assert_eq!(out[1].1, json!({ "sessions": [entry] }));
+    }
+
+    #[test]
+    fn a_session_kept_before_the_worktrees_comes_back_with_none() {
+        let mut state = State::default();
+        subscribe(&mut state, "session", json!({ "id": "s1" }));
+        input(&mut state, "s1", json!({ "model": "m" }), 1);
+        state.on_service(
+            ServiceMessage::Release {
+                flow: flow("session/s1"),
+            },
+            at(2),
+        );
+        let mut file = state.take_changed()[0].1.clone();
+        file["entry"].as_object_mut().unwrap().remove("worktrees");
+
+        let mut state = State::default();
+        assert!(state.restore("s1", &file, at(3)));
+        subscribe(&mut state, "session", json!({ "id": "s1" }));
+        let out = published(&input(&mut state, "s1", json!({ "model": "m" }), 4));
+        assert_eq!(out[0].1["worktrees"], json!([]));
     }
 
     #[test]

@@ -28,66 +28,95 @@ type Place = { root: string; repo: string } | null
 const places = new Map<string, Place>()
 
 /** The list, for the session it belongs to. */
-let held: { session: string; list: NowcastWorktree[] } | undefined
+type Held = { session: string; list: NowcastWorktree[] }
+
+/** The list being held: one load from the state, shared by every caller. */
+let held: Promise<Held> | undefined
 
 // Writes are applied one at a time, in the order the calls ended.
 let queue: Promise<void> = Promise.resolve()
 
 export function registerWorktrees(on: On): void {
-  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
-    const result = await next(e)
-    if (result.deny === undefined && result.isError !== true) await record($, e.file_path)
-    return result
-  })
-  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
-    const result = await next(e)
-    if (result.deny === undefined && result.isError !== true) await record($, e.file_path)
-    return result
-  })
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, await next(e)))
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => marked($, e.file_path, await next(e)))
 }
 
-/** Queues a write to `file`, dated now; the tool's answer does not wait for git. */
-async function record($: $, file: string): Promise<void> {
-  const at = new Date(await $.clock.now()).toISOString()
+/** Records `file` when the call that wrote it succeeded; the call's result unchanged. */
+function marked<R extends { deny?: string; isError?: true }>($: $, file: string, result: R): R {
+  if (result.deny === undefined && result.isError !== true) record($, file)
+  return result
+}
+
+/**
+ * Queues a write to `file`, dated now and tied to the session it ran in; the
+ * tool's answer waits for nothing. The queue is taken at once, so it keeps
+ * the order the calls ended.
+ */
+function record($: $, file: string): void {
+  const asked = Promise.all([$.clock.now(), $.session.id()])
+  // Handled when its turn comes, below.
+  asked.catch(() => undefined)
   queue = queue
-    .then(() => wrote($, file, at))
+    .then(async () => {
+      const [now, session] = await asked
+      await wrote($, file, new Date(now).toISOString(), session)
+    })
     .catch(error => $.ui.log(`nowcast: cannot record the worktree of ${file}: ${message(error)}`, { to: 'debug' }))
 }
 
 /** The session's worktrees, most recent write first. */
 export async function worktrees($: $): Promise<NowcastWorktree[]> {
-  const session = await $.session.id()
-  if (held === undefined) {
-    // This mod loaded: the state holds the session's list from before.
-    const { value } = await $.state.get(WORKTREES)
-    held = { session, list: Array.isArray(value) ? value : [] }
-  } else if (held.session !== session) {
-    // A `/clear` or a resume, which also empties the state.
-    held = { session, list: [] }
-  }
-  return held.list
+  return (await hold($)).list
 }
 
-async function wrote($: $, file: string, at: string): Promise<void> {
+/** The list of the current session, loaded once per load of this mod. */
+async function hold($: $): Promise<Held> {
+  const session = await $.session.id()
+  const current = held
+  if (current === undefined) {
+    // This mod loaded: the state holds the session's list from before.
+    const loading = $.state.get(WORKTREES).then(({ value }) => ({ session, list: Array.isArray(value) ? value : [] }))
+    held = loading
+    // A failed read is tried again by the next caller.
+    loading.catch(() => {
+      if (held === loading) held = undefined
+    })
+    return loading
+  }
+  const known = await current
+  if (known.session === session) return known
+  // A `/clear` or a resume, which also empties the state. Another caller may
+  // have started the new session's list meanwhile.
+  if (held !== current) return hold($)
+  held = Promise.resolve({ session, list: [] })
+  return held
+}
+
+async function wrote($: $, file: string, at: string, session: string): Promise<void> {
   if (!file.startsWith('/')) return
   const place = await placeOf($, file.slice(0, file.lastIndexOf('/')) || '/')
   if (place === null) return
-  const [branch, remote, list] = await Promise.all([
+  const [branch, remote, mine] = await Promise.all([
     git($, place.root, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
     git($, place.root, ['config', '--get', 'remote.origin.url']),
-    worktrees($),
+    hold($),
   ])
-  const others: NowcastWorktree[] = []
-  for (const worktree of list) {
-    if (worktree.path === place.root) continue
-    // A worktree removed since leaves the list.
-    if (await $.fs.exists(worktree.path).catch(() => true)) others.push(worktree)
-  }
+  // The session of the call ended before its turn: its list is gone.
+  if (mine.session !== session) return
+  // A worktree removed since leaves the list.
+  const kept = await Promise.all(
+    mine.list
+      .filter(worktree => worktree.path !== place.root)
+      .map(async worktree => ((await $.fs.exists(worktree.path).catch(() => true)) ? worktree : undefined)),
+  )
+  const others = kept.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
   const next = [{ path: place.root, repo: place.repo, branch, remote, written_at: at }, ...others].slice(
     0,
     MAX_WORKTREES,
   )
-  if (held !== undefined) held.list = next
+  mine.list = next
+  // The session ended meanwhile: the new one's state is not this list's.
+  if ((await $.session.id()) !== session) return
   await write($, () => $.state.set(WORKTREES, next), 'worktrees')
 }
 
@@ -97,7 +126,8 @@ async function placeOf($: $, dir: string): Promise<Place> {
   if (known !== undefined) return known
   const out = await git($, dir, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'])
   const [root, repo] = out?.split('\n') ?? []
-  const place = root && repo ? { root, repo } : null
+  // A git before 2.31 echoes `--path-format=absolute` it does not know.
+  const place = root?.startsWith('/') && repo?.startsWith('/') ? { root, repo } : null
   places.set(dir, place)
   return place
 }

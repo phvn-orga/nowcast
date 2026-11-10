@@ -86,6 +86,22 @@ test('a failed call, a relative path or a file outside a worktree marks nothing'
   expect(await listed(w)).toBeUndefined()
 })
 
+test('a git that does not know --path-format marks nothing', async ($, on) => {
+  // Before 2.31, rev-parse echoes the option and answers a relative common dir.
+  const w = world(on, {
+    git: args =>
+      args[0] === 'rev-parse'
+        ? { exitCode: 0, stdout: `--path-format=absolute\n${ROOT('main')}\n.git\n` }
+        : { exitCode: 0, stdout: 'main\n' },
+  })
+  tools(on)
+  await $.session.start(START)
+
+  await edit($, `${ROOT('main')}/a.ts`)
+
+  expect(await listed(w)).toBeUndefined()
+})
+
 test('each write reads the branch again; a detached HEAD has none', async ($, on) => {
   const branches: Record<string, string | null> = {}
   const w = world(on, { git: repository(branches), files: [ROOT('main')] })
