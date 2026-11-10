@@ -64,7 +64,7 @@ async fn flags_a_service_running_another_version() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let expected = format!(
         "service    0.0.1, running since 2026-11-08T16:41:00Z\n\
-         installed  {INSTALLED}, not the service's: restart the service to run it\n"
+         installed  {INSTALLED}, not the service's: run nowcast reload to run it\n"
     );
     assert!(
         stdout(&output).starts_with(&expected),
@@ -100,7 +100,7 @@ async fn a_service_older_than_the_route_says_to_restart_it() {
         message.starts_with("nowcast: service_too_old: "),
         "{message}"
     );
-    assert!(message.contains("restart it"), "{message}");
+    assert!(message.contains("nowcast reload"), "{message}");
 }
 
 /// `nowcast` finding the fake's socket through `XDG_RUNTIME_DIR`, as when

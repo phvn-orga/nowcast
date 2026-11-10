@@ -194,9 +194,12 @@ impl Fake {
         self.state.lock().unwrap().probe = probe;
     }
 
-    /// Answers every request on `path` with this, before any other check.
+    /// Answers every request on `path` with this, before any other check,
+    /// in place of an answer canned before for it.
     pub fn can(&self, path: &str, status: u16, content_type: &'static str, body: &str) {
-        self.state.lock().unwrap().canned.push(Canned {
+        let mut state = self.state.lock().unwrap();
+        state.canned.retain(|c| c.path != path);
+        state.canned.push(Canned {
             path: path.into(),
             status,
             content_type,

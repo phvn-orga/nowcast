@@ -148,7 +148,7 @@ async function tooOld($: $): Promise<string | null> {
   const running = await Promise.race([runningVersion($), $.clock.sleep(VERSION_TIMEOUT_MS).then(() => null)])
   if (running !== null) {
     if (!isOlder(running, OLDEST_SERVICE)) return null
-    return `the running ${CLI} service is ${running}, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and restart the service`
+    return `the running ${CLI} service is ${running}, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and run ${CLI} reload`
   }
   const ran = await $.process.run([CLI, '--version'], { timeoutMs: VERSION_TIMEOUT_MS }).catch(() => null)
   const version = ran?.exitCode === 0 ? printedVersion(ran.stdout) : null

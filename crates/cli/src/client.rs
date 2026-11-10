@@ -78,6 +78,17 @@ impl Client {
         }
     }
 
+    /// `GET /v1/service`: the version the service runs, `None` when it does
+    /// not tell it, being older than the field. Needs no session.
+    pub async fn service_version(&self) -> Result<Option<String>, CliError> {
+        let reply = self.call(Method::GET, "/v1/service", None).await?;
+        let body = reply.expect(StatusCode::OK)?.json()?;
+        Ok(body
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     /// `GET /v1/status`, which needs no session; `None` when nothing listens
     /// on the socket, the service being stopped.
     pub async fn status(&self) -> Result<Option<Value>, CliError> {
@@ -95,8 +106,8 @@ impl Client {
         if reply.status == StatusCode::NOT_FOUND {
             return Err(CliError::Api {
                 code: "service_too_old".into(),
-                message: "the running service predates `nowcast status`: restart it to run \
-                          the installed version"
+                message: "the running service predates `nowcast status`: run `nowcast reload` \
+                          to run the installed version"
                     .into(),
             });
         }

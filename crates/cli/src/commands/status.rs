@@ -40,7 +40,7 @@ pub async fn status(
 
 /// What `systemctl --user is-active` says of the socket and the service, one
 /// line each; empty when systemd cannot be asked.
-fn systemd_states() -> String {
+pub(crate) fn systemd_states() -> String {
     Command::new("systemctl")
         .args(["--user", "is-active", "nowcast.socket", "nowcast.service"])
         .output()
@@ -50,7 +50,7 @@ fn systemd_states() -> String {
 
 /// Whether systemd holds the socket while the service does not run, or is
 /// stopping: a connection would start it.
-fn waits_for_a_connection(states: &str) -> bool {
+pub(crate) fn waits_for_a_connection(states: &str) -> bool {
     let mut lines = states.lines();
     let (socket, service) = (lines.next(), lines.next());
     socket == Some("active") && matches!(service, Some("inactive" | "failed" | "deactivating"))
@@ -78,7 +78,7 @@ fn readable(installed: &str, running: Option<&Value>, setup: Option<Units>) -> S
     if version.is_some_and(|v| v != installed) {
         let _ = writeln!(
             text,
-            "installed  {installed}, not the service's: restart the service to run it"
+            "installed  {installed}, not the service's: run nowcast reload to run it"
         );
     } else {
         let _ = writeln!(text, "installed  {installed}");
@@ -250,7 +250,7 @@ flows
             readable("0.2.0", Some(&status), Some(Units::Outdated)),
             "\
 service    0.1.0, running since 2026-11-08T16:41:00Z
-installed  0.2.0, not the service's: restart the service to run it
+installed  0.2.0, not the service's: run nowcast reload to run it
 setup      outdated: run nowcast setup again
 bricks  none
 sessions  none

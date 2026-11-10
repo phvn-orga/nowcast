@@ -122,7 +122,7 @@ function running(version: string) {
   return { status: 200, text: JSON.stringify({ version, started_at: '2026-11-08T16:41:00Z', path: null }) }
 }
 
-const RUNNING_TOO_OLD = `the running nowcast service is 0.1.0-alpha.1, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and restart the service`
+const RUNNING_TOO_OLD = `the running nowcast service is 0.1.0-alpha.1, older than ${OLDEST_SERVICE}, the oldest this mod accepts; upgrade it and run nowcast reload`
 
 test('a running service too old is refused even when the installed binary is newer, until it restarts', async ($, on) => {
   const options: WorldOptions = { service: running('0.1.0-alpha.1'), version: '9.0.0' }
