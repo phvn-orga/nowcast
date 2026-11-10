@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use crate::model::{Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{Pace, Rhythm};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
 use crate::tools::remote;
 use queue::Queues;
 use required::{Base, Required};
@@ -231,10 +231,23 @@ impl Branch {
 /// What a branch remembers of its PR's passage through the merge queue.
 #[derive(Default)]
 struct Memory {
-    /// The PR and its head, as the last reading found them in the queue.
-    queued: Option<(u64, String)>,
+    /// The PR, its head and when it entered the queue, as the last reading
+    /// found them in the queue.
+    queued: Option<(u64, String, String)>,
     /// Why that PR left the queue with that head.
     dequeued: Option<(u64, String, Dequeued)>,
+    /// The commit the queue tests, and since when: its CI is expected for a
+    /// while before it shows up.
+    tested: Option<(String, Instant)>,
+}
+
+/// Whether RFC 3339 time `a` comes before `b`; `false` when either does not
+/// parse.
+fn before(a: &str, b: &str) -> bool {
+    match (a.parse::<jiff::Timestamp>(), b.parse::<jiff::Timestamp>()) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => false,
+    }
 }
 
 impl Branch {
@@ -268,9 +281,11 @@ impl Branch {
     }
 
     /// Reads the open PR's entry in its base's merge queue, with the CI of
-    /// the commit the queue tests, marked from the base's `names`. A PR
-    /// that left the queue unmerged gets why, read once, kept while its
-    /// head is the one that was queued. Only that CI's reading can fail.
+    /// the commit the queue tests, marked from the base's `names` and
+    /// expected for a while after that commit shows up. A PR that left the
+    /// queue unmerged gets why, read once it is read without failure, kept
+    /// while its head is the one that was queued. Only that CI's reading
+    /// can fail.
     async fn read_queue(
         &mut self,
         token: &str,
@@ -293,13 +308,22 @@ impl Branch {
         // `None`: the base never answered, nothing is known yet.
         match self.queues.entry(&base, pr.number).await {
             Some(Some(entry)) => {
-                self.memory.queued = Some((pr.number, pr.head_sha.clone()));
+                self.memory.queued =
+                    Some((pr.number, pr.head_sha.clone(), entry.enqueued_at.clone()));
                 self.memory.dequeued = None;
                 let ci = match &entry.sha {
                     Some(sha) => {
+                        let since = match &self.memory.tested {
+                            Some((tested, since)) if tested == sha => *since,
+                            _ => Instant::now(),
+                        };
+                        self.memory.tested = Some((sha.clone(), since));
                         let read =
                             read::ci(base.http, base.api, token, base.owner, base.name, sha, None);
                         let mut ci = read.await?;
+                        if ci.pipelines.is_empty() {
+                            ci.expected_until = Some(since + EXPECTED_FOR);
+                        }
                         if let Some(names) = names {
                             required::mark(&mut ci, names);
                         }
@@ -317,17 +341,27 @@ impl Branch {
                 });
             }
             Some(None) => {
+                self.memory.tested = None;
                 let left = self.memory.queued.take();
-                if let Some((number, head)) = left
+                if let Some((number, head, enqueued_at)) = left
                     && number == pr.number
                     && head == pr.head_sha
                 {
                     match queue::removal(&base, number).await {
-                        Ok(why) => self.memory.dequeued = why.map(|d| (number, head, d)),
-                        Err(failure) => crate::log(format_args!(
-                            "github.com/{}/{}#{number}: merge queue removal unread: {failure:?}",
-                            self.owner, self.name
-                        )),
+                        // A removal older than the entry is an earlier one.
+                        Ok(why) => {
+                            self.memory.dequeued = why
+                                .filter(|d| !before(&d.at, &enqueued_at))
+                                .map(|d| (number, head, d));
+                        }
+                        Err(failure) => {
+                            crate::log(format_args!(
+                                "github.com/{}/{}#{number}: merge queue removal unread: {failure:?}",
+                                self.owner, self.name
+                            ));
+                            // The next reading asks again.
+                            self.memory.queued = Some((number, head, enqueued_at));
+                        }
                     }
                 }
             }
@@ -596,6 +630,10 @@ mod tests {
         queued: bool,
         head: &'static str,
         broken: bool,
+        /// Whether the commit the queue tests has its CI yet.
+        queue_ci: bool,
+        /// When PR 7 left the queue; `None` fails the query.
+        removed_at: Option<&'static str>,
     }
 
     /// A forge where `feat` has the open PR 7 on `main`, which requires
@@ -618,8 +656,11 @@ mod tests {
                 let queue = q.exists.then(|| json!({ "entries": { "nodes": nodes } }));
                 json!({ "data": { "repository": { "mergeQueue": queue } } })
             } else if line.starts_with("post /graphql") && request.contains("timelineitems") {
+                let Some(at) = q.removed_at else {
+                    return (502, vec![], String::new());
+                };
                 json!({ "data": { "repository": { "pullRequest": { "timelineItems": { "nodes": [
-                    { "reason": "CI failed", "createdAt": "2026-11-09T07:45:00Z" }] } } } } })
+                    { "reason": "CI failed", "createdAt": at }] } } } } })
             } else if line.starts_with("post /graphql") {
                 json!({ "data": { "repository": { "ref": { "refUpdateRule": {
                     "requiredStatusCheckContexts": ["check"] } } } } })
@@ -629,11 +670,11 @@ mod tests {
                 json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
                     "merged_at": null, "base": { "ref": "main" },
                     "head": { "ref": "feat", "sha": q.head, "repo": { "full_name": "o/r" } } }])
-            } else if line.contains("/actions/runs?head_sha=q1") {
+            } else if line.contains("/actions/runs?head_sha=q1") && q.queue_ci {
                 json!({ "workflow_runs": [{ "id": 2, "name": "CI", "path": "ci.yml",
                     "event": "merge_group", "check_suite_id": 20, "status": "in_progress",
                     "head_branch": "gh-readonly-queue/main/pr-7-abc", "created_at": "t" }] })
-            } else if line.contains("/commits/q1/check-runs") {
+            } else if line.contains("/commits/q1/check-runs") && q.queue_ci {
                 json!({ "check_runs": [{ "id": 1, "name": "check", "status": "in_progress",
                     "check_suite": { "id": 20 }, "app": { "slug": "github-actions" } }] })
             } else if line.contains("/actions/runs") {
@@ -656,6 +697,8 @@ mod tests {
             queued,
             head: "abc",
             broken: false,
+            queue_ci: true,
+            removed_at: Some("2026-11-09T07:45:00Z"),
         }))
     }
 
@@ -765,6 +808,44 @@ mod tests {
         assert_eq!(asked(&server, "timelineitems"), 1, "asked once");
         world.lock().unwrap().head = "def";
         assert_eq!(read_pr(&mut branch).await.dequeued, None, "a new head");
+    }
+
+    /// The commit the queue tests, before its CI shows up, expects one: a
+    /// required check is not missing yet.
+    #[tokio::test]
+    async fn the_queue_ci_is_expected_before_it_shows_up() {
+        let world = queue(true, true);
+        world.lock().unwrap().queue_ci = false;
+        let server = queue_forge(world).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        let entry = read_pr(&mut branch).await.queue.unwrap();
+        assert_eq!(
+            entry.detail(Instant::now())["ci"],
+            json!({ "state": "running", "required_state": "running", "sha": "q1" })
+        );
+        let past = Instant::now() + EXPECTED_FOR;
+        assert_eq!(entry.detail(past)["ci"]["required_state"], "missing");
+    }
+
+    /// Why a PR left the queue is asked again when the query failed, and
+    /// an earlier removal than the PR's last entry says nothing.
+    #[tokio::test]
+    async fn a_removal_is_asked_again_after_a_failure_and_must_be_the_last() {
+        let world = queue(true, true);
+        world.lock().unwrap().removed_at = None;
+        let server = queue_forge(world.clone()).await;
+        let mut branch = branch(&server, "o");
+        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        read_pr(&mut branch).await;
+        world.lock().unwrap().queued = false;
+        branch.queues.age(queue::FAST);
+        assert_eq!(read_pr(&mut branch).await.dequeued, None);
+        world.lock().unwrap().removed_at = Some("2026-11-09T07:30:00Z");
+        assert_eq!(read_pr(&mut branch).await.dequeued, None, "an earlier one");
+        assert_eq!(asked(&server, "timelineitems"), 2);
+        read_pr(&mut branch).await;
+        assert_eq!(asked(&server, "timelineitems"), 2, "answered: not again");
     }
 
     /// The provider follows a branch: its first reading reaches the core.

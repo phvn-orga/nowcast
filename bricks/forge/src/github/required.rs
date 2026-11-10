@@ -93,22 +93,27 @@ fn keep(
 
 /// The checks of the base's branch protection; none without protection.
 async fn protection(base: &Base<'_>) -> Result<Vec<String>, Failure> {
-    let body = json!({
-        "query": PROTECTION,
-        "variables": {
-            "owner": base.owner,
-            "name": base.name,
-            "ref": format!("refs/heads/{}", base.base),
-        },
+    let variables = json!({
+        "owner": base.owner,
+        "name": base.name,
+        "ref": format!("refs/heads/{}", base.base),
     });
+    let answer = graphql(base, PROTECTION, variables).await?;
+    let contexts =
+        &answer["data"]["repository"]["ref"]["refUpdateRule"]["requiredStatusCheckContexts"];
+    Ok(strings(contexts.as_array().into_iter().flatten()))
+}
+
+/// Answers `query` with `variables` on the base's repository; GraphQL
+/// errors are a failure.
+pub async fn graphql(base: &Base<'_>, query: &str, variables: Value) -> Result<Value, Failure> {
+    let body = json!({ "query": query, "variables": variables });
     let url = format!("{}/graphql", base.api);
     let answer = base.http.post(&url, base.token, HEADERS, &body).await?;
     if let Some(errors) = answer.get("errors") {
         return Err(Failure::Unreadable(format!("GraphQL errors: {errors}")));
     }
-    let contexts =
-        &answer["data"]["repository"]["ref"]["refUpdateRule"]["requiredStatusCheckContexts"];
-    Ok(strings(contexts.as_array().into_iter().flatten()))
+    Ok(answer)
 }
 
 /// The checks the `required_status_checks` rules of the base's rulesets

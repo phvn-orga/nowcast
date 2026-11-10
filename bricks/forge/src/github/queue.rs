@@ -15,8 +15,7 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::RHYTHM;
-use super::read::HEADERS;
-use super::required::Base;
+use super::required::{Base, graphql};
 use crate::model::Dequeued;
 use crate::tools::http::Failure;
 
@@ -122,9 +121,12 @@ async fn entries(base: &Base<'_>) -> Result<Vec<Entry>, Failure> {
 /// An entry read at `now`, in seconds: GitHub estimates the time left
 /// until it merges.
 fn entry(node: &Value, now: i64) -> Option<Entry> {
+    // To the minute: `now` drifts from GitHub's clock by a second from one
+    // reading to the next, which would publish a new estimate each time.
     let estimated = node["estimatedTimeToMerge"]
         .as_i64()
-        .and_then(|left| Timestamp::from_second(now.checked_add(left)?).ok());
+        .and_then(|left| now.checked_add(left))
+        .and_then(|at| Timestamp::from_second(at.saturating_add(30).div_euclid(60) * 60).ok());
     Some(Entry {
         number: node["pullRequest"]["number"].as_u64()?,
         state: node["state"].as_str()?.to_ascii_lowercase(),
@@ -146,14 +148,4 @@ pub async fn removal(base: &Base<'_>, number: u64) -> Result<Option<Dequeued>, F
             at: n["createdAt"].as_str()?.to_owned(),
         })
     }))
-}
-
-async fn graphql(base: &Base<'_>, query: &str, variables: Value) -> Result<Value, Failure> {
-    let body = json!({ "query": query, "variables": variables });
-    let url = format!("{}/graphql", base.api);
-    let answer = base.http.post(&url, base.token, HEADERS, &body).await?;
-    if let Some(errors) = answer.get("errors") {
-        return Err(Failure::Unreadable(format!("GraphQL errors: {errors}")));
-    }
-    Ok(answer)
 }
