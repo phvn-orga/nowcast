@@ -5,7 +5,7 @@ manifest_version = 1
 name = "forge"
 # The binary embeds this file with the workspace version in its place.
 version = "0.0.0"
-description = "A branch's PR and its pipelines, per job, and a repository's issues, on GitHub."
+description = "A branch's PR and its pipelines, per job, and a repository's issues, on GitHub and Azure DevOps."
 protocol = 1
 
 [run]

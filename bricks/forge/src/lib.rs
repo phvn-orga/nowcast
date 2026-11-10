@@ -10,8 +10,9 @@
 //!   output every provider maps its forge onto;
 //! - [`tools`] holds what a provider may use (conditional HTTP, a pace
 //!   machine, remote parsing), and nothing obliges it to;
-//! - [`github`] is the GitHub provider.
+//! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one.
 
+mod azure;
 mod github;
 mod model;
 mod provider;
@@ -29,6 +30,7 @@ use tokio::io::{Stdout, stdin, stdout};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::Instant;
 
+use crate::azure::Azure;
 use crate::github::GitHub;
 use crate::provider::Provider;
 use crate::registry::Core;
@@ -96,8 +98,11 @@ fn log(message: impl std::fmt::Display) {
 
 /// The providers the brick carries.
 fn providers(http: &Http) -> Vec<Box<dyn Provider>> {
-    let api = std::env::var(github::API_VAR).unwrap_or_else(|_| github::API.to_owned());
-    vec![Box::new(GitHub::new(http.clone(), api))]
+    let api = |var, default: &str| std::env::var(var).unwrap_or_else(|_| default.to_owned());
+    vec![
+        Box::new(GitHub::new(http.clone(), api(github::API_VAR, github::API))),
+        Box::new(Azure::new(http.clone(), api(azure::API_VAR, azure::API))),
+    ]
 }
 
 async fn serve() -> ExitCode {

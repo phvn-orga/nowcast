@@ -3,7 +3,9 @@
 //! `304` gives back the body kept from the last `200`. GitHub does not count
 //! a `304` against its rate limit. The cache is shared by every branch
 //! followed, so two readings of the same URL pay for it once. POST requests,
-//! for an API that only answers them (GraphQL), are not cached.
+//! for an API that only answers them (GraphQL), are not cached. A forge
+//! without `ETag` is read in full every time; the answer's headers say what
+//! is left of its limit.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,6 +64,17 @@ impl Http {
         token: &str,
         headers: &[(&str, &str)],
     ) -> Result<Arc<Value>, Failure> {
+        Ok(self.get_answer(url, token, headers).await?.0)
+    }
+
+    /// [`Http::get`], with the answer's headers, for a forge that says on a
+    /// successful answer how much of its limit is left.
+    pub async fn get_answer(
+        &self,
+        url: &str,
+        token: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Arc<Value>, HeaderMap), Failure> {
         // The body is taken with its ETag: a 304 gives back this one, even if
         // the cache was cleared meanwhile.
         let kept = self.cache.lock().unwrap().get(url).cloned();
@@ -70,14 +83,14 @@ impl Http {
             request = request.header(IF_NONE_MATCH, etag);
         }
         let response = send(request).await?;
+        let answer_headers = response.headers().clone();
         if response.status() == StatusCode::NOT_MODIFIED {
             return match kept {
-                Some((_, body)) => Ok(body),
+                Some((_, body)) => Ok((body, answer_headers)),
                 None => Err(Failure::Unreadable("304 without a kept answer".into())),
             };
         }
-        let etag = response
-            .headers()
+        let etag = answer_headers
             .get(ETAG)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
@@ -89,7 +102,7 @@ impl Http {
             }
             cache.insert(url.to_owned(), (etag, body.clone()));
         }
-        Ok(body)
+        Ok((body, answer_headers))
     }
 
     /// POSTs `body` as JSON to `url`, with `headers` and the bearer `token`,
@@ -101,11 +114,24 @@ impl Http {
         headers: &[(&str, &str)],
         body: &Value,
     ) -> Result<Value, Failure> {
+        Ok(self.post_answer(url, token, headers, body).await?.0)
+    }
+
+    /// [`Http::post`], with the answer's headers.
+    pub async fn post_answer(
+        &self,
+        url: &str,
+        token: &str,
+        headers: &[(&str, &str)],
+        body: &Value,
+    ) -> Result<(Value, HeaderMap), Failure> {
         let request = self
             .request(self.client.post(url), token, headers)
             .header(CONTENT_TYPE, "application/json")
             .body(body.to_string());
-        json(send(request).await?).await
+        let response = send(request).await?;
+        let answer_headers = response.headers().clone();
+        Ok((json(response).await?, answer_headers))
     }
 
     /// `request` with the bearer `token`, the user agent and `headers`.
@@ -135,11 +161,17 @@ async fn send(request: RequestBuilder) -> Result<Response, Failure> {
         .map_err(|e| Failure::Unreachable(e.to_string()))
 }
 
-/// The body of a successful answer, as JSON; any other status is a failure.
+/// The body of a successful answer, as JSON, `null` for a `204`; any other
+/// status is a failure.
 async fn json(response: Response) -> Result<Value, Failure> {
     let status = response.status();
     match status {
-        StatusCode::UNAUTHORIZED => return Err(Failure::Unauthorized),
+        // Azure DevOps answers a request it cannot authenticate with a sign-in
+        // page, as a 203.
+        StatusCode::UNAUTHORIZED | StatusCode::NON_AUTHORITATIVE_INFORMATION => {
+            return Err(Failure::Unauthorized);
+        }
+        StatusCode::NO_CONTENT => return Ok(Value::Null),
         StatusCode::NOT_FOUND | StatusCode::GONE => return Err(Failure::NotFound),
         StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
             return Err(match limit(response.headers()) {
@@ -185,6 +217,19 @@ fn limit(headers: &HeaderMap) -> Option<Option<Duration>> {
         );
     }
     None
+}
+
+/// Percent-encodes what a path segment or a query value cannot hold as is.
+pub fn encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -248,6 +293,8 @@ mod tests {
             l if l.contains("/401") => (401, vec![], String::new()),
             l if l.contains("/404") => (404, vec![], String::new()),
             l if l.contains("/410") => (410, vec![], String::new()),
+            l if l.contains("/203") => (203, vec![], "<html>sign in</html>".into()),
+            l if l.contains("/204") => (204, vec![], String::new()),
             l if l.contains("/limited") => (403, vec![("Retry-After", "7")], String::new()),
             l if l.contains("/forbidden") => (403, vec![], String::new()),
             _ => (200, vec![], "not json".into()),
@@ -261,6 +308,12 @@ mod tests {
         assert_eq!(get("/401").await, Err(Failure::Unauthorized));
         assert_eq!(get("/404").await, Err(Failure::NotFound));
         assert_eq!(get("/410").await, Err(Failure::NotFound));
+        assert_eq!(
+            get("/203").await,
+            Err(Failure::Unauthorized),
+            "a sign-in page"
+        );
+        assert_eq!(get("/204").await.unwrap().as_ref(), &Value::Null);
         assert_eq!(
             get("/limited").await,
             Err(Failure::Limited(Some(Duration::from_secs(7))))

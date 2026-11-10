@@ -42,7 +42,7 @@
     }
   },
   "properties": {
-    "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>." },
+    "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>, dev.azure.com/<organization>/<project>/<repository>." },
     "branch": { "type": "string" },
     "sha": { "type": ["string", "null"], "description": "The commit read: the open PR's head, else the branch's head; null without a commit, and the list is then empty." },
     "pr": { "type": ["integer", "null"], "description": "The open PR whose CI is read." },

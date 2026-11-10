@@ -5,7 +5,7 @@
     "time": { "type": ["string", "null"], "description": "RFC 3339." }
   },
   "properties": {
-    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub." },
+    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub, the project dev.azure.com/<organization>/<project> on Azure DevOps." },
     "number": { "type": "integer", "description": "The number subscribed to." },
     "title": { "type": ["string", "null"], "description": "Null while the issue was never read, such as a number that is no issue." },
     "type": { "type": ["string", "null"], "description": "The item's type as the forge names it; null when it gives none." },

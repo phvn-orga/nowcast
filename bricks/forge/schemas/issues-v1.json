@@ -15,7 +15,7 @@
     }
   },
   "properties": {
-    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub." },
+    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub, the project dev.azure.com/<organization>/<project> on Azure DevOps." },
     "account": { "type": ["string", "null"], "description": "The account that reads; null before the first reading." },
     "mine": { "type": "array", "items": { "$ref": "#/$defs/issue" }, "description": "Open issues assigned to the account, the most recently created first." },
     "others": { "type": "array", "items": { "$ref": "#/$defs/issue" }, "description": "The other open issues, the most recently created first." },

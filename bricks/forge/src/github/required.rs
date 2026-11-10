@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::RHYTHM;
-use super::read::{HEADERS, encode};
+use super::read::HEADERS;
 use crate::model::Ci;
-use crate::tools::http::{Failure, Http};
+use crate::tools::http::{Failure, Http, encode};
 
 const PROTECTION: &str = "query($owner: String!, $name: String!, $ref: String!) { \
     repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { \

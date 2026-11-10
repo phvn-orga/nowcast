@@ -14,7 +14,7 @@
     }
   },
   "properties": {
-    "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>." },
+    "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>, dev.azure.com/<organization>/<project>/<repository>." },
     "branch": { "type": "string" },
     "head_sha": { "type": ["string", "null"], "description": "The branch's head on the forge; null when the branch is not there." },
     "pr": {

@@ -298,6 +298,28 @@ fn rollup(states: impl Iterator<Item = State>, missing: bool, expected: bool) ->
     }
 }
 
+/// The state of a group of jobs that has none of its own.
+pub fn summary(jobs: &[Job]) -> State {
+    let has = |s: State| jobs.iter().any(|j| j.state == s);
+    if has(State::Fail) {
+        State::Fail
+    } else if has(State::Cancelled) {
+        State::Cancelled
+    } else if has(State::Running) {
+        State::Running
+    } else if has(State::Queued) {
+        State::Queued
+    } else if has(State::Waiting) {
+        State::Waiting
+    } else if has(State::Pass) {
+        State::Pass
+    } else if !jobs.is_empty() && jobs.iter().all(|j| j.state == State::Skipped) {
+        State::Skipped
+    } else {
+        State::Unknown
+    }
+}
+
 fn pipeline_json(p: &Pipeline) -> Value {
     json!({
         "id": p.id,

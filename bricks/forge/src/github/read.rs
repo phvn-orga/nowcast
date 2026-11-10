@@ -6,9 +6,9 @@
 
 use serde_json::Value;
 
-use crate::model::{Ci, Job, Pipeline, Pr, State, Trigger};
+use crate::model::{Ci, Job, Pipeline, Pr, State, Trigger, summary};
 use crate::provider::BranchReading;
-use crate::tools::http::{Failure, Http};
+use crate::tools::http::{Failure, Http, encode};
 
 pub(super) const HEADERS: &[(&str, &str)] = &[
     ("accept", "application/vnd.github+json"),
@@ -95,19 +95,6 @@ pub async fn ci(
         missing_required: Vec::new(),
         expected_until: None,
     })
-}
-
-/// Percent-encodes what a path segment or a query value cannot hold as is.
-pub(super) fn encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// The open PR whose head is `branch` of this very repository: a branch of
@@ -278,28 +265,6 @@ fn pipelines(runs: &Value, checks: &Value, statuses: &Value, pr: Option<u64>) ->
         });
     }
     out
-}
-
-/// The state of a group of jobs that has none of its own.
-fn summary(jobs: &[Job]) -> State {
-    let has = |s: State| jobs.iter().any(|j| j.state == s);
-    if has(State::Fail) {
-        State::Fail
-    } else if has(State::Cancelled) {
-        State::Cancelled
-    } else if has(State::Running) {
-        State::Running
-    } else if has(State::Queued) {
-        State::Queued
-    } else if has(State::Waiting) {
-        State::Waiting
-    } else if has(State::Pass) {
-        State::Pass
-    } else if !jobs.is_empty() && jobs.iter().all(|j| j.state == State::Skipped) {
-        State::Skipped
-    } else {
-        State::Unknown
-    }
 }
 
 fn job(c: &Value) -> Job {

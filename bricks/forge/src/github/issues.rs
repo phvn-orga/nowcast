@@ -13,10 +13,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 use super::read::HEADERS;
-use super::{RHYTHM, Tokens, failed, owner_token, wait_or_refresh};
+use super::{RHYTHM, Tokens, failed, owner_token};
 use crate::model::{Issue, Issues};
 use crate::provider::{Failure, Outcome, Reading, Updates};
 use crate::tools::http::{self, Http};
+use crate::tools::pace::wait_or_refresh;
 
 /// The issues one page lists; two pages at most are read.
 const PAGE: usize = 100;

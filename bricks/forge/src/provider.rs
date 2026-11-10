@@ -15,11 +15,12 @@ use crate::model::{Ci, Issue, Issues, Pr};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
     /// The repository's identity, the same for every spelling of its remote:
-    /// `github.com/<owner>/<name>`.
+    /// `github.com/<owner>/<name>`, `dev.azure.com/<org>/<project>/<name>`.
     pub id: String,
     /// The identity of what holds the repository's issues, which several
     /// repositories may share: `github.com/<owner>/<name>` on GitHub, the
-    /// repository itself.
+    /// repository itself; `dev.azure.com/<org>/<project>` on Azure DevOps,
+    /// the project.
     pub tracker: String,
     /// The remote as the first subscriber wrote it.
     pub remote: String,

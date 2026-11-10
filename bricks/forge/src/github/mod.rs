@@ -23,7 +23,7 @@ use tokio::time::Instant;
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, wait_or_refresh};
 use crate::tools::remote;
 use issues::{Accounts, Tracker};
 use queue::Queues;
@@ -261,32 +261,6 @@ fn failed(
         http::Failure::Unreachable(why) => {
             crate::log(format_args!("{at}: unreachable: {why}"));
             (Failure::Unreachable, None)
-        }
-    }
-}
-
-/// Waits until `deadline`, or for a `refresh`, which ends the wait unless a
-/// rate limit holds it (`limited`); refreshes that piled up count as one,
-/// each calling `refreshed`. `false` once the core is gone.
-async fn wait_or_refresh(
-    deadline: Instant,
-    refreshes: &mut UnboundedReceiver<()>,
-    limited: bool,
-    mut refreshed: impl FnMut(),
-) -> bool {
-    loop {
-        tokio::select! {
-            () = tokio::time::sleep_until(deadline) => return true,
-            refresh = refreshes.recv() => {
-                if refresh.is_none() {
-                    return false;
-                }
-                while refreshes.try_recv().is_ok() {}
-                refreshed();
-                if !limited {
-                    return true;
-                }
-            }
         }
     }
 }
