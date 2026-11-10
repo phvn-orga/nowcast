@@ -58,7 +58,9 @@ impl Tracker {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&self) -> (Outcome, Option<Duration>) {
-        let Some(token) = owner_token(&self.tokens, &self.credentials, &self.owner).await else {
+        let Some(token) =
+            owner_token(&self.tokens, &self.accounts, &self.credentials, &self.owner).await
+        else {
             return (Err(Failure::NoCredentials), None);
         };
         let read = match self.number {
@@ -204,7 +206,11 @@ mod tests {
 
     fn tracker(server: &Server, number: Option<u64>) -> Tracker {
         let tokens = Tokens::default();
-        tokens.lock().unwrap().insert("o".into(), "t".into());
+        tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         Tracker {
             http: Http::new().unwrap(),
             api: server.base(),
@@ -388,7 +394,7 @@ mod tests {
             .unwrap()
             .insert("t".into(), "me".into());
         assert_eq!(denied.read_once().await, (Err(Failure::Unauthorized), None));
-        assert!(denied.tokens.lock().unwrap().is_empty());
+        assert!(denied.tokens.lock().unwrap().by_owner.is_empty());
         assert!(denied.accounts.lock().unwrap().is_empty());
         assert_eq!(
             tracker(&server, Some(2)).read_once().await,
@@ -405,7 +411,12 @@ mod tests {
         let github = GitHub::new(Http::new().unwrap(), server.base(), credentials);
         let repo = github.recognise("git@github.com:O/R.git").unwrap();
         assert_eq!(repo.tracker, "github.com/o/r");
-        github.tokens.lock().unwrap().insert("O".into(), "t".into());
+        github
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("O".into(), "t".into());
         let (tx, mut rx) = unbounded_channel();
         let watch = github.follow_issue(&repo, 52, Updates::new(4, tx));
         let (target, outcome) = rx.recv().await.unwrap();

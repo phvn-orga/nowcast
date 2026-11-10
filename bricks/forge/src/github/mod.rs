@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::credentials::{Credentials, Forge, Source};
+use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
@@ -48,7 +48,14 @@ pub const RHYTHM: Rhythm = Rhythm {
 };
 
 /// The `Authorization` header by login, shared by every branch followed.
-type Tokens = Arc<Mutex<HashMap<String, String>>>;
+type Tokens = Arc<Mutex<Kept>>;
+
+/// The tokens obtained, and the configuration's stamp when they were.
+#[derive(Default)]
+struct Kept {
+    stamp: Stamp,
+    by_owner: HashMap<String, String>,
+}
 
 pub struct GitHub {
     http: Http,
@@ -120,6 +127,7 @@ impl Provider for GitHub {
             api: self.api.clone(),
             credentials: self.credentials.clone(),
             tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
             required: self.required.clone(),
             queues: self.queues.clone(),
             memory: Memory::default(),
@@ -145,6 +153,7 @@ struct Branch {
     api: String,
     credentials: Credentials,
     tokens: Tokens,
+    accounts: Accounts,
     required: Required,
     queues: Queues,
     memory: Memory,
@@ -205,7 +214,9 @@ impl Branch {
 
     /// One reading, and how long a rate limit asks to wait.
     async fn read_once(&mut self) -> (Result<BranchReading, Failure>, Option<Duration>) {
-        let Some(token) = owner_token(&self.tokens, &self.credentials, &self.owner).await else {
+        let Some(token) =
+            owner_token(&self.tokens, &self.accounts, &self.credentials, &self.owner).await
+        else {
             return (Err(Failure::NoCredentials), None);
         };
         let read = read::read(
@@ -232,18 +243,33 @@ impl Branch {
 }
 
 /// The token that reads `owner`'s repositories, kept in `tokens` once its
-/// source gave it; `None` without one. Until then, each reading reads the
-/// configuration again.
-async fn owner_token(tokens: &Tokens, credentials: &Credentials, owner: &str) -> Option<String> {
-    let kept = tokens.lock().unwrap().get(owner).cloned();
-    if kept.is_some() {
-        return kept;
+/// source gave it, until the configuration changes; `None` without one.
+/// Until then, each reading reads the configuration again. A new
+/// configuration drops every token kept, and the accounts they read as.
+async fn owner_token(
+    tokens: &Tokens,
+    accounts: &Accounts,
+    credentials: &Credentials,
+    owner: &str,
+) -> Option<String> {
+    let stamp = credentials.stamp();
+    {
+        let mut kept = tokens.lock().unwrap();
+        if kept.stamp != stamp {
+            kept.stamp = stamp;
+            kept.by_owner.clear();
+            accounts.lock().unwrap().clear();
+        }
+        if let Some(token) = kept.by_owner.get(owner) {
+            return Some(token.clone());
+        }
     }
     let token = token(credentials, owner).await?;
-    tokens
-        .lock()
-        .unwrap()
-        .insert(owner.to_owned(), token.clone());
+    let mut kept = tokens.lock().unwrap();
+    // Not kept when the configuration changed while it was read.
+    if kept.stamp == stamp {
+        kept.by_owner.insert(owner.to_owned(), token.clone());
+    }
     Some(token)
 }
 
@@ -258,7 +284,7 @@ fn failed(
 ) -> (Failure, Option<Duration>) {
     match failure {
         http::Failure::Unauthorized => {
-            tokens.lock().unwrap().remove(owner);
+            tokens.lock().unwrap().by_owner.remove(owner);
             (Failure::Unauthorized, None)
         }
         http::Failure::NotFound => (Failure::NotFound, None),
@@ -583,6 +609,7 @@ mod tests {
             api: server.base(),
             credentials: crate::credentials::testing::none(),
             tokens: Tokens::default(),
+            accounts: Accounts::default(),
             required: Required::default(),
             queues: Queues::default(),
             memory: Memory::default(),
@@ -622,6 +649,61 @@ mod tests {
         assert_eq!(server.requests().len(), 2, "nothing sent without a token");
     }
 
+    /// A token that serves is kept while the configuration stays; a new
+    /// configuration reaches the next reading: a new token, another source,
+    /// no source.
+    #[tokio::test]
+    async fn a_new_configuration_drops_the_tokens_kept() {
+        if std::env::var(TOKEN_VAR).is_ok() {
+            return;
+        }
+        let server = Server::start(|request| {
+            if request.contains("authorization: bearer good") {
+                (404, vec![], String::new())
+            } else {
+                (401, vec![], String::new())
+            }
+        })
+        .await;
+        let fake = testing::Fake::new();
+        let mut branch = branch(&server, "o");
+        branch.credentials = fake.credentials.clone();
+        let not_found = (Err(Failure::NotFound), None);
+        fake.choose(Forge::GitHub, Some(Source::Token), Some("good"));
+        assert_eq!(branch.read_once().await, not_found);
+        crate::credentials::Secrets::delete(&*fake.secrets, Forge::GitHub)
+            .await
+            .unwrap();
+        assert_eq!(branch.read_once().await, not_found, "kept");
+        branch
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("Bearer good".into(), "me".into());
+        fake.choose(Forge::GitHub, Some(Source::Token), Some("new"));
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::Unauthorized), None),
+            "a new token"
+        );
+        assert!(branch.accounts.lock().unwrap().is_empty());
+        // What `gh` would have given, without running it.
+        fake.choose(Forge::GitHub, Some(Source::Cli), None);
+        let stamp = fake.credentials.stamp();
+        *branch.tokens.lock().unwrap() = Kept {
+            stamp,
+            by_owner: HashMap::from([("o".into(), "Bearer gh".into())]),
+        };
+        fake.choose(Forge::GitHub, Some(Source::Token), Some("good"));
+        assert_eq!(branch.read_once().await, not_found, "another source");
+        fake.choose(Forge::GitHub, None, None);
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::NoCredentials), None),
+            "no source"
+        );
+    }
+
     /// A refused token is asked for again; a rate limit is waited out.
     #[tokio::test]
     async fn failures_become_the_source_status() {
@@ -638,14 +720,16 @@ mod tests {
             .tokens
             .lock()
             .unwrap()
+            .by_owner
             .insert("denied".into(), "old".into());
         assert_eq!(denied.read_once().await, (Err(Failure::Unauthorized), None));
-        assert!(denied.tokens.lock().unwrap().is_empty());
+        assert!(denied.tokens.lock().unwrap().by_owner.is_empty());
         let mut limited = branch(&server, "busy");
         limited
             .tokens
             .lock()
             .unwrap()
+            .by_owner
             .insert("busy".into(), "t".into());
         assert_eq!(
             limited.read_once().await,
@@ -710,7 +794,12 @@ mod tests {
     async fn the_jobs_of_an_open_pr_say_whether_they_are_required() {
         let server = forge(true).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let (Ok(reading), None) = branch.read_once().await else {
             panic!("the reading failed");
         };
@@ -730,7 +819,12 @@ mod tests {
     async fn without_an_open_pr_nothing_is_required() {
         let server = forge(false).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let (Ok(reading), None) = branch.read_once().await else {
             panic!("the reading failed");
         };
@@ -850,7 +944,12 @@ mod tests {
     async fn a_pr_in_the_queue_carries_its_entry_and_the_queue_ci() {
         let server = queue_forge(queue(true, true)).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let pr = read_pr(&mut branch).await;
         let mut entry = pr.queue.unwrap().detail(Instant::now());
         assert!(entry["estimated_merge_at"].is_string());
@@ -881,7 +980,12 @@ mod tests {
     async fn a_base_without_a_queue_is_asked_at_the_normal_pace() {
         let server = queue_forge(queue(false, false)).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let pr = read_pr(&mut branch).await;
         assert_eq!((pr.queue, pr.dequeued), (None, None));
         read_pr(&mut branch).await;
@@ -900,7 +1004,12 @@ mod tests {
         world.lock().unwrap().broken = true;
         let server = queue_forge(world).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         assert_eq!(read_pr(&mut branch).await.queue, None);
     }
 
@@ -911,7 +1020,12 @@ mod tests {
         let world = queue(true, true);
         let server = queue_forge(world.clone()).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         read_pr(&mut branch).await;
         world.lock().unwrap().queued = false;
         branch.queues.age(queue::FAST);
@@ -945,7 +1059,12 @@ mod tests {
         world.lock().unwrap().queue_ci_lost = true;
         let server = queue_forge(world.clone()).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let (Ok(reading), None) = branch.read_once().await else {
             panic!("the reading failed");
         };
@@ -970,7 +1089,12 @@ mod tests {
         world.lock().unwrap().queue_ci = false;
         let server = queue_forge(world).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let entry = read_pr(&mut branch).await.queue.unwrap();
         assert_eq!(
             entry.detail(Instant::now())["ci"],
@@ -988,7 +1112,12 @@ mod tests {
         world.lock().unwrap().removed_at = None;
         let server = queue_forge(world.clone()).await;
         let mut branch = branch(&server, "o");
-        branch.tokens.lock().unwrap().insert("o".into(), "t".into());
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         read_pr(&mut branch).await;
         world.lock().unwrap().queued = false;
         branch.queues.age(queue::FAST);
@@ -1020,7 +1149,12 @@ mod tests {
         })
         .await;
         let github = GitHub::new(Http::new().unwrap(), server.base(), testing::none());
-        github.tokens.lock().unwrap().insert("o".into(), "t".into());
+        github
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
         let repo = github.recognise("git@github.com:o/r.git").unwrap();
         assert_eq!(repo.id, "github.com/o/r");
         let (tx, mut rx) = unbounded_channel();

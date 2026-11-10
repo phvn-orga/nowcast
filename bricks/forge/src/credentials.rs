@@ -7,9 +7,11 @@
 
 use std::future::Future;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +116,13 @@ impl Config {
     }
 }
 
+/// The configuration file as seen from outside: its modification time,
+/// inode and size, `None` when it is absent. Each configuration rewrites the
+/// file whole, a new token included, so a token obtained under one stamp may
+/// come from a source no longer chosen under another.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp(Option<(Option<SystemTime>, u64, u64)>);
+
 /// A future the [`Secrets`] trait returns.
 pub type Pending<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -162,6 +171,15 @@ impl Credentials {
                 None
             }
         }
+    }
+
+    /// The configuration file's stamp, read anew.
+    pub fn stamp(&self) -> Stamp {
+        let metadata = self
+            .config
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok());
+        Stamp(metadata.map(|m| (m.modified().ok(), m.ino(), m.len())))
     }
 
     /// The token the user gave for `forge`, from the keyring.

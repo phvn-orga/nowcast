@@ -48,7 +48,8 @@ pub fn enable(
         && let Some(command) = &loaded.configure
     {
         let name = loaded.name.as_str();
-        if !io::stdin().is_terminal() {
+        // Its prompts read stdin and draw on stderr.
+        if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
             unconfigured = Some(name);
         } else if let Err(e) = configure_with(command, &loaded.dir) {
             if !force {

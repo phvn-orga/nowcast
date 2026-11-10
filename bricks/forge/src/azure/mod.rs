@@ -23,7 +23,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::credentials::{Credentials, Forge, Source};
+use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::State;
 use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http, encode};
@@ -66,9 +66,10 @@ const FRESH_FOR: Duration = Duration::from_secs(3);
 /// The budget of a 5-minute window, in TSTU, when an answer does not say.
 const BUDGET: f64 = 200.0;
 
-/// The `Authorization` header every reading shares, and when to ask for a
-/// new one: `None` for a token that does not expire. `None` until asked.
-type Token = Arc<tokio::sync::Mutex<Option<(String, Option<Instant>)>>>;
+/// The `Authorization` header every reading shares, when to ask for a new
+/// one (`None` for a token that does not expire), and the configuration's
+/// stamp when it was obtained. `None` until asked.
+type Token = Arc<tokio::sync::Mutex<Option<(String, Option<Instant>, Stamp)>>>;
 
 /// Answers read for one branch that serve the others for a while: each
 /// path's answer, and when it was read.
@@ -291,18 +292,26 @@ fn decode(s: &str) -> Option<String> {
 }
 
 /// The `Authorization` header, kept until shortly before its token
-/// expires, then asked for again; `None` when no source is chosen, or the
-/// source gives no token. Until one comes, each reading reads the
-/// configuration again.
+/// expires or until the configuration changes, then asked for again; `None`
+/// when no source is chosen, or the source gives no token. Until one comes,
+/// each reading reads the configuration again. A new configuration also
+/// drops the accounts the kept token read as.
 async fn token(context: &Context) -> Option<String> {
+    let stamp = context.credentials.stamp();
     let mut kept = context.token.lock().await;
-    if let Some((token, renew)) = kept.as_ref()
-        && renew.is_none_or(|at| Instant::now() < at)
-    {
-        return Some(token.clone());
+    match kept.as_ref() {
+        Some((token, renew, seen))
+            if *seen == stamp && renew.is_none_or(|at| Instant::now() < at) =>
+        {
+            return Some(token.clone());
+        }
+        Some((_, _, seen)) if *seen != stamp => context.accounts.lock().unwrap().clear(),
+        _ => {}
     }
-    *kept = ask(&context.credentials).await;
-    kept.as_ref().map(|(token, _)| token.clone())
+    *kept = ask(&context.credentials)
+        .await
+        .map(|(token, renew)| (token, renew, stamp));
+    kept.as_ref().map(|(token, _, _)| token.clone())
 }
 
 /// The header from [`TOKEN_VAR`], or else from the source the user chose,
@@ -751,18 +760,18 @@ mod tests {
             branch: "feat".into(),
             memory: read::Memory::default(),
         };
-        *azure.context.token.lock().await = Some(("t".into(), None));
+        *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
         assert_eq!(
             branch("denied").read_once().await,
             (Err(Failure::Unauthorized), None)
         );
         assert!(azure.context.token.lock().await.is_none());
-        *azure.context.token.lock().await = Some(("t".into(), None));
+        *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
         assert_eq!(
             branch("busy").read_once().await,
             (Err(Failure::RateLimited), Some(Duration::from_secs(60)))
         );
-        let expired = Some(("t".into(), Some(Instant::now())));
+        let expired = Some(("t".into(), Some(Instant::now()), Stamp::default()));
         *azure.context.token.lock().await = expired;
         if std::env::var(TOKEN_VAR).is_err() {
             assert_eq!(
@@ -807,11 +816,73 @@ mod tests {
         assert_eq!(branch.read_once().await, (Err(Failure::Unauthorized), None));
         fake.choose(Forge::Azure, Some(Source::Token), Some("good"));
         assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
-        fake.choose(Forge::Azure, None, None);
+        crate::credentials::Secrets::delete(&*fake.secrets, Forge::Azure)
+            .await
+            .unwrap();
         assert_eq!(
             branch.read_once().await,
             (Err(Failure::NotFound), None),
-            "a token that serves is kept"
+            "a token that serves is kept while the configuration stays"
+        );
+    }
+
+    /// A new configuration reaches the next reading, though the token kept
+    /// still serves: a new token, another source, no source.
+    #[tokio::test]
+    async fn a_new_configuration_drops_the_token_kept() {
+        if std::env::var(TOKEN_VAR).is_ok() {
+            return;
+        }
+        let server = Server::start(|request| {
+            if request.contains("authorization: basic omdvb2q=") {
+                (404, vec![], String::new())
+            } else {
+                (401, vec![], String::new())
+            }
+        })
+        .await;
+        let fake = credentials::testing::Fake::new();
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            fake.credentials.clone(),
+        );
+        let mut branch = Branch {
+            context: azure.context.clone(),
+            names: names("o", "p", "r").unwrap(),
+            branch: "feat".into(),
+            memory: read::Memory::default(),
+        };
+        fake.choose(Forge::Azure, Some(Source::Token), Some("good"));
+        assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
+        azure
+            .context
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("old".into(), "me".into());
+        fake.choose(Forge::Azure, Some(Source::Token), Some("new"));
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::Unauthorized), None),
+            "a new token"
+        );
+        assert!(azure.context.accounts.lock().unwrap().is_empty());
+        // What `az` would have given, without running it.
+        fake.choose(Forge::Azure, Some(Source::Cli), None);
+        let stamp = fake.credentials.stamp();
+        *azure.context.token.lock().await = Some(("Bearer az".into(), None, stamp));
+        fake.choose(Forge::Azure, Some(Source::Token), Some("good"));
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::NotFound), None),
+            "another source"
+        );
+        fake.choose(Forge::Azure, None, None);
+        assert_eq!(
+            branch.read_once().await,
+            (Err(Failure::NoCredentials), None),
+            "no source"
         );
     }
 
@@ -833,7 +904,7 @@ mod tests {
             server.base(),
             credentials::testing::none(),
         );
-        *azure.context.token.lock().await = Some(("t".into(), None));
+        *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
         let repo = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
         assert_eq!(repo.id, "dev.azure.com/o/p/r");
         let (tx, mut rx) = unbounded_channel();

@@ -430,7 +430,8 @@ mod tests {
             server.base(),
             crate::credentials::testing::none(),
         );
-        *azure.context.token.lock().await = Some(("t".into(), None));
+        *azure.context.token.lock().await =
+            Some(("t".into(), None, crate::credentials::Stamp::default()));
         Tracker {
             context: azure.context,
             names: Names {
