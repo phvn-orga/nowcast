@@ -5,8 +5,9 @@
 //! the build Azure DevOps shows on the PR (`context.buildId`), and requires
 //! all of its jobs when it is blocking; a status policy requires one PR
 //! status. The PR's other builds count when they tested its merge commit
-//! (`lastMergeCommit`), and its statuses form one `external` pipeline.
-//! Without an open PR, the CI is that of the builds of the branch's head.
+//! (`lastMergeCommit`), the branch's builds when they tested its head, and
+//! its statuses form one `external` pipeline. Without an open PR, the CI is
+//! that of the builds of the branch's head.
 //! Azure DevOps has no merge queue: `queue` is always `None`.
 
 use std::collections::HashSet;
@@ -44,7 +45,7 @@ pub async fn read(
     let found = find_pr(client, names, branch).await?;
     let (head_sha, ci) = match found.as_ref().filter(|(pr, _)| pr.is_open()) {
         Some((pr, raw)) => {
-            let ci = pr_ci(client, names, pr, raw, memory).await?;
+            let ci = pr_ci(client, names, branch, pr, raw, memory).await?;
             (Some(pr.head_sha.clone()), Some(ci))
         }
         None => {
@@ -180,6 +181,11 @@ fn builds_path(names: &Names, git_ref: &str) -> String {
     )
 }
 
+/// The path listing the builds of `branch`.
+fn branch_builds_path(names: &Names, branch: &str) -> String {
+    builds_path(names, &format!("refs/heads/{branch}"))
+}
+
 /// The CI of `sha`, the head of `branch` without an open PR: its builds.
 /// Nothing is required: the requirement comes from a PR's policies.
 async fn branch_ci(
@@ -188,9 +194,7 @@ async fn branch_ci(
     branch: &str,
     sha: &str,
 ) -> Result<Ci, Failure> {
-    let builds = client
-        .get(&builds_path(names, &format!("refs/heads/{branch}")))
-        .await?;
+    let builds = client.get(&branch_builds_path(names, branch)).await?;
     let mut pipelines = Vec::new();
     for build in latest(&builds, sha, &HashSet::new()) {
         pipelines.push(build_pipeline(client, names, &build, None).await?);
@@ -344,7 +348,9 @@ fn policies(evaluations: &Value) -> Policies {
                 let name = settings["statusName"].as_str().unwrap_or_default();
                 policies.statuses.push(StatusPolicy {
                     context: context_name(settings["statusGenre"].as_str(), name),
-                    blocking,
+                    // A policy whose path filter does not match requires
+                    // nothing.
+                    blocking: blocking && e["status"] != "notApplicable",
                 });
             }
             _ => {}
@@ -390,12 +396,14 @@ fn evaluation_state(status: Option<&str>, waits: bool) -> State {
     }
 }
 
-/// The CI of an open PR: its build policies, its other builds on its merge
-/// commit, and its statuses. With an open PR, the policies say what is
-/// required: every other job is not.
+/// The CI of an open PR: its build policies, those whose path filter does
+/// not match included, its other builds on its merge commit, the builds of
+/// `branch` on its head, and its statuses. With an open PR, the policies say
+/// what is required: every other job is not.
 async fn pr_ci(
     client: &Client<'_>,
     names: &Names,
+    branch: &str,
     pr: &Pr,
     raw: &Value,
     memory: &mut Memory,
@@ -406,19 +414,21 @@ async fn pr_ci(
     let artifact = format!("vstfs:///CodeReview/CodeReviewId/{project}/{}", pr.number);
     let merge_ref = format!("refs/pull/{}/merge", pr.number);
     let evaluations = format!(
-        "{}/policy/evaluations?artifactId={}&api-version=7.1-preview.1",
+        "{}/policy/evaluations?artifactId={}&includeNotApplicable=true&api-version=7.1-preview.1",
         names.project_api(),
         encode(&artifact)
     );
     let builds = builds_path(names, &merge_ref);
+    let branch_builds = branch_builds_path(names, branch);
     let statuses = format!(
         "{}/pullRequests/{}/statuses?{VERSION}",
         names.repo_api(),
         pr.number
     );
-    let (evaluations, builds, statuses) = tokio::try_join!(
+    let (evaluations, builds, branch_builds, statuses) = tokio::try_join!(
         client.get(&evaluations),
         client.get(&builds),
+        client.get(&branch_builds),
         client.get(&statuses),
     )?;
     let policies = policies(&evaluations);
@@ -427,13 +437,26 @@ async fn pr_ci(
         let pipeline = policy_pipeline(client, names, &builds, policy, &merge_ref).await?;
         pipelines.push(pipeline);
     }
+    // A policy whose path filter does not match designates no build: its
+    // definition's builds still count.
     let covered = policies
         .builds
         .iter()
+        .filter(|p| p.state != State::Skipped)
         .filter_map(|p| p.definition)
         .collect();
-    if let Some(merge) = raw["lastMergeCommit"]["commitId"].as_str() {
-        for build in latest(&builds, merge, &covered) {
+    let mut others = match raw["lastMergeCommit"]["commitId"].as_str() {
+        Some(merge) => latest(&builds, merge, &covered),
+        None => Vec::new(),
+    };
+    others.extend(latest(&branch_builds, &pr.head_sha, &HashSet::new()));
+    for build in others {
+        let published = |p: &Pipeline| {
+            build["id"]
+                .as_u64()
+                .is_some_and(|id| p.id == id.to_string())
+        };
+        if !pipelines.iter().any(published) {
             pipelines.push(build_pipeline(client, names, &build, Some(false)).await?);
         }
     }
@@ -450,9 +473,10 @@ async fn pr_ci(
 }
 
 /// The pipeline of a build policy: the build its evaluation designates,
-/// every job required when the policy blocks; without a build, or expired,
-/// a pipeline without job at the evaluation's state, which carries the
-/// requirement.
+/// every job required when the policy blocks; without a build, expired, or
+/// not applicable, a pipeline without job at the evaluation's state, which
+/// carries the requirement. A queued evaluation still naming a completed
+/// build names the previous one: the next has not shown up yet.
 async fn policy_pipeline(
     client: &Client<'_>,
     names: &Names,
@@ -461,7 +485,8 @@ async fn policy_pipeline(
     merge_ref: &str,
 ) -> Result<Pipeline, Failure> {
     let required = Some(policy.blocking);
-    if let Some(id) = policy.build.filter(|_| policy.state != State::Waiting) {
+    let designates = !matches!(policy.state, State::Waiting | State::Skipped);
+    if let Some(id) = policy.build.filter(|_| designates) {
         let listed = list(builds).iter().find(|b| b["id"] == id).cloned();
         let build = match listed {
             Some(build) => Some(build),
@@ -474,7 +499,8 @@ async fn policy_pipeline(
                 }
             }
         };
-        if let Some(build) = build {
+        let stale = |b: &Value| policy.state == State::Queued && b["status"] == "completed";
+        if let Some(build) = build.filter(|b| !stale(b)) {
             return build_pipeline(client, names, &build, required).await;
         }
     }
@@ -789,13 +815,31 @@ mod tests {
     /// policy designates build 40: two stages, `build` with the jobs `a`
     /// and `b`, `deploy` waiting for an approval. Build 41 of another
     /// definition tested the merge commit; build 39, an older merge commit.
+    /// Build 42 of the branch tested its head; build 43, an older head. A
+    /// blocking build policy and a blocking status policy do not apply.
     async fn forge() -> Server {
         Server::start(|request| {
             let line = request.lines().next().unwrap_or_default().to_owned();
             let body = if line.contains("/pullrequests?searchcriteria.status=active") {
                 json!({ "value": [raw_pr("active")] })
             } else if line.contains("/policy/evaluations?") {
-                json!({ "value": [evaluation("e1", "running", json!({ "buildId": 40 }), true)] })
+                let mut skipped = evaluation("e2", "notApplicable", json!({ "buildId": 38 }), true);
+                skipped["configuration"]["settings"]["buildDefinitionId"] = json!(15);
+                json!({ "value": [
+                    evaluation("e1", "running", json!({ "buildId": 40 }), true),
+                    skipped,
+                    { "evaluationId": "e3", "status": "notApplicable",
+                      "configuration": { "isEnabled": true, "isBlocking": true,
+                        "type": { "id": STATUS_POLICY },
+                        "settings": { "statusGenre": "ci", "statusName": "scan" } } },
+                ]})
+            } else if line.contains("/build/builds?branchname=refs%2fheads%2ffeat") {
+                let build = |id: u64, sha: &str| {
+                    json!({ "id": id, "status": "notStarted", "reason": "individualCI",
+                        "definition": { "id": 12 }, "sourceVersion": sha,
+                        "sourceBranch": "refs/heads/feat" })
+                };
+                json!({ "value": [build(43, "old"), build(42, "abc")] })
             } else if line.contains("/build/builds?branchname=refs%2fpull%2f7%2fmerge") {
                 let build = |id: u64, definition: u64, sha: &str| {
                     json!({ "id": id, "status": "inProgress", "reason": "pullRequest",
@@ -855,8 +899,10 @@ mod tests {
     }
 
     /// The build of a blocking policy has its Phases as jobs, under their
-    /// stage, all required; another build on the merge commit is not
-    /// required; one on an older merge commit is left out.
+    /// stage, all required; another build on the merge commit, and one of
+    /// the branch on its head, are not required; one on an older merge
+    /// commit or head is left out. A policy that does not apply is skipped
+    /// and requires nothing.
     #[tokio::test]
     async fn a_blocking_policy_requires_every_job_of_its_build() {
         let server = forge().await;
@@ -865,7 +911,22 @@ mod tests {
         let ci = reading.ci.unwrap();
         assert_eq!(ci.sha, "abc", "the PR's head");
         let ids: Vec<_> = ci.pipelines.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["40", "41"]);
+        assert_eq!(ids, ["40", "38", "41", "42"]);
+        let skipped = &ci.pipelines[1];
+        assert_eq!(
+            (skipped.state, skipped.required),
+            (State::Skipped, Some(true))
+        );
+        assert!(skipped.jobs.is_empty(), "no build read");
+        let pushed = &ci.pipelines[3];
+        assert_eq!(
+            (pushed.trigger, pushed.required),
+            (Trigger::Push, Some(false))
+        );
+        assert!(
+            ci.missing_required.is_empty(),
+            "a status policy that does not apply"
+        );
         let policy = &ci.pipelines[0];
         assert_eq!(policy.git_ref.as_deref(), Some("refs/pull/7/merge"));
         assert_eq!(policy.sha.as_deref(), Some("m1"));
@@ -882,17 +943,46 @@ mod tests {
                 (Some("deploy"), "ship", State::Waiting, Some(true)),
             ]
         );
-        let other = &ci.pipelines[1];
+        let other = &ci.pipelines[2];
         assert_eq!(other.jobs[0].stage, None, "the default stage is none");
         assert_eq!((other.jobs[0].required, other.attempt), (Some(false), 2));
         let requests = server.requests();
         assert!(requests.iter().any(|r| r.contains(
-            "artifactid=vstfs%3a%2f%2f%2fcodereview%2fcodereviewid%2fpid%2f7&api-version=7.1-preview.1"
+            "artifactid=vstfs%3a%2f%2f%2fcodereview%2fcodereviewid%2fpid%2f7&includenotapplicable=true&api-version=7.1-preview.1"
         )));
         assert!(
             !requests.iter().any(|r| r.contains("/iterations")),
             "no status"
         );
+        assert!(!requests.iter().any(|r| r.contains("/builds/38")));
+    }
+
+    /// A queued evaluation that still names a completed build waits for
+    /// the next one: no job, a CI expected.
+    #[tokio::test]
+    async fn a_queued_policy_naming_a_completed_build_expects_the_next() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pullrequests?searchcriteria.status=active") {
+                json!({ "value": [raw_pr("active")] })
+            } else if line.contains("/policy/evaluations?") {
+                json!({ "value": [evaluation("e1", "queued", json!({ "buildId": 40 }), true)] })
+            } else if line.contains("/build/builds/40?") {
+                json!({ "id": 40, "status": "completed", "result": "succeeded",
+                    "definition": { "id": 12 }, "sourceVersion": "m0" })
+            } else if line.contains("/statuses?") || line.contains("/build/builds?") {
+                json!({ "value": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let ci = read_feat(&context(&server)).await.ci.unwrap();
+        let policy = &ci.pipelines[0];
+        assert_eq!(policy.state, State::Queued);
+        assert!(policy.jobs.is_empty());
+        assert!(!server.requests().iter().any(|r| r.contains("/timeline")));
     }
 
     /// A completed build's timeline is read again only when its status

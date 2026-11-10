@@ -219,11 +219,11 @@ impl Tracker {
             .or_else(|| user["providerDisplayName"].as_str())
             .ok_or_else(|| http::Failure::Unreadable("no authenticated user".into()))?
             .to_lowercase();
-        self.context
-            .accounts
-            .lock()
-            .unwrap()
-            .insert(client.token.clone(), account.clone());
+        let mut accounts = self.context.accounts.lock().unwrap();
+        // Every target shares one token: the accounts of the tokens it
+        // replaced, renewed every hour from `az`, serve no more.
+        accounts.clear();
+        accounts.insert(client.token.clone(), account.clone());
         Ok(account)
     }
 
@@ -455,6 +455,8 @@ mod tests {
     async fn the_open_work_items_split_between_mine_and_others() {
         let server = project().await;
         let tracker = tracker(&server, None).await;
+        let replaced = ("old".to_owned(), "me@corp.com".to_owned());
+        tracker.context.accounts.lock().unwrap().extend([replaced]);
         let Reading::Issues(issues) = read(&tracker).await else {
             panic!("not issues");
         };
@@ -471,6 +473,11 @@ mod tests {
         let requests = server.requests();
         let asked = |what: &str| requests.iter().filter(|r| r.contains(what)).count();
         assert_eq!(asked("connectiondata"), 1);
+        let accounts = tracker.context.accounts.lock().unwrap();
+        assert!(
+            !accounts.contains_key("old"),
+            "a replaced token is forgotten"
+        );
         assert_eq!(asked("/wit/workitemtypes?"), 1);
         let query = requests.iter().find(|r| r.contains("/wit/wiql")).unwrap();
         assert!(query.contains(
