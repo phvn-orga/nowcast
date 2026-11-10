@@ -53,7 +53,8 @@ pub fn enable(
         } else if let Err(e) = configure_with(command, &loaded.dir) {
             if !force {
                 return Err(CliError::Configure(format!(
-                    "cannot enable {brick}: {e}. Pass --force to enable it unconfigured"
+                    "cannot enable {brick}: {e}. `nowcast bricks enable --force {brick}` \
+                     enables it unconfigured"
                 )));
             }
             eprintln!("nowcast: {e}; {name} enabled all the same (--force)");
@@ -75,9 +76,8 @@ pub fn enable(
 pub fn configure(name: &str) -> Result<(), CliError> {
     let brick = BrickName::new(name)
         .map_err(|e| CliError::Usage(format!("invalid brick name {name:?}: {e}")))?;
-    let link = bricks_dir()?.join(format!("{brick}.toml"));
-    let declaration = if std::fs::symlink_metadata(&link).is_ok() {
-        link
+    let declaration = if is_enabled(brick.as_str())? {
+        link(brick.as_str())?
     } else {
         native_declaration(name)?.ok_or_else(|| {
             CliError::Usage(format!("no brick {name:?} enabled, and no native one"))
@@ -227,8 +227,12 @@ pub fn disable(brick: &str) -> Result<(), CliError> {
 /// Whether the brick named `name` is enabled: its link is in the bricks
 /// directory.
 pub fn is_enabled(name: &str) -> Result<bool, CliError> {
-    let link = bricks_dir()?.join(format!("{name}.toml"));
-    Ok(std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink()))
+    Ok(std::fs::symlink_metadata(link(name)?).is_ok_and(|meta| meta.file_type().is_symlink()))
+}
+
+/// The link that enables the brick named `name`.
+fn link(name: &str) -> Result<PathBuf, CliError> {
+    Ok(bricks_dir()?.join(format!("{name}.toml")))
 }
 
 fn bricks_dir() -> Result<std::path::PathBuf, CliError> {

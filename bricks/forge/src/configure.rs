@@ -54,9 +54,9 @@ pub fn run() -> ExitCode {
 }
 
 /// Asks for each forge's source, and its token when the user gives one,
-/// then stores the tokens and writes the configuration, in that order: the
-/// configuration never names a token the keyring does not hold. Nothing is
-/// written when the user cancels.
+/// then stores the tokens, writes the configuration and drops the tokens no
+/// longer used, in that order: the configuration never names a token the
+/// keyring does not hold. Nothing is written when the user cancels.
 pub async fn configure(ask: &mut dyn Ask, credentials: &Credentials) -> Result<(), String> {
     let path = credentials
         .config_path()
@@ -97,9 +97,12 @@ pub async fn configure(ask: &mut dyn Ask, credentials: &Credentials) -> Result<(
             )
         })?;
     }
+    config
+        .write(path)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    // Dropped once the configuration no longer names them. A token no longer
+    // used is left behind rather than failing the whole configuration.
     for forge in dropped {
-        // A token no longer used is left behind rather than failing the
-        // whole configuration.
         if let Err(e) = secrets.delete(forge).await {
             let message = format!(
                 "the {} token stays in the system keyring: {e}",
@@ -108,9 +111,7 @@ pub async fn configure(ask: &mut dyn Ask, credentials: &Credentials) -> Result<(
             ask.warn(&message).map_err(failed)?;
         }
     }
-    config
-        .write(path)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    Ok(())
 }
 
 /// The user's terminal, through prompts on stderr.
@@ -146,8 +147,11 @@ impl Ask for Terminal {
         } else {
             format!("{} personal access token", forge.title())
         })
-        .validate(|token: &String| {
-            if token.trim().chars().all(|c| c.is_ascii_graphic()) {
+        .validate(move |token: &String| {
+            let token = token.trim();
+            if token.is_empty() && !keeping {
+                Err("a token is needed")
+            } else if token.chars().all(|c| c.is_ascii_graphic()) {
                 Ok(())
             } else {
                 Err("a token holds no space nor other character")
@@ -259,6 +263,22 @@ mod tests {
         assert_eq!(error, "Cancelled: nothing changed");
         assert_eq!(fake.credentials.source(Forge::GitHub), Some(Source::Cli));
         assert_eq!(fake.secrets.kept(Forge::GitHub), None);
+    }
+
+    #[tokio::test]
+    async fn a_configuration_not_written_keeps_the_token_it_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake = Fake::new();
+        fake.choose(Forge::Azure, Some(Source::Token), Some("pat"));
+        let dir = fake.credentials.config_path().unwrap().parent().unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut ask = answers(&[None, None], &[]);
+        let result = configure(&mut ask, &fake.credentials).await;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.unwrap_err().starts_with("cannot write"));
+        assert_eq!(fake.credentials.source(Forge::Azure), Some(Source::Token));
+        assert_eq!(fake.secrets.kept(Forge::Azure).as_deref(), Some("pat"));
     }
 
     #[tokio::test]

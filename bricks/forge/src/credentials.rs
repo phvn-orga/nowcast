@@ -225,6 +225,7 @@ impl Secrets for Keyring {
     fn delete(&self, forge: Forge) -> Pending<'_, Result<(), String>> {
         Box::pin(async move {
             let keyring = oo7::Keyring::new().await.map_err(|e| e.to_string())?;
+            keyring.unlock().await.map_err(|e| e.to_string())?;
             keyring
                 .delete(&Self::attributes(forge))
                 .await
