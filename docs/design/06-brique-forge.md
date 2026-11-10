@@ -206,7 +206,7 @@ sur Azure DevOps.
 
 - `tracker` est le `<suivi>` de la clé ; `mine`, les issues ouvertes assignées au
   compte qui lit (`account`) ; `others`, les autres. Au plus 200 issues, les plus
-  récemment modifiées ; `truncated` dit qu'il y en a d'autres.
+  récemment créées, pour voir ce qui vient d'être ouvert ; `truncated` dit qu'il y en a d'autres.
 - `number` est le numéro que la forge affiche ; `type`, le type de l'élément tel que
   la forge le nomme (`Bug`, `User Story`), `null` quand elle n'en donne pas. Les work
   items ont toujours un type, les issues d'un dépôt d'organisation GitHub peuvent en
@@ -337,7 +337,7 @@ d'une requête restent identiques d'un appel à l'autre, sinon l'`ETag` ne sert 
 | Leurs jobs | `commits/<sha>/check-runs?per_page=100`, reliés aux pipelines par `check_suite.id` | par commit |
 | Les statuts de commit | `commits/<sha>/status` | par commit |
 | Les rulesets d'une base | `rules/branches/<base>` | par base |
-| Les issues ouvertes | `issues?state=open&sort=updated&per_page=100`, deux pages au plus | par dépôt |
+| Les issues ouvertes | `issues?state=open&sort=created&per_page=100`, deux pages au plus | par dépôt |
 | Une issue | `issues/<numéro>` | non |
 
 Le reste passe par GraphQL, seul à le donner :
@@ -392,32 +392,37 @@ la branche la plus rapide qui en dépend. Les issues se lisent au rythme normal.
 
 ### Azure DevOps
 
-**Identité.** Les remotes `dev.azure.com` en HTTPS et en SSH ; les anciennes
+**Identité.** Les remotes `dev.azure.com` en HTTPS et en SSH
+(`git@ssh.dev.azure.com:v3/<organisation>/<projet>/<dépôt>`) ; les anciennes
 adresses `*.visualstudio.com` et `vs-ssh.visualstudio.com` y sont ramenées. Le dépôt
 vaut `dev.azure.com/<organisation>/<projet>/<dépôt>`, le suivi
-`dev.azure.com/<organisation>/<projet>`.
+`dev.azure.com/<organisation>/<projet>`, en minuscules : Azure DevOps ne distingue
+pas la casse des noms.
 
 **Jeton.** `az account get-access-token --resource
 499b84ac-1321-427f-aa17-267ca6975798`, l'identifiant d'application d'Azure DevOps
 ([documentation](https://learn.microsoft.com/en-us/azure/devops/cli/entra-tokens?view=azure-devops)).
 Le jeton expire : le provider en redemande un avant son échéance (`expiresOn`).
 
-**Pas d'`ETag`** (`cache-control: no-store`). Chaque réponse annonce son coût
-(`X-RateLimit-Cost`), sur un budget de 200 TSTU par fenêtre glissante de 5 minutes :
-environ 0,02 pour une liste de builds, 0,2 pour le timeline complet d'un gros build
-(mesuré le 2026-11-09 sur un projet public). Le provider compare le contenu pour
-savoir ce qui a changé.
+**Pas d'`ETag`** (`cache-control: no-store`) : le provider compare le contenu pour
+savoir ce qui a changé. Le budget est de 200 TSTU par fenêtre glissante de
+5 minutes. `X-RateLimit-Cost` n'accompagne pas toutes les réponses : absent sur la
+liste des PR, présent sur les builds, le timeline et WIQL (de 0,015 à 0,03). Les
+en-têtes de budget (`X-RateLimit-Remaining`…) n'apparaissent que quand il s'épuise.
+Une lecture de branche fait environ 4 appels (mesuré le 2026-11-10 sur un projet
+réel).
 
 | Ce qui est lu | Endpoint | Partagé |
 |---|---|---|
 | Les PR actives | `git/repositories/<dépôt>/pullrequests?searchCriteria.status=active` | par dépôt |
 | La PR d'une branche, quand elle quitte la liste | `…/pullrequests?searchCriteria.sourceRefName=refs/heads/<branche>&searchCriteria.status=all` | non |
 | La tête d'une branche sans PR active | `git/repositories/<dépôt>/refs?filter=heads/<branche>` | non |
-| Les pipelines d'une PR | `build/builds?branchName=refs/pull/<id>/merge`, retenus sur `triggerInfo["pr.sourceSha"]` égal à la tête | non |
+| Ce qui est obligatoire, et le build de chaque politique | `policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<projet>/<pr>` | non |
+| Les pipelines d'une PR hors politique | `build/builds?branchName=refs/pull/<id>/merge`, retenus sur `sourceVersion` égal au `lastMergeCommit` de la PR | non |
 | Les pipelines d'une branche | `build/builds?branchName=refs/heads/<branche>`, retenus sur `sourceVersion` | non |
 | Leurs étapes et jobs | `build/builds/<id>/timeline?changeId=<dernier>` : seuls les enregistrements changés depuis | par build |
-| Ce qui est obligatoire | `policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<projet>/<pr>` | non |
 | Les statuts de PR | `git/repositories/<dépôt>/pullRequests/<id>/statuses` | non |
+| Les états d'un type de work item, avec leur catégorie | `wit/workitemtypes/<type>/states` | par projet |
 | Les work items ouverts | `wit/wiql` (WIQL), puis leurs champs par lot | par projet |
 | Un work item | `wit/workitems/<id>` | non |
 
@@ -426,28 +431,54 @@ savoir ce qui a changé.
   `autoCompleteSetBy` (qui l'a demandée) et `completionOptions.mergeStrategy`.
 - **La CI d'une PR est celle de ses politiques de build et de statut.** Une
   politique de build désigne un pipeline (`settings.buildDefinitionId`), et
-  `configuration.isBlocking` dit s'il est obligatoire. Une politique sans build
-  publie un pipeline sans job, à l'état de la politique : `queued`, ou `waiting` pour
-  une politique à déclenchement manuel. Une politique dont le filtre de chemins ne
-  correspond pas est `notApplicable`, donc `skipped`. Les autres politiques
-  (relecteurs, commentaires, stratégie de merge) disent si la PR peut être mergée,
-  pas si sa CI passe.
-- Du timeline, le provider garde les étapes (`Stage`) et les jobs (`Job`), pas les
-  tâches. Un build terminé ne se relit plus.
-- **Work items** : une requête WIQL limitée au projet ne rend que des identifiants
-  ([documentation](https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax)) ;
-  `[System.AssignedTo] = @Me` sépare `mine` des autres. Un work item est ouvert tant
-  que son état n'est pas dans la catégorie `Completed` ou `Removed` : les états sont
-  personnalisables, leurs catégories sont fixes
-  ([documentation](https://learn.microsoft.com/en-us/azure/devops/boards/work-items/workflow-and-state-categories?view=azure-devops)).
+  `configuration.isBlocking` dit s'il est obligatoire. Le build retenu est celui
+  que l'évaluation désigne (`context.buildId`), celui qu'Azure DevOps montre sur la
+  PR. Une politique sans build publie un pipeline sans job, à l'état de la
+  politique : `queued`, ou `waiting` pour une politique à déclenchement manuel. Une
+  politique dont le filtre de chemins ne correspond pas est `notApplicable`, donc
+  `skipped`. Les autres politiques (relecteurs, commentaires, stratégie de merge)
+  disent si la PR peut être mergée, pas si sa CI passe.
+- **Une politique expirée attend une personne.** Un build réussi cesse de valoir
+  après sa durée de validité (`validDuration`) : l'évaluation repasse `queued` avec
+  `context.isExpired: true`, et rien ne tourne tant que personne ne relance le build.
+  Elle est publiée `waiting`, pas `queued` : sinon la synthèse dirait `running` et le
+  rythme resterait sur « CI en cours » indéfiniment.
+- **Ce qu'un pipeline de PR a testé** : `sourceVersion` est le commit de merge de la
+  PR (`lastMergeCommit`), `ref` vaut `refs/pull/<id>/merge`.
+- **`trigger`**, d'après `reason` : `individualCI` et `batchedCI` donnent `push`,
+  `pullRequest` `pull_request`, `manual` `manual`, `schedule` `schedule`,
+  `resourceTrigger` `downstream`, toute autre valeur `other`.
+- **Du timeline, l'unité de job est l'enregistrement `Phase`**, groupé sous son
+  `Stage`. Un job en attente ou sauté n'existe que comme `Phase` ; un `Job` interne
+  sans `Phase` (« Finalize build ») est ignoré ; les tâches ne sont pas gardées. Le
+  timeline d'un build terminé ne se relit que si son statut change : une relance de
+  jobs ou d'étape garde l'identifiant du build.
+- **Les statuts de PR s'accumulent** : une entrée par envoi et par itération. Le
+  provider garde le plus récent de chaque contexte (`context.genre`/`context.name`),
+  sur la dernière itération. Un statut qu'un build de la PR pose lui-même
+  (`codecoverage`) ne doit pas reformer un pipeline `external`.
+- **Work items.** WIQL ne filtre pas sur les catégories d'état :
+  `[System.StateCategory]` n'existe pas (`TF51005`), et `[System.State] NOT IN GROUP
+  'Completed'` est accepté mais ne filtre rien, `IN GROUP` ne visant que les
+  catégories de types (vérifié le 2026-11-10). Le provider lit donc les états de
+  chaque type, dont chacun a sa catégorie fixe
+  ([documentation](https://learn.microsoft.com/en-us/azure/devops/boards/work-items/workflow-and-state-categories?view=azure-devops)),
+  et construit `[System.State] NOT IN (…)` par type, en excluant les états
+  `Completed` et `Removed`. Il écarte les types qui ne sont pas des tickets (Test
+  Case, Test Plan, Test Suite, Shared Steps, Code Review, Feedback) par `NOT IN
+  GROUP 'Microsoft.HiddenCategory'` et les catégories de test : sur un projet réel,
+  1 212 éléments ouverts, 547 une fois ceux-là écartés. `[System.AssignedTo] = @Me`
+  sépare `mine` des autres, le tri se fait sur `System.CreatedDate`, et la requête
+  ne rend que des identifiants
+  ([documentation](https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax)).
   `type` est `System.WorkItemType`.
 - Sur un en-tête `Retry-After` ou un budget presque épuisé (`X-RateLimit-Remaining`),
   le provider ralentit et publie `rate_limited`.
 
 | État neutre | Azure DevOps (build, enregistrement du timeline, politique, statut de PR) |
 |---|---|
-| `queued` | `notStarted`, `postponed`, `pending` ; politique `queued` ; `notSet` |
-| `waiting` | approbation en attente sur une étape |
+| `queued` | `notStarted`, `postponed`, `pending` ; politique `queued` non expirée ; `notSet` |
+| `waiting` | approbation en attente sur une étape ; politique `queued` expirée (`context.isExpired`) |
 | `running` | `inProgress`, `cancelling` ; politique `running` ; statut `pending` |
 | `pass` | `succeeded` ; `partiallySucceeded` et `succeededWithIssues` avec `warning` ; politique `approved` |
 | `fail` | `failed` ; politique `rejected`, `broken` ; statut `failed`, `error` |
@@ -456,9 +487,11 @@ savoir ce qui a changé.
 | `unknown` | toute autre valeur |
 
 **Rythme** : la machine à rythme, avec CI attendue 5 s pendant 30 s puis 10 s, CI en
-cours 10 s, fenêtre rapide 5 s, normal 120 s. Chaque lecture est comptée : une
-relecture sans changement coûte de l'ordre de 0,1 TSTU par branche, et le provider
-ralentit quand le budget restant baisse. Les work items se lisent au rythme normal.
+cours 10 s, fenêtre rapide 5 s, normal 120 s. Sur une PR, « CI attendue » n'a pas à
+être deviné : une évaluation de politique de build `queued`, non expirée, dit qu'un
+build va venir, et la fenêtre de 2 minutes ne sert que pour une branche sans PR.
+Chaque lecture est comptée, et le provider ralentit quand le budget restant baisse.
+Les work items se lisent au rythme normal.
 
 ## La détection côté client
 
@@ -470,6 +503,9 @@ le rafraîchissement de tous les flux forge d'une sorte (`POST
 
 - `git push`, `gh pr …`, `az repos pr …`, et les outils de PR des serveurs MCP
   Azure DevOps : les sortes `pr` et `pipelines` ;
+- la relance d'un pipeline (`gh run rerun`, `az pipelines …`, les outils de
+  pipelines des serveurs MCP Azure DevOps), qui suit une politique expirée : les
+  sortes `pr` et `pipelines` ;
 - `gh issue …` qui écrit, `gh pr merge` (une PR peut fermer une issue),
   `az boards work-item …` qui écrit, et les outils de work items des serveurs MCP
   Azure DevOps : les sortes `issues` et `issue`.
@@ -530,26 +566,22 @@ change.
 - **Le détail de la CI d'une file de merge** : la v1 n'en publie que la synthèse,
   dans `queue.ci`.
 - **Le volume des work items** : un gros projet Azure DevOps a bien plus de 200
-  éléments ouverts, et `others` n'en montre alors qu'une partie. Filtrer (par zone,
+  éléments ouverts (547 tickets sur un projet réel), et `others` n'en montre alors qu'une partie. Filtrer (par zone,
   par itération) n'est pas décidé.
 
 ## À vérifier à l'implémentation
 
 - Que `gh auth token` lit son trousseau depuis le service lancé par systemd.
-- Le nom exact des paramètres `searchCriteria` d'Azure DevOps, le type d'une
-  approbation en attente dans le timeline, et l'état d'une politique de build à
-  déclenchement manuel.
-- Comment filtrer les work items ouverts : sur les catégories d'état dans la requête
-  WIQL, ou en lisant les états de chaque type de work item.
+- Sur Azure DevOps, le type d'une approbation en attente dans le timeline, et
+  l'état d'une politique de build à déclenchement manuel : aucun cas réel observé.
+- Comment reconnaître un statut de PR qu'un build de la PR pose lui-même, pour ne
+  pas le publier deux fois.
 - La file de merge sur un dépôt qui en a une : la forme des entrées, la branche
   temporaire de leurs pipelines, et la raison d'une sortie de file
   (`RemovedFromMergeQueueEvent.reason`). nowcast n'a pas de file ; seul le schéma
   GraphQL a été lu.
 - Que `refUpdateRule` rend bien les contrôles obligatoires à un compte sans droits
   d'administration (vérifié seulement avec un compte administrateur).
-- L'identifiant de type de la politique de build
-  (`0609b952-1397-4640-95ec-e00a01b2c241`), confirmé seulement par une source tierce
-  et par le toolkit.
 
 ## Sources
 
