@@ -22,6 +22,7 @@ c'est le lien qui l'active qui porte le nom de la brique (section 2).
 | `protocol` | entier | Version majeure du protocole brique qu'elle parle (section 4). |
 | `[run] command` | tableau de chaînes | Commande à lancer. Le premier élément est un chemin s'il contient un `/` : relatif, il se résout depuis le répertoire réel du fichier de déclaration ; absolu, il est pris tel quel. Sans `/`, c'est un nom de programme cherché dans le `PATH` du service, comme dans un shell (`python3`), sauf `nowcast`, qui désigne toujours l'exécutable du service lui-même : c'est ainsi qu'une brique native se lance (`["nowcast", "brick", "claude-code"]`), quel que soit le `PATH`. Les arguments passent tels quels. |
 | `[run] env` | table, facultatif | Variables d'environnement ajoutées au lancement. |
+| `[configure] command` | tableau de chaînes, facultatif | Commande qui configure la brique (ses identifiants, par exemple), lancée par l'outil dans le terminal de l'utilisateur (section 2). Résolue comme `[run] command`, sauf qu'un nom de programme sans `/` se cherche dans le `PATH` de l'utilisateur : `["nowcast", "brick", "forge", "configure"]` pour une brique native, n'importe quel script pour une autre. Ce qu'elle enregistre appartient à la brique ; le service ne le lit jamais. |
 | `[subscriptions.<sorte>]` | table, une par sorte d'abonnement | `description` ; `schema`, chemin du JSON Schema du contenu de l'abonnement (c'est la documentation de la clé) ; `publishes`, le type de donnée publié par ce flux ; `accepts`, facultatif, le type de l'entrée qu'un abonné peut y envoyer (section 3). Au moins l'un des deux. |
 | `[types."<type>"]` | table, une par type publié ou accepté | `schema`, chemin du JSON Schema du détail. Pour un type publié, il devient le `dataschema` des événements ; pour un type accepté, le service y valide chaque entrée. |
 
@@ -105,6 +106,14 @@ déclaration et schémas compris. Elles s'activent par le même lien que les aut
   en nommant le programme et le `PATH` parcouru, et `--force` active quand même. Si le
   service ne peut pas répondre (injoignable, trop ancien pour cette route), il active
   sans vérifier et le signale.
+- Quand la déclaration a une `[configure] command`, `enable` la lance dans le
+  terminal de l'utilisateur, avant de poser le lien. Si elle échoue (code de sortie
+  non nul), il refuse, et `--force` active quand même. Sans terminal, il active sans
+  configurer et le signale : la brique tourne sans sa configuration (une brique
+  forge publie `no_credentials`) jusqu'au premier `configure`.
+- `nowcast bricks configure <nom>` relance cette commande plus tard (un jeton
+  expiré, une forge de plus). C'est la commande qu'un client peut montrer quand une
+  brique dit manquer de configuration. Une brique sans `[configure]` le dit.
 - `nowcast bricks disable <nom>` retire le lien, et rien d'autre.
 - Au démarrage, avant de lire le répertoire de déclarations, le service réécrit les
   fichiers de `$XDG_DATA_HOME/nowcast/bricks/` qui diffèrent de sa copie embarquée.

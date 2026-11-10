@@ -221,7 +221,8 @@ champs valent `null` et `source.status` vaut `not_found`.
 ## `source`
 
 L'état de la lecture, le même pour toutes les sortes : `pending` (pas encore lue),
-`ok`, `no_credentials` (pas de jeton), `unauthorized` (jeton refusé), `not_found`
+`ok`, `no_credentials` (pas de jeton : forge non configurée, ou source choisie
+muette), `unauthorized` (jeton refusé), `not_found`
 (dépôt inexistant ou invisible au compte), `rate_limited`, `unreachable` (réseau),
 `unreadable` (réponse dans un format inattendu). `as_of` date la dernière lecture
 réussie. Une erreur garde la dernière valeur lue : le flux reste servi, ce n'est pas
@@ -309,6 +310,27 @@ contourné, pas plié pour elle.
 Un provider à venir ajoute sa colonne, pas un champ : une notion qu'une seule forge
 connaît prend une valeur neutre ailleurs, ou n'entre pas dans le contrat.
 
+## Les identifiants
+
+Pour chaque forge, l'utilisateur choisit d'où vient le jeton : la CLI de la forge
+(`gh`, `az`), ou un jeton qu'il donne. C'est un choix, pas une suite de replis.
+
+- **Le choix se fait à la configuration de la brique** (`nowcast bricks configure
+  forge`, que `enable` lance aussi, `03-contrats.md`), forge par forge. La brique
+  garde le mode choisi dans sa propre configuration, non secrète ; un jeton va dans
+  le trousseau du système.
+- **Seule la source choisie est lue.** Si elle ne donne pas de jeton, le flux publie
+  `no_credentials` ; si la forge refuse le jeton, `unauthorized`. La brique ne
+  bascule jamais d'elle-même vers l'autre source. Une forge non configurée publie
+  `no_credentials`, et un client qui le lit peut montrer `nowcast bricks configure
+  forge`.
+- **Une configuration refaite sert sans redémarrer la brique** : après un
+  `no_credentials` ou un `unauthorized`, la lecture suivante relit la configuration.
+- **Le service lancé par systemd atteint le trousseau** : `gh auth token`, dont le
+  jeton y est rangé, répond depuis une unité `systemd-run --user` (vérifié le
+  2026-11-10). Le jeton propre à la brique passe par le même trousseau.
+- La brique n'écrit jamais dans la configuration de `gh` ou d'`az`.
+
 ## Les providers
 
 ### GitHub
@@ -317,11 +339,11 @@ connaît prend une valeur neutre ailleurs, ou n'entre pas dans le contrat.
 résolu par `ssh -G <alias>` (son `hostname`). Le dépôt et le suivi valent
 `github.com/<propriétaire>/<dépôt>`, en minuscules.
 
-**Jeton.** `gh auth token --hostname github.com --user <propriétaire>`, sinon le
-compte actif de `gh`. Le propriétaire d'un dépôt d'organisation n'est pas un compte :
-c'est alors le compte actif qui lit. Le jeton est redemandé après un `401`. La brique
-n'écrit jamais dans la configuration de `gh` ; sans lui ou sans compte,
-`no_credentials`.
+**Jeton.** Par la CLI : `gh auth token --hostname github.com --user
+<propriétaire>`, sinon le compte actif de `gh`. Le propriétaire d'un dépôt
+d'organisation n'est pas un compte : c'est alors le compte actif qui lit. Le jeton est
+redemandé après un `401`. Par un jeton : un jeton personnel, envoyé en
+`Authorization: Bearer`.
 
 **Des requêtes conditionnelles.** Le provider renvoie l'`ETag` de chaque réponse
 (`If-None-Match`) ; une réponse `304` ne compte pas dans la limite de 5 000 requêtes
@@ -402,7 +424,9 @@ pas la casse des noms.
 **Jeton.** `az account get-access-token --resource
 499b84ac-1321-427f-aa17-267ca6975798`, l'identifiant d'application d'Azure DevOps
 ([documentation](https://learn.microsoft.com/en-us/azure/devops/cli/entra-tokens?view=azure-devops)).
-Le jeton expire : le provider en redemande un avant son échéance (`expiresOn`).
+Par la CLI, le jeton expire : le provider en redemande un avant son échéance
+(`expiresOn`). Par un jeton : un jeton d'accès personnel (PAT), envoyé en
+authentification Basic.
 
 **Pas d'`ETag`** (`cache-control: no-store`) : le provider compare le contenu pour
 savoir ce qui a changé. Le budget est de 200 TSTU par fenêtre glissante de
@@ -572,7 +596,8 @@ change.
 
 ## À vérifier à l'implémentation
 
-- Que `gh auth token` lit son trousseau depuis le service lancé par systemd.
+- Les permissions minimales d'un jeton personnel, sur chaque forge, pour tout ce que
+  le provider lit.
 - Sur Azure DevOps, le type d'une approbation en attente dans le timeline, et
   l'état d'une politique de build à déclenchement manuel : aucun cas réel observé.
 - Comment reconnaître un statut de PR qu'un build de la PR pose lui-même, pour ne
