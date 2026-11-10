@@ -149,6 +149,12 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
   dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
   Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
+- **Le mod central relève les worktrees où écrit sa session**, d'après les appels
+  d'outils, et les tient dans son état, brique claude-code activée ou non. Une
+  session peut écrire dans un autre worktree que le sien : un consommateur qui ne
+  suivrait que son répertoire montrerait la mauvaise branche. Lire ces appels est
+  propre à l'agent, donc au client ; choisir quels worktrees montrer revient au
+  consommateur (`05-brique-claude-code.md`, « Les worktrees de la session »).
 - **Une brique reste facultative pour le mod central.** Ce qu'il fait pour une
   brique ne vise que ses flux, ou ne part qu'une fois la brique activée (la réponse
   `unknown_brick` dit qu'elle ne l'est pas). Sans la brique, il ne fait rien pour

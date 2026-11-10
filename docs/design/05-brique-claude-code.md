@@ -160,6 +160,7 @@ n'envoie rien pour cette session.
 | `cache_ttl` | Durée de vie du cache du fil principal, `5m` ou `1h` ; facultatif | transcription (plus bas) |
 | `rate_limits` | Fenêtres de quota de la dernière réponse ; vide hors abonnement | `session.measure`, champ `rateLimits` |
 | `cost_usd` | Coût de la session ; facultatif | `session.measure`, champ `cost.usd` |
+| `worktrees` | Worktrees où la session a écrit, le plus récent d'abord ; facultatif | `tool.call` (« Les worktrees de la session ») |
 
 `context` et `tokens` ne mesurent pas la même chose. `context` est ce que la prochaine
 requête du fil principal renverra au modèle. `tokens` est tout ce que la session a
@@ -246,9 +247,13 @@ Une session, telle que la brique la retient :
   "last_request_at": "2026-11-07T15:31:10Z",
   "cache_ttl": "1h",
   "cache_expires_at": "2026-11-07T16:31:10Z",
-  "cost_usd": 4.12
+  "cost_usd": 4.12,
+  "worktrees": []
 }
 ```
+
+`worktrees` est recopié tel quel de la dernière mesure, liste vide quand elle n'en
+porte pas.
 
 `cache_expires_at` est l'échéance du cache du fil principal : `last_request_at` plus
 `cache_ttl`, publié lui aussi. Sans durée connue (transcription illisible, aucune
@@ -285,6 +290,82 @@ que les transcriptions n'ont pas.
   retrouve.
 - Sans `XDG_STATE_HOME` absolu ni `HOME`, ou si l'écriture échoue, la brique
   journalise et continue en mémoire seulement.
+
+## Les worktrees de la session
+
+Une session ancrée dans un worktree, souvent le principal sur `main`, peut écrire
+dans d'autres par leur chemin sans jamais s'y déplacer. Un consommateur qui suit le
+répertoire de la session, comme une bande qui affiche la PR et la CI de sa branche,
+montre alors la mauvaise. Le mod central relève donc les worktrees où sa session
+écrit ; le consommateur choisit lesquels montrer et suivre.
+
+### Ce qui compte
+
+- **Une écriture, rien d'autre.** Un appel `Edit` ou `Write` qui a abouti (son
+  résultat n'a pas `isError`), du fil principal comme d'un sous-agent : son
+  `file_path` désigne le worktree. Une lecture ne compte pas : une session qui lit
+  `main` pour comparer n'y travaille pas.
+- **Pas de commande Bash pour commencer.** Un `git -C <worktree> commit`, un `cd`
+  suivi d'une écriture ou un `rm` ne sont pas relevés : il faudrait analyser la commande pour
+  savoir où elle écrit. Claude Code n'a pas d'outil de suppression.
+- Un fichier hors de tout dépôt git ne compte pas.
+
+### Du fichier au worktree
+
+Pour un répertoire qu'il n'a pas encore vu, le mod demande à git la racine du
+worktree et le répertoire git commun (`git rev-parse --show-toplevel
+--git-common-dir`), et garde la réponse. À chaque écriture, il relit la branche et
+l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la dernière
+écriture est ainsi pris. La brique git (#51) pourra remplacer ces appels.
+
+### La liste
+
+```json
+"worktrees": [
+  { "path": "/home/…/nowcast/design-session-worktrees",
+    "repo": "/home/…/nowcast/.bare",
+    "branch": "design-session-worktrees",
+    "remote": "git@github.com:phvn-orga/nowcast.git",
+    "written_at": "2026-11-10T08:58:12Z" }
+]
+```
+
+| Champ | Ce que c'est |
+|---|---|
+| `path` | Racine du worktree |
+| `repo` | Répertoire git commun, le même pour tous les worktrees d'un dépôt |
+| `branch` | Branche courante, `null` en HEAD détaché |
+| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui : la clé `remote` de la brique forge |
+| `written_at` | Dernière écriture relevée dans ce worktree |
+
+- **Triée par écriture**, la plus récente d'abord.
+- **Au plus 16 worktrees.** Au-delà, celui dont l'écriture est la plus ancienne
+  sort. Aucun délai : une fenêtre de temps (les worktrees des dix dernières
+  minutes, par exemple) est l'affaire du consommateur, qui a les dates.
+- **Un worktree dont la racine n'existe plus sort de la liste**, vérifié à chaque
+  écriture relevée.
+- **Vide tant que la session n'a rien écrit** : un consommateur se rabat alors sur
+  le répertoire de la session.
+- **Elle appartient à la session.** Après un `/clear`, la nouvelle session part
+  d'une liste vide. Un rechargement du mod la retrouve dans son état.
+
+### Où la lire
+
+- **Dans l'état du mod central**, clé `worktrees`, pour un mod de la même session.
+  Elle y est tenue que la brique claude-code soit activée ou non.
+- **Dans la session publiée par la brique**, champ `worktrees` de
+  `claude-code.session/v1`, pour une autre session ou un tableau de bord. Le mod
+  l'envoie avec ses mesures ; la brique la recopie sans l'interpréter.
+
+### Plus tard
+
+- **Les écritures par Bash.** Le résultat d'un appel porte `isReadOnly`, posé par
+  le contrôle de l'outil lui-même : son absence dit qu'une commande a pu écrire,
+  pas où. Le répertoire de la commande (un `cd`, `git -C`) en donnerait une part.
+- **`NotebookEdit` et les outils MCP** qui écrivent un fichier.
+- **Une reprise** part d'une liste vide. Les transcriptions portent les `Edit` et
+  `Write` passés, avec leur date, et le mod les lit déjà à son chargement pour les
+  tokens.
 
 ## Hors des sources documentées
 
