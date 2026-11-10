@@ -58,15 +58,18 @@ pub struct Required(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Entry>>>>>)
 impl Required {
     /// The names `base` requires, read again when due; `None` when unknown.
     pub async fn names(&self, base: &Base<'_>) -> Option<BTreeSet<String>> {
-        let key = format!("{}/{}#{}", base.owner, base.name, base.base).to_lowercase();
+        // Owner and name come in lowercase; a branch name keeps its case.
+        let key = format!("{}/{}#{}", base.owner, base.name, base.base);
         let entry = self.0.lock().unwrap().entry(key).or_default().clone();
         let mut entry = entry.lock().await;
         let now = Instant::now();
         if entry.next.is_none_or(|next| now >= next) {
-            entry.next = Some(now + RHYTHM.normal);
             let (protection, rulesets) = tokio::join!(protection(base), rulesets(base));
             keep(&mut entry.protection, protection, base, "branch protection");
             keep(&mut entry.rulesets, rulesets, base, "rulesets");
+            // Set once read: a reading cancelled midway leaves the next
+            // caller to read again.
+            entry.next = Some(now + RHYTHM.normal);
         }
         entry.names()
     }
@@ -112,7 +115,7 @@ async fn protection(base: &Base<'_>) -> Result<Vec<String>, Failure> {
 /// require.
 async fn rulesets(base: &Base<'_>) -> Result<Vec<String>, Failure> {
     let url = format!(
-        "{}/repos/{}/{}/rules/branches/{}",
+        "{}/repos/{}/{}/rules/branches/{}?per_page=100",
         base.api,
         base.owner,
         base.name,
@@ -216,6 +219,11 @@ mod tests {
         let query = requests.iter().find(|r| r.starts_with("post")).unwrap();
         assert!(query.contains("refupdaterule { requiredstatuscheckcontexts }"));
         assert!(query.contains(r#""ref":"refs/heads/main""#));
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.starts_with("get /repos/o/r/rules/branches/main?per_page=100 "))
+        );
         assert_eq!(names(&server, &required).await.unwrap().len(), 3);
         assert_eq!(server.requests().len(), 2, "read once per normal pace");
     }
