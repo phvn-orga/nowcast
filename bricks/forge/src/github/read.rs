@@ -1,49 +1,22 @@
 //! GitHub through its REST API: a branch's PR and the CI of a commit, mapped
-//! onto the neutral model of [`crate::ci`]. Every request is conditional
-//! ([`crate::http`]) and keeps its parameters from one reading to the next,
-//! so that its `ETag` keeps serving.
+//! onto the neutral model. Every request is conditional (`tools::http`) and
+//! keeps its parameters from one reading to the next, so that its `ETag`
+//! keeps serving; the open PRs are one list per repository, shared by every
+//! branch.
 
 use serde_json::Value;
 
-use crate::ci::{Ci, Job, Pipeline, State, Trigger};
-use crate::http::{Failure, Http};
-
-/// GitHub's REST API.
-pub const API: &str = "https://api.github.com";
-/// Replaces [`API`], for tests.
-pub const API_VAR: &str = "NOWCAST_FORGE_GITHUB_API";
-/// A token to use instead of asking `gh`, for tests.
-pub const TOKEN_VAR: &str = "NOWCAST_FORGE_GITHUB_TOKEN";
+use crate::model::{Ci, Job, Pipeline, Pr, State, Trigger};
+use crate::provider::BranchReading;
+use crate::tools::http::{Failure, Http};
 
 const HEADERS: &[(&str, &str)] = &[
     ("accept", "application/vnd.github+json"),
     ("x-github-api-version", "2022-11-28"),
 ];
 
-/// A pull request, as the detail publishes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pr {
-    pub number: u64,
-    /// `open`, `merged` or `closed`.
-    pub state: &'static str,
-    pub draft: bool,
-    pub base: String,
-    pub head_sha: String,
-    pub url: String,
-    /// Who asked for auto-merge, and the merge method.
-    pub auto_merge: Option<(Option<String>, Option<String>)>,
-}
-
-/// What one reading of a branch found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reading {
-    /// The branch's head on GitHub; `None` when the branch is not there.
-    pub head_sha: Option<String>,
-    pub pr: Option<Pr>,
-    /// The CI of the PR's head, or of the branch's head; `None` without a
-    /// commit to read.
-    pub ci: Option<Ci>,
-}
+/// The open PRs one page lists: a full page may leave the branch's out.
+const PAGE: usize = 100;
 
 /// Reads the PR of `branch` in `owner/name` and the CI of its head.
 pub async fn read(
@@ -53,47 +26,50 @@ pub async fn read(
     owner: &str,
     name: &str,
     branch: &str,
-) -> Result<Reading, Failure> {
+) -> Result<BranchReading, Failure> {
     let repo = format!("{api}/repos/{owner}/{name}");
     let get = |url: String| async move { http.get(&url, token, HEADERS).await };
 
     let head = encode(&format!("{owner}:{branch}"));
-    let open = get(format!("{repo}/pulls?head={head}&state=open&per_page=100")).await?;
-    let pr = match open_pr(&open, owner, name, branch) {
-        Some(pr) => Some(pr),
-        None => {
-            let closed = get(format!("{repo}/pulls?head={head}&state=closed&per_page=1")).await?;
-            closed.as_array().and_then(|a| a.first()).and_then(pr_of)
-        }
-    };
-    let head_sha = match &pr {
-        Some(pr) if pr.state == "open" => Some(pr.head_sha.clone()),
-        _ => match get(format!("{repo}/branches/{}", encode(branch))).await {
+    let open = get(format!("{repo}/pulls?state=open&per_page={PAGE}")).await?;
+    let mut pr = open_pr(&open, owner, name, branch);
+    if pr.is_none() && open.as_array().is_some_and(|a| a.len() >= PAGE) {
+        let own = get(format!(
+            "{repo}/pulls?head={head}&state=open&per_page={PAGE}"
+        ))
+        .await?;
+        pr = open_pr(&own, owner, name, branch);
+    }
+    if pr.is_none() {
+        let closed = get(format!("{repo}/pulls?head={head}&state=closed&per_page=1")).await?;
+        pr = closed.as_array().and_then(|a| a.first()).and_then(pr_of);
+    }
+    let open_pr = pr.as_ref().filter(|p| p.is_open());
+    let head_sha = match open_pr {
+        Some(pr) => Some(pr.head_sha.clone()),
+        None => match get(format!("{repo}/branches/{}", encode(branch))).await {
             Ok(b) => b["commit"]["sha"].as_str().map(str::to_owned),
             Err(Failure::NotFound) => None,
             Err(e) => return Err(e),
         },
     };
-    let sha = match &pr {
-        Some(pr) if pr.state == "open" => Some(pr.head_sha.clone()),
-        _ => head_sha.clone(),
-    };
-    let ci = match &sha {
+    let ci = match &head_sha {
         Some(sha) => {
             let (runs, checks, statuses) = tokio::try_join!(
                 get(format!("{repo}/actions/runs?head_sha={sha}&per_page=100")),
                 get(format!("{repo}/commits/{sha}/check-runs?per_page=100")),
                 get(format!("{repo}/commits/{sha}/status")),
             )?;
-            let open_number = pr.as_ref().filter(|p| p.state == "open").map(|p| p.number);
             Some(Ci {
-                pipelines: pipelines(&runs, &checks, &statuses, open_number),
+                sha: sha.clone(),
+                pipelines: pipelines(&runs, &checks, &statuses, open_pr.map(|p| p.number)),
                 missing_required: Vec::new(),
+                expected: false,
             })
         }
         None => None,
     };
-    Ok(Reading { head_sha, pr, ci })
+    Ok(BranchReading { head_sha, pr, ci })
 }
 
 /// Percent-encodes what a path segment or a query value cannot hold as is.
@@ -368,36 +344,6 @@ fn trigger(event: &str) -> Trigger {
     }
 }
 
-/// The account `gh` holds for the repository's owner, or else its active
-/// one: an organization is not an account. `None` without `gh` or without a
-/// login.
-pub async fn token(owner: &str) -> Option<String> {
-    if let Ok(token) = std::env::var(TOKEN_VAR) {
-        return Some(token);
-    }
-    match gh_token(Some(owner)).await {
-        Some(token) => Some(token),
-        None => gh_token(None).await,
-    }
-}
-
-async fn gh_token(user: Option<&str>) -> Option<String> {
-    let mut command = tokio::process::Command::new("gh");
-    command.args(["auth", "token", "--hostname", "github.com"]);
-    if let Some(user) = user {
-        command.args(["--user", user]);
-    }
-    let output = command
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (output.status.success() && !token.is_empty()).then_some(token)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -565,13 +511,41 @@ mod tests {
         let reading = read(&http, &server.base(), "t", "o", "r", "feat")
             .await
             .unwrap();
-        assert_eq!(
-            reading,
-            Reading {
-                head_sha: None,
-                pr: None,
-                ci: None
-            }
-        );
+        assert_eq!(reading, BranchReading::default());
+    }
+
+    /// The open PRs are one list shared by every branch; when a full page
+    /// leaves the branch's PR out, the branch's own open PRs are asked.
+    #[tokio::test]
+    async fn a_full_page_of_open_prs_asks_for_the_branch_s_own() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let pr = |n: u64, branch: &str| {
+                json!({ "number": n, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": branch, "sha": "abc", "repo": { "full_name": "o/r" } } })
+            };
+            let body = if line.contains("/pulls?state=open&per_page=100") {
+                json!((0..100).map(|n| pr(n, "other")).collect::<Vec<_>>()).to_string()
+            } else if line.contains("/pulls?head=o%3afeat&state=open") {
+                json!([pr(500, "feat")]).to_string()
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] }).to_string()
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] }).to_string()
+            } else if line.contains("/status") {
+                json!({ "statuses": [] }).to_string()
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body)
+        })
+        .await;
+        let http = Http::new().unwrap();
+        let reading = read(&http, &server.base(), "t", "o", "r", "feat")
+            .await
+            .unwrap();
+        assert_eq!(reading.pr.unwrap().number, 500);
+        assert_eq!(reading.ci.unwrap().sha, "abc");
     }
 }

@@ -27,7 +27,7 @@ pub const NATIVES: &[Native] = &[
             name: nowcast_brick_forge::NAME,
             files: nowcast_brick_forge::FILES,
         },
-        description: "A branch's PR and its CI, per pipeline and job, on GitHub.",
+        description: "A branch's PR and its pipelines, per job, on GitHub.",
         run: nowcast_brick_forge::run,
     },
 ];

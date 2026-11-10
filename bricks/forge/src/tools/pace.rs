@@ -1,5 +1,5 @@
-//! When to read a flow next, from what its last reading saw. The first state
-//! that applies wins:
+//! A pace machine providers may use: when to read a branch next, from what
+//! its last reading saw. The first state that applies wins:
 //!
 //! 1. CI expected: a new head (a push, a PR just opened) with no pipeline
 //!    yet, for at most [`EXPECTED_FOR`];
@@ -9,7 +9,7 @@
 //! 4. normal.
 //!
 //! A `refresh` only asks for a reading now: what that reading sees sets the
-//! pace after it.
+//! pace after it. Each provider sets the durations ([`Rhythm`]).
 
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ pub const EXPECTED_FIRST: Duration = Duration::from_secs(30);
 /// How long a `refresh` keeps the pace fast.
 pub const WINDOW_FOR: Duration = Duration::from_secs(30);
 
-/// The intervals of one forge.
+/// The intervals of one provider.
 #[derive(Debug, Clone, Copy)]
 pub struct Rhythm {
     pub expected_first: Duration,
@@ -33,19 +33,10 @@ pub struct Rhythm {
     pub normal: Duration,
 }
 
-/// GitHub: a reading that changes nothing is free.
-pub const GITHUB: Rhythm = Rhythm {
-    expected_first: Duration::from_secs(2),
-    expected_after: Duration::from_secs(5),
-    running: Duration::from_secs(5),
-    window: Duration::from_secs(2),
-    normal: Duration::from_secs(60),
-};
-
-/// What the pace remembers of a flow between readings.
+/// What the pace remembers of a branch between readings.
 #[derive(Debug, Default)]
 pub struct Pace {
-    /// What the CI of the flow is about: the head read last and the PR it
+    /// What the CI of the branch is about: the head read last and the PR it
     /// belongs to. `None` before the first reading.
     subject: Option<(Option<String>, Option<u64>)>,
     /// When the subject last changed, for a CI to be expected.
@@ -100,6 +91,14 @@ impl Pace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GITHUB: Rhythm = Rhythm {
+        expected_first: Duration::from_secs(2),
+        expected_after: Duration::from_secs(5),
+        running: Duration::from_secs(5),
+        window: Duration::from_secs(2),
+        normal: Duration::from_secs(60),
+    };
 
     const S: fn(u64) -> Duration = Duration::from_secs;
 

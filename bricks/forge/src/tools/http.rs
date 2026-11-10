@@ -1,8 +1,8 @@
 //! Conditional GET requests: each answer's `ETag` is sent back with the next
 //! request for the same URL (`If-None-Match`), and a `304` gives back the
 //! body kept from the last `200`. GitHub does not count a `304` against its
-//! rate limit. The cache is shared by every flow, so two flows reading the
-//! same URL pay for it once.
+//! rate limit. The cache is shared by every branch followed, so two readings
+//! of the same URL pay for it once.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

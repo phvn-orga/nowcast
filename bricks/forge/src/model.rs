@@ -1,6 +1,7 @@
-//! The CI of a commit, neutral across forges: its pipelines, each with its
-//! jobs, and a rollup. Each forge maps its own vocabulary onto [`State`] and
-//! [`Trigger`].
+//! The neutral model every provider maps its forge onto: a PR, the pipelines
+//! of a commit with their jobs, and their rollup. It is the output contract:
+//! `forge.pr/v1` and `forge.pipelines/v1` are built from it, whatever the
+//! forge.
 
 use serde_json::{Value, json};
 
@@ -66,6 +67,26 @@ impl Trigger {
     }
 }
 
+/// A pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pr {
+    pub number: u64,
+    /// `open`, `merged` or `closed`.
+    pub state: &'static str,
+    pub draft: bool,
+    pub base: String,
+    pub head_sha: String,
+    pub url: String,
+    /// Who asked for the PR to merge by itself, and the merge method.
+    pub auto_merge: Option<(Option<String>, Option<String>)>,
+}
+
+impl Pr {
+    pub fn is_open(&self) -> bool {
+        self.state == "open"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
     pub id: String,
@@ -73,6 +94,8 @@ pub struct Job {
     pub stage: Option<String>,
     pub state: State,
     pub warning: bool,
+    /// Whether the job must pass for the PR to merge; `None` when the forge
+    /// does not say.
     pub required: Option<bool>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -87,11 +110,13 @@ pub struct Pipeline {
     pub trigger: Trigger,
     pub raw_trigger: String,
     pub attempt: u64,
-    /// The commit the pipeline ran on.
+    /// The commit the pipeline tested.
     pub sha: Option<String>,
     pub git_ref: Option<String>,
     pub state: State,
     pub warning: bool,
+    /// Carries the requirement only while the pipeline has no job to carry
+    /// it: a required pipeline waiting for its build.
     pub required: Option<bool>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -99,12 +124,28 @@ pub struct Pipeline {
     pub jobs: Vec<Job>,
 }
 
+impl Pipeline {
+    /// The pipeline's own requirement, which counts only without jobs.
+    fn own_required(&self) -> Option<bool> {
+        if self.jobs.is_empty() {
+            self.required
+        } else {
+            None
+        }
+    }
+}
+
 /// The CI of one commit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ci {
+    /// The commit read.
+    pub sha: String,
     pub pipelines: Vec<Pipeline>,
     /// Required checks that nothing reported on the commit.
     pub missing_required: Vec<String>,
+    /// The provider expects pipelines that have not shown up yet: the rollup
+    /// cannot be `none`, `pass` or `missing`.
+    pub expected: bool,
 }
 
 impl Ci {
@@ -118,25 +159,41 @@ impl Ci {
     /// Every pipeline and every job, with whether it is required.
     fn elements(&self) -> impl Iterator<Item = (State, Option<bool>)> + '_ {
         self.pipelines.iter().flat_map(|p| {
-            std::iter::once((p.state, p.required))
+            std::iter::once((p.state, p.own_required()))
                 .chain(p.jobs.iter().map(|j| (j.state, j.required)))
         })
     }
 
-    /// The detail's `ci`. `expected`: a CI is due on the commit and has not
-    /// shown up yet, so the rollup cannot be `none` or `pass`.
-    pub fn to_json(&self, expected: bool) -> Value {
-        let any_required =
-            self.elements().any(|(_, r)| r.is_some()) || !self.missing_required.is_empty();
-        let required_state = any_required.then(|| {
+    fn state(&self) -> &'static str {
+        rollup(self.elements().map(|(s, _)| s), false, self.expected)
+    }
+
+    /// The rollup of the required items; `None` when nothing says what is.
+    fn required_state(&self) -> Option<&'static str> {
+        let any = self.elements().any(|(_, r)| r.is_some()) || !self.missing_required.is_empty();
+        any.then(|| {
             rollup(
                 self.elements()
                     .filter(|(_, r)| *r == Some(true))
                     .map(|(s, _)| s),
                 !self.missing_required.is_empty(),
-                expected,
+                self.expected,
             )
-        });
+        })
+    }
+
+    /// The rollup `forge.pr/v1` carries.
+    pub fn synthesis(&self) -> Value {
+        json!({
+            "state": self.state(),
+            "required_state": self.required_state(),
+            "sha": self.sha,
+        })
+    }
+
+    /// The detail `forge.pipelines/v1` carries, without what names the
+    /// branch and the source.
+    pub fn detail(&self) -> Value {
         let counted = || {
             self.pipelines
                 .iter()
@@ -144,8 +201,8 @@ impl Ci {
                 .filter(|j| j.state != State::Skipped)
         };
         json!({
-            "state": rollup(self.elements().map(|(s, _)| s), false, expected),
-            "required_state": required_state,
+            "state": self.state(),
+            "required_state": self.required_state(),
             "missing_required": self.missing_required,
             "jobs": {
                 "done": counted().filter(|j| !j.state.is_active()).count(),
@@ -199,7 +256,7 @@ fn pipeline_json(p: &Pipeline) -> Value {
         "ref": p.git_ref,
         "state": p.state.as_str(),
         "warning": p.warning,
-        "required": p.required,
+        "required": p.own_required(),
         "started_at": p.started_at,
         "finished_at": p.finished_at,
         "url": p.url,
@@ -255,87 +312,103 @@ pub(crate) mod tests {
         }
     }
 
+    pub fn ci(pipelines: Vec<Pipeline>) -> Ci {
+        Ci {
+            sha: "a".into(),
+            pipelines,
+            ..Ci::default()
+        }
+    }
+
     #[test]
     fn a_ci_waiting_for_a_person_is_not_running() {
-        let waiting = Ci {
-            pipelines: vec![pipeline(
-                State::Waiting,
-                vec![job("deploy", State::Waiting, None)],
-            )],
-            missing_required: vec![],
-        };
+        let waiting = ci(vec![pipeline(
+            State::Waiting,
+            vec![job("deploy", State::Waiting, None)],
+        )]);
         assert!(!waiting.is_running());
-        assert_eq!(waiting.to_json(false)["state"], "waiting");
-        let queued = Ci {
-            pipelines: vec![pipeline(
-                State::Running,
-                vec![job("a", State::Queued, None)],
-            )],
-            missing_required: vec![],
-        };
+        assert_eq!(waiting.synthesis()["state"], "waiting");
+        let queued = ci(vec![pipeline(
+            State::Running,
+            vec![job("a", State::Queued, None)],
+        )]);
         assert!(queued.is_running());
     }
 
     #[test]
     fn a_failed_job_fails_a_running_pipeline() {
-        let ci = Ci {
-            pipelines: vec![pipeline(
-                State::Running,
-                vec![job("a", State::Fail, None), job("b", State::Running, None)],
-            )],
-            missing_required: vec![],
-        };
-        let json = ci.to_json(false);
-        assert_eq!(json["state"], "fail");
+        let ci = ci(vec![pipeline(
+            State::Running,
+            vec![job("a", State::Fail, None), job("b", State::Running, None)],
+        )]);
+        let detail = ci.detail();
+        assert_eq!(detail["state"], "fail");
         assert_eq!(
-            json["required_state"],
+            detail["required_state"],
             Value::Null,
             "nothing says what is required"
         );
-        assert_eq!(json["jobs"], json!({ "done": 1, "total": 2 }));
+        assert_eq!(detail["jobs"], json!({ "done": 1, "total": 2 }));
+        assert_eq!(
+            ci.synthesis(),
+            json!({ "state": "fail", "required_state": null, "sha": "a" })
+        );
     }
 
     #[test]
     fn nothing_is_none_unless_a_ci_is_expected() {
-        assert_eq!(Ci::default().to_json(false)["state"], "none");
-        assert_eq!(Ci::default().to_json(true)["state"], "running");
+        let mut nothing = ci(vec![]);
+        assert_eq!(nothing.synthesis()["state"], "none");
+        nothing.expected = true;
+        assert_eq!(nothing.synthesis()["state"], "running");
     }
 
     #[test]
     fn skipped_jobs_count_for_nothing() {
-        let ci = Ci {
-            pipelines: vec![pipeline(
-                State::Pass,
-                vec![job("a", State::Pass, None), job("b", State::Skipped, None)],
-            )],
-            missing_required: vec![],
-        };
-        let json = ci.to_json(false);
-        assert_eq!(json["state"], "pass");
-        assert_eq!(json["jobs"], json!({ "done": 1, "total": 1 }));
+        let ci = ci(vec![pipeline(
+            State::Pass,
+            vec![job("a", State::Pass, None), job("b", State::Skipped, None)],
+        )]);
+        let detail = ci.detail();
+        assert_eq!(detail["state"], "pass");
+        assert_eq!(detail["jobs"], json!({ "done": 1, "total": 1 }));
     }
 
     #[test]
-    fn the_required_rollup_sees_only_required_items_and_what_is_missing() {
-        let mut ci = Ci {
-            pipelines: vec![pipeline(
-                State::Fail,
-                vec![
-                    job("lint", State::Fail, Some(false)),
-                    job("check", State::Pass, Some(true)),
-                ],
-            )],
-            missing_required: vec!["e2e".into()],
-        };
-        let json = ci.to_json(false);
-        assert_eq!(json["state"], "fail");
-        assert_eq!(json["required_state"], "missing");
+    fn the_required_rollup_sees_only_required_jobs_and_what_is_missing() {
+        let mut ci = ci(vec![pipeline(
+            State::Fail,
+            vec![
+                job("lint", State::Fail, Some(false)),
+                job("check", State::Pass, Some(true)),
+            ],
+        )]);
+        ci.missing_required = vec!["e2e".into()];
+        assert_eq!(ci.detail()["state"], "fail");
+        assert_eq!(ci.detail()["required_state"], "missing");
+        ci.expected = true;
         assert_eq!(
-            ci.to_json(true)["required_state"],
+            ci.detail()["required_state"],
             "running",
             "it may still come"
         );
+        ci.expected = false;
         ci.missing_required.clear();
-        assert_eq!(ci.to_json(false)["required_state"], "pass");
+        assert_eq!(ci.detail()["required_state"], "pass");
+    }
+
+    /// A required pipeline that waits for its build has no job to carry the
+    /// requirement: it carries it. Once a job exists, only jobs do.
+    #[test]
+    fn a_pipeline_carries_the_requirement_only_without_jobs() {
+        let mut waiting = pipeline(State::Queued, vec![]);
+        waiting.required = Some(true);
+        let mut with_jobs = pipeline(State::Pass, vec![job("a", State::Pass, Some(false))]);
+        with_jobs.required = Some(true);
+        let ci = ci(vec![waiting, with_jobs]);
+        let detail = ci.detail();
+        assert_eq!(detail["required_state"], "running");
+        assert_eq!(detail["pipelines"][0]["required"], true);
+        assert_eq!(detail["pipelines"][1]["required"], Value::Null);
     }
 }
