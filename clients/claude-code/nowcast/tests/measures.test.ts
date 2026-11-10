@@ -135,6 +135,7 @@ test('a measure subscribes the session to its flow, then sends what it measured'
       tokens: { input: 10, output: 20, cache_creation: 30, cache_read: 40 },
       side_tokens: times(0),
       side_since: new Date(1_000_000).toISOString(),
+      worktrees: [],
       context: MEASURE.context,
       effort: 'high',
       last_request_at: new Date(1_000_000).toISOString(),

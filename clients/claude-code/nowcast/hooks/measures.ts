@@ -22,6 +22,7 @@
 import type { EngineInterface, On } from 'claude-code'
 import { input } from './client'
 import { subscribeFor } from './subscriptions'
+import { worktrees } from './worktrees'
 
 type $ = EngineInterface
 
@@ -305,6 +306,7 @@ async function detail($: $, m: Measured): Promise<Record<string, unknown>> {
     tokens: m.tokens,
     side_tokens: m.side,
     side_since: m.since,
+    worktrees: await worktrees($),
   }
   if (m.context !== undefined) out.context = m.context
   if (m.effort !== undefined) out.effort = m.effort
