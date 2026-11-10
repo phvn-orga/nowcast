@@ -65,6 +65,10 @@ impl Tracker {
         match read {
             Ok(reading) => (Ok(reading), None),
             Err(failure) => {
+                if failure == http::Failure::Unauthorized {
+                    // A refused token reads as no account any more.
+                    self.accounts.lock().unwrap().remove(&token);
+                }
                 let (failure, wait) = failed(&self.tokens, &self.owner, &self.at(), failure);
                 (Err(failure), wait)
             }
@@ -361,7 +365,8 @@ mod tests {
         }
     }
 
-    /// A refused token is asked for again; a rate limit is waited out.
+    /// A refused token is asked for again, its account forgotten; a rate
+    /// limit is waited out.
     #[tokio::test]
     async fn failures_are_those_of_a_branch() {
         let server = Server::start(|request| {
@@ -373,8 +378,14 @@ mod tests {
         })
         .await;
         let denied = tracker(&server, Some(1));
+        denied
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("t".into(), "me".into());
         assert_eq!(denied.read_once().await, (Err(Failure::Unauthorized), None));
         assert!(denied.tokens.lock().unwrap().is_empty());
+        assert!(denied.accounts.lock().unwrap().is_empty());
         assert_eq!(
             tracker(&server, Some(2)).read_once().await,
             (Err(Failure::RateLimited), Some(Duration::from_secs(300)))

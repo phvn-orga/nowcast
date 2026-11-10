@@ -1,6 +1,6 @@
 //! The forge brick, native to nowcast: a branch's PR and its pipelines, and
-//! a repository's issues, whatever the forge. The `nowcast` binary runs it as `nowcast brick
-//! forge`; its declaration and schemas are [`FILES`].
+//! a repository's issues, whatever the forge. The `nowcast` binary runs it
+//! as `nowcast brick forge`; its declaration and schemas are [`FILES`].
 //!
 //! The brick is organised by usages, not by forges:
 //!

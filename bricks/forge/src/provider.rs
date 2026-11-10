@@ -1,8 +1,8 @@
 //! What a forge implements to be read by the brick. The core knows no forge:
 //! it asks each provider whether it recognises a remote, and has the one
-//! that does follow a branch, a tracker's open issues, or one issue. How and when the provider reads (protocol,
-//! pace, quotas, cache) is its own business; what it hands back is the
-//! neutral model of [`crate::model`].
+//! that does follow a branch, a tracker's open issues, or one issue. How and
+//! when the provider reads (protocol, pace, quotas, cache) is its own
+//! business; what it hands back is the neutral model of [`crate::model`].
 
 use std::future::Future;
 

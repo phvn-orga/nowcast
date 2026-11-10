@@ -228,9 +228,10 @@ impl Core {
             return refuse("unknown_kind", format!("no subscription kind {kind:?}"));
         };
         let params: Value = serde_json::from_slice(params).unwrap_or_default();
-        let (Some(remote), Ok(subject)) = (params["remote"].as_str(), kind.subject(&params)) else {
-            let why = kind.subject(&params).err();
-            return refuse("invalid_params", why.unwrap_or("remote is required").into());
+        let (remote, subject) = match (params["remote"].as_str(), kind.subject(&params)) {
+            (Some(remote), Ok(subject)) => (remote, subject),
+            (_, Err(why)) => return refuse("invalid_params", why.into()),
+            (None, Ok(_)) => return refuse("invalid_params", "remote is required".into()),
         };
         let Some((index, repo)) = self
             .providers

@@ -227,10 +227,10 @@ impl Branch {
 /// gave it; `None` without one.
 async fn owner_token(tokens: &Tokens, owner: &str) -> Option<String> {
     let kept = tokens.lock().unwrap().get(owner).cloned();
-    let token = match kept {
-        Some(token) => token,
-        None => token(owner).await?,
-    };
+    if kept.is_some() {
+        return kept;
+    }
+    let token = token(owner).await?;
     tokens
         .lock()
         .unwrap()
