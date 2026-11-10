@@ -150,9 +150,13 @@ attend une approbation.
   `external`, un job par contexte.
 - **Les jobs** d'un pipeline, avec `stage` quand la forge regroupe ses jobs en
   étapes, `null` sinon. Pas les tâches d'un job : une v1 s'arrête aux jobs.
-- **`required`** vaut `true` ou `false` quand la forge dit ce qui est obligatoire
-  pour la PR, `null` sinon, et toujours `null` sans PR ouverte : l'obligation vient
-  des règles de la base. Il vit au niveau où la forge le pose, un job ou un pipeline.
+- **`required` vit sur les jobs** : il dit, job par job, ce qui bloque le merge de
+  la PR. Il vaut `true` ou `false` quand la forge dit ce qui est obligatoire, `null`
+  sinon, et toujours `null` sans PR ouverte, l'obligation venant des règles de la
+  base. Une forge qui rend obligatoire un pipeline entier rend obligatoires tous ses
+  jobs. Le `required` d'un pipeline ne sert que tant qu'il n'a aucun job (une
+  politique qui attend son build) : il porte alors l'obligation à leur place. Il vaut
+  `null` dès qu'un job existe.
 
 ### Les éléments obligatoires absents
 
@@ -302,7 +306,7 @@ contourné, pas plié pour elle.
 | États d'une issue | ouvert, fermé | personnalisés, rangés en catégories | `open`, `closed` |
 | File de merge | oui | non | `queue` toujours `null` sans file |
 | Étapes d'un pipeline | non | oui | `stage` `null` sans étape |
-| Niveau de l'obligation | un nom de contrôle, donc un job | une politique de build, donc un pipeline | `required` au niveau donné |
+| Niveau de l'obligation | un nom de contrôle, donc un job | une politique de build, donc tout un pipeline | `required` sur chaque job |
 | Commit testé par un pipeline de PR | non donné par l'API REST | donné | `sha` : la tête quand il manque |
 | Statuts extérieurs | statuts de commit | statuts de PR | pipeline `external` |
 | Coût d'une lecture | gratuite quand rien ne change (`304`) | toujours comptée (TSTU) | rythme propre au provider |
@@ -456,7 +460,8 @@ réel).
 - **La CI d'une PR est celle de ses politiques de build et de statut.** Une
   politique de build (type `0609b952-1397-4640-95ec-e00a01b2c241`, vérifié le
   2026-11-10) désigne un pipeline (`settings.buildDefinitionId`), et
-  `configuration.isBlocking` dit s'il est obligatoire. Le build retenu est celui
+  `configuration.isBlocking` dit s'il est obligatoire : tous les jobs du pipeline le
+  sont alors, ou aucun. Le build retenu est celui
   que l'évaluation désigne (`context.buildId`), celui qu'Azure DevOps montre sur la
   PR. Une politique sans build publie un pipeline sans job, à l'état de la
   politique : `queued`, ou `waiting` pour une politique à déclenchement manuel. Une
