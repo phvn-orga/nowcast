@@ -11,6 +11,9 @@ pub struct Native {
     pub description: &'static str,
     /// Runs the brick on standard input and output, as `nowcast brick <name>`.
     pub run: fn() -> ExitCode,
+    /// Runs its configuration in the user's terminal, as `nowcast brick
+    /// <name> configure`, which its declaration's `[configure]` names.
+    pub configure: Option<fn() -> ExitCode>,
 }
 
 pub const NATIVES: &[Native] = &[
@@ -21,14 +24,16 @@ pub const NATIVES: &[Native] = &[
         },
         description: "Quotas of the Claude Code account and measures of its running sessions.",
         run: nowcast_brick_claude_code::run,
+        configure: None,
     },
     Native {
         files: NativeFiles {
             name: nowcast_brick_forge::NAME,
             files: nowcast_brick_forge::FILES,
         },
-        description: "A branch's PR and its CI, per pipeline and job, on GitHub.",
+        description: "A branch's PR and its pipelines, per job, and a repository's issues, on GitHub and Azure DevOps.",
         run: nowcast_brick_forge::run,
+        configure: Some(nowcast_brick_forge::configure),
     },
 ];
 
@@ -48,8 +53,9 @@ mod tests {
     use super::*;
 
     /// Each native brick's declaration loads, names the brick, carries the
-    /// description `setup` shows, is launched by `nowcast brick <name>` and
-    /// has the binary's version.
+    /// description `setup` shows, is launched by `nowcast brick <name>`,
+    /// configured by `nowcast brick <name> configure` when it has a
+    /// configuration, and has the binary's version.
     #[test]
     fn every_native_declaration_is_valid() {
         let dir = tempfile::tempdir().unwrap();
@@ -66,6 +72,15 @@ mod tests {
             assert_eq!(declaration.name.as_str(), native.files.name);
             assert_eq!(declaration.description, native.description);
             assert_eq!(declaration.command, ["nowcast", "brick", native.files.name]);
+            let configure = native
+                .configure
+                .map(|_| vec!["nowcast", "brick", native.files.name, "configure"]);
+            assert_eq!(
+                declaration.configure,
+                configure.map(|c| c.into_iter().map(str::to_owned).collect()),
+                "{}",
+                native.files.name
+            );
             assert_eq!(
                 declaration.version,
                 env!("CARGO_PKG_VERSION"),

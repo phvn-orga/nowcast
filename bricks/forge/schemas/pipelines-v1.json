@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "required": ["repo", "branch", "sha", "pr", "state", "required_state", "missing_required", "jobs", "pipelines", "source"],
+  "$defs": {
+    "state": { "enum": ["queued", "waiting", "running", "pass", "fail", "cancelled", "skipped", "unknown"] },
+    "time": { "type": ["string", "null"], "description": "RFC 3339." },
+    "job": {
+      "type": "object",
+      "required": ["id", "name", "stage", "state", "warning", "required", "started_at", "finished_at", "url"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "stage": { "type": ["string", "null"], "description": "The stage grouping the job, when the forge has stages." },
+        "state": { "$ref": "#/$defs/state" },
+        "warning": { "type": "boolean", "description": "A success with warnings." },
+        "required": { "type": ["boolean", "null"], "description": "Whether the job must pass for the PR to merge; null when the forge does not say, and without an open PR." },
+        "started_at": { "$ref": "#/$defs/time" },
+        "finished_at": { "$ref": "#/$defs/time" },
+        "url": { "type": ["string", "null"] }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["id", "name", "definition", "trigger", "raw_trigger", "attempt", "sha", "ref", "state", "warning", "required", "started_at", "finished_at", "url", "jobs"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "definition": { "type": ["string", "null"], "description": "The file or definition the pipeline runs." },
+        "trigger": { "enum": ["push", "pull_request", "merge_queue", "manual", "schedule", "downstream", "external", "other"] },
+        "raw_trigger": { "type": "string", "description": "The forge's own value." },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "sha": { "type": ["string", "null"], "description": "The commit the pipeline tested." },
+        "ref": { "type": ["string", "null"] },
+        "state": { "$ref": "#/$defs/state" },
+        "warning": { "type": "boolean" },
+        "required": { "type": ["boolean", "null"], "description": "Only while the pipeline has no job, such as a required pipeline waiting for its build; null once jobs carry the requirement." },
+        "started_at": { "$ref": "#/$defs/time" },
+        "finished_at": { "$ref": "#/$defs/time" },
+        "url": { "type": ["string", "null"] },
+        "jobs": { "type": "array", "items": { "$ref": "#/$defs/job" } }
+      }
+    }
+  },
+  "properties": {
+    "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>, dev.azure.com/<organization>/<project>/<repository>." },
+    "branch": { "type": "string" },
+    "sha": { "type": ["string", "null"], "description": "The commit read: the open PR's head, else the branch's head; null without a commit, and the list is then empty." },
+    "pr": { "type": ["integer", "null"], "description": "The open PR whose CI is read." },
+    "state": { "enum": ["none", "waiting", "running", "pass", "fail"] },
+    "required_state": { "enum": ["none", "waiting", "running", "missing", "pass", "fail", null], "description": "The rollup of the required items only; null when nothing says what is required." },
+    "missing_required": { "type": "array", "items": { "type": "string" }, "description": "Required checks nothing reported on the commit." },
+    "jobs": {
+      "type": "object",
+      "required": ["done", "total"],
+      "properties": { "done": { "type": "integer" }, "total": { "type": "integer" } }
+    },
+    "pipelines": { "type": "array", "items": { "$ref": "#/$defs/pipeline" }, "description": "The pipelines that tested the commit, those of its PR included: one per definition and trigger, the latest attempt." },
+    "source": {
+      "type": "object",
+      "required": ["status", "as_of"],
+      "properties": {
+        "status": { "enum": ["pending", "ok", "no_credentials", "unauthorized", "not_found", "rate_limited", "unreachable", "unreadable"] },
+        "as_of": { "$ref": "#/$defs/time", "description": "The last successful reading." }
+      }
+    }
+  }
+}

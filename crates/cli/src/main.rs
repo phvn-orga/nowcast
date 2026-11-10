@@ -34,14 +34,15 @@ fn main() -> ExitCode {
     match &cli.command {
         Command::Daemon => return daemon(&matches),
         // A brick runs on its own runtime, and talks to the service alone.
-        Command::Brick { name } => return brick(name),
+        Command::Brick { name, action } => return brick(name, action.is_some()),
         Command::Bricks { action } => {
             let result = match action {
                 BricksAction::Enable { brick, force } => {
                     let service = (!force).then(|| client(&cli));
-                    commands::bricks::enable(brick, service)
+                    commands::bricks::enable(brick, *force, service)
                 }
                 BricksAction::Disable { brick } => commands::bricks::disable(brick),
+                BricksAction::Configure { brick } => commands::bricks::configure(brick),
             };
             return exit_code(result, cli.json);
         }
@@ -88,12 +89,19 @@ fn daemon(matches: &clap::ArgMatches) -> ExitCode {
     nowcast_daemon::run(&native::files())
 }
 
-/// Runs a native brick, as the service launches it.
-fn brick(name: &str) -> ExitCode {
-    match native::find(name) {
-        Some(native) => (native.run)(),
+/// Runs a native brick, as the service launches it, or its configuration.
+fn brick(name: &str, configure: bool) -> ExitCode {
+    let Some(native) = native::find(name) else {
+        eprintln!("nowcast: no native brick {name:?}");
+        return ExitCode::from(error::exit::USAGE);
+    };
+    if !configure {
+        return (native.run)();
+    }
+    match native.configure {
+        Some(configure) => configure(),
         None => {
-            eprintln!("nowcast: no native brick {name:?}");
+            eprintln!("nowcast: the native brick {name} has nothing to configure");
             ExitCode::from(error::exit::USAGE)
         }
     }

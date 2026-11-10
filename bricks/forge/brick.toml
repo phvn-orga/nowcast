@@ -5,16 +5,45 @@ manifest_version = 1
 name = "forge"
 # The binary embeds this file with the workspace version in its place.
 version = "0.0.0"
-description = "A branch's PR and its CI, per pipeline and job, on GitHub."
+description = "A branch's PR and its pipelines, per job, and a repository's issues, on GitHub and Azure DevOps."
 protocol = 1
 
 [run]
 command = ["nowcast", "brick", "forge"]
 
+# Where each forge's token comes from: run in the user's terminal by
+# `nowcast bricks enable forge` and `nowcast bricks configure forge`.
+[configure]
+command = ["nowcast", "brick", "forge", "configure"]
+
 [subscriptions.pr]
-description = "A branch's PR, open first, and the CI of its head, or of the branch's head without a PR."
-schema = "schemas/params-pr.json"
+description = "A branch's PR, open first, with the rollup of its CI."
+schema = "schemas/params-branch.json"
 publishes = "forge.pr/v1"
+
+[subscriptions.pipelines]
+description = "The pipelines that tested a branch's head, those of its PR included, with their jobs."
+schema = "schemas/params-branch.json"
+publishes = "forge.pipelines/v1"
+
+[subscriptions.issues]
+description = "A repository's open issues, at most 200, the most recently created, those assigned to the account apart."
+schema = "schemas/params-issues.json"
+publishes = "forge.issues/v1"
+
+[subscriptions.issue]
+description = "One issue of a repository, open or closed."
+schema = "schemas/params-issue.json"
+publishes = "forge.issue/v1"
 
 [types."forge.pr/v1"]
 schema = "schemas/pr-v1.json"
+
+[types."forge.pipelines/v1"]
+schema = "schemas/pipelines-v1.json"
+
+[types."forge.issues/v1"]
+schema = "schemas/issues-v1.json"
+
+[types."forge.issue/v1"]
+schema = "schemas/issue-v1.json"

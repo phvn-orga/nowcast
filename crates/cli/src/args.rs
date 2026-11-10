@@ -155,7 +155,7 @@ pub enum Command {
     /// service was stopped.
     Reload,
 
-    /// Enable or disable a brick
+    /// Enable, disable or configure a brick
     ///
     /// Acts on the bricks directory the service follows,
     /// $XDG_CONFIG_HOME/nowcast/bricks/, where a link <name>.toml activates a
@@ -175,8 +175,9 @@ pub enum Command {
     ///
     /// The native bricks named are enabled. With none, in a terminal, it asks
     /// which native bricks to enable, the enabled ones checked: unchecking
-    /// one disables it. Elsewhere it enables none. Any other brick is enabled
-    /// with `nowcast bricks enable`.
+    /// one disables it. Elsewhere it enables none. Each brick enabled goes
+    /// through its configuration, as with `nowcast bricks enable`. Any other
+    /// brick is enabled with `nowcast bricks enable`.
     Setup {
         /// Native bricks to enable, by name (claude-code)
         #[arg(conflicts_with = "remove")]
@@ -188,10 +189,16 @@ pub enum Command {
     },
 
     /// Run a brick native to nowcast on stdin and stdout, as the service launches it
+    ///
+    /// With `configure`, run its configuration in this terminal instead, as
+    /// `nowcast bricks configure <name>` does.
     #[command(hide = true)]
     Brick {
         /// The native brick's name
         name: String,
+        /// Run the brick's configuration instead
+        #[arg(value_parser = ["configure"])]
+        action: Option<String>,
     },
 
     /// Run the service, as systemd starts it on the first connection
@@ -222,12 +229,28 @@ pub enum BricksAction {
     /// its declaration sets, otherwise the service's, which enable asks the
     /// service for. When the service cannot tell, the brick is enabled
     /// unchecked.
+    ///
+    /// A brick that declares a configuration command ([configure]) runs it
+    /// first, in this terminal: a configuration that fails refuses the brick.
+    /// Without a terminal, the brick is enabled unconfigured, and a note says
+    /// so.
     Enable {
         /// A native brick's name, or the path of a declaration file
         brick: String,
-        /// Enable the brick without looking for its program
+        /// Enable the brick without looking for its program, even when its
+        /// configuration fails
         #[arg(long)]
         force: bool,
+    },
+    /// Run a brick's configuration command again, in this terminal (an
+    /// expired token, one more account)
+    ///
+    /// The brick is the one enabled under that name, otherwise the native
+    /// brick. Exits 2 for a brick that declares no configuration, 1 when the
+    /// configuration fails.
+    Configure {
+        /// The brick's name
+        brick: String,
     },
     /// Disable a brick, by its name
     Disable {
@@ -369,6 +392,25 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["nowcast", "setup", "--remove"]).is_ok());
         assert!(Cli::try_parse_from(["nowcast", "setup", "--remove", "claude-code"]).is_err());
+    }
+
+    #[test]
+    fn bricks_configure_takes_a_name() {
+        let cli = Cli::try_parse_from(["nowcast", "bricks", "configure", "forge"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Bricks { action: BricksAction::Configure { ref brick } } if brick == "forge"
+        ));
+    }
+
+    #[test]
+    fn brick_takes_configure_and_nothing_else() {
+        let cli = Cli::try_parse_from(["nowcast", "brick", "forge", "configure"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Brick { ref name, action: Some(ref a) } if name == "forge" && a == "configure"
+        ));
+        assert!(Cli::try_parse_from(["nowcast", "brick", "forge", "other"]).is_err());
     }
 
     #[test]

@@ -142,6 +142,25 @@ async fn enables_the_native_bricks_named() {
     assert!(stderr(&output).contains("Brick claude-code enabled"));
 }
 
+/// Without a terminal, a brick with a configuration is enabled
+/// unconfigured, as `bricks enable` does.
+#[tokio::test]
+async fn a_brick_enabled_without_a_terminal_goes_unconfigured() {
+    let home = Home::new();
+    let output = home.setup(&["forge"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(home.brick_link("forge").is_symlink());
+    let report = stderr(&output);
+    assert!(
+        report.contains("forge enabled without its configuration"),
+        "{report}"
+    );
+    assert!(
+        !home.root.path().join("config/nowcast/forge").exists(),
+        "nothing configured"
+    );
+}
+
 #[tokio::test]
 async fn refuses_a_brick_not_native_before_changing_anything() {
     let home = Home::new();

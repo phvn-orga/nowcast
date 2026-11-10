@@ -1,13 +1,17 @@
-//! `nowcast bricks enable|disable`: activates a brick by linking its
-//! declaration into the bricks directory, or removes the link. The service
-//! follows the directory; enable only asks it for the `PATH` a brick's
-//! program is looked up in.
+//! `nowcast bricks enable|disable|configure`: activates a brick by linking
+//! its declaration into the bricks directory, or removes the link; runs a
+//! brick's configuration command in the user's terminal. The service follows
+//! the directory; enable only asks it for the `PATH` a brick's program is
+//! looked up in.
 
+use std::io::{self, IsTerminal};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use nowcast_discovery::{DiscoveryConfig, load_manifest, native_dir_from_env, write_native};
 use nowcast_supervisor::SELF;
+use nowcast_traits::BrickDeclaration;
 use nowcast_types::BrickName;
 
 use crate::client::Client;
@@ -16,26 +20,118 @@ use crate::native;
 
 /// Enables `brick`: a native brick's name, or the path of any declaration
 /// file (one holding a `/` or ending in `.toml`). With `service`, its program
-/// is looked for first, and a program missing is refused.
-pub fn enable(brick: &str, service: Option<Result<Client, CliError>>) -> Result<(), CliError> {
+/// is looked for first, and a program missing is refused. Its configuration
+/// command runs before the link is made, in a terminal only: one that fails
+/// refuses the brick, unless `force`.
+pub fn enable(
+    brick: &str,
+    force: bool,
+    service: Option<Result<Client, CliError>>,
+) -> Result<(), CliError> {
     let bricks = bricks_dir()?;
     let declaration = if brick.contains('/') || brick.ends_with(".toml") {
         Path::new(brick).to_path_buf()
     } else {
-        let native = native::find(brick).ok_or_else(|| {
+        native_declaration(brick)?.ok_or_else(|| {
             CliError::Usage(format!(
                 "no native brick {brick:?}: give the path of a declaration file instead"
             ))
-        })?;
-        let dir = native_dir_from_env().map_err(|e| CliError::Usage(e.to_string()))?;
-        write_native(&dir, &native.files).map_err(CliError::Io)?
+        })?
     };
-    if let Some(service) = service {
-        check_program(brick, &declaration, service)?;
+    // An invalid declaration is refused when linked, with its reason.
+    let loaded = load_manifest(&declaration).ok();
+    if let (Some(service), Some(loaded)) = (service, &loaded) {
+        check_program(brick, loaded, service)?;
+    }
+    let mut unconfigured = None;
+    if let Some(loaded) = &loaded
+        && let Some(command) = &loaded.configure
+    {
+        let name = loaded.name.as_str();
+        // Its prompts read stdin and draw on stderr.
+        if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+            unconfigured = Some(name);
+        } else if let Err(e) = configure_with(command, &loaded.dir) {
+            if !force {
+                return Err(CliError::Configure(format!(
+                    "cannot enable {brick}: {e}. `nowcast bricks enable --force {brick}` \
+                     enables it unconfigured"
+                )));
+            }
+            eprintln!("nowcast: {e}; {name} enabled all the same (--force)");
+        }
     }
     nowcast_discovery::enable(&bricks, &declaration)
-        .map(drop)
-        .map_err(|e| CliError::Usage(format!("cannot enable {brick}: {e}")))
+        .map_err(|e| CliError::Usage(format!("cannot enable {brick}: {e}")))?;
+    if let Some(name) = unconfigured {
+        eprintln!(
+            "nowcast: {name} enabled without its configuration, no terminal to run it in: \
+             run `nowcast bricks configure {name}` in a terminal"
+        );
+    }
+    Ok(())
+}
+
+/// Runs again the configuration command of the brick named `name`: the
+/// declaration it is enabled with, otherwise the native brick's own.
+pub fn configure(name: &str) -> Result<(), CliError> {
+    let brick = BrickName::new(name)
+        .map_err(|e| CliError::Usage(format!("invalid brick name {name:?}: {e}")))?;
+    let declaration = if is_enabled(brick.as_str())? {
+        link(brick.as_str())?
+    } else {
+        native_declaration(name)?.ok_or_else(|| {
+            CliError::Usage(format!("no brick {name:?} enabled, and no native one"))
+        })?
+    };
+    let loaded = load_manifest(&declaration).map_err(|e| {
+        CliError::Usage(format!(
+            "cannot read the declaration of {name} ({}): {e}",
+            declaration.display()
+        ))
+    })?;
+    let command = loaded.configure.as_ref().ok_or_else(|| {
+        CliError::Usage(format!(
+            "{name} has nothing to configure: its declaration has no [configure]"
+        ))
+    })?;
+    configure_with(command, &loaded.dir).map_err(CliError::Configure)
+}
+
+/// The declaration of the native brick `name`, its embedded files written
+/// first; `None` for no native brick of that name.
+fn native_declaration(name: &str) -> Result<Option<PathBuf>, CliError> {
+    let Some(native) = native::find(name) else {
+        return Ok(None);
+    };
+    let dir = native_dir_from_env().map_err(|e| CliError::Usage(e.to_string()))?;
+    write_native(&dir, &native.files)
+        .map(Some)
+        .map_err(CliError::Io)
+}
+
+/// Runs a configuration `command` in the declaration's directory, on this
+/// terminal: a bare program name is looked up in the user's `PATH`, except
+/// `nowcast`, this executable. Why it failed, otherwise.
+fn configure_with(command: &[String], dir: &Path) -> Result<(), String> {
+    let (program, args) = command
+        .split_first()
+        .ok_or("the configuration command is empty")?;
+    let executable = if program == SELF {
+        std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?
+    } else {
+        PathBuf::from(program)
+    };
+    let status = Command::new(&executable)
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("cannot run the configuration {program:?}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("the configuration {program:?} failed ({status})"))
+    }
 }
 
 /// Refuses a declaration whose program is a bare name missing from the `PATH`
@@ -44,13 +140,9 @@ pub fn enable(brick: &str, service: Option<Result<Client, CliError>>) -> Result<
 /// program went unchecked.
 fn check_program(
     brick: &str,
-    declaration: &Path,
+    loaded: &BrickDeclaration,
     service: Result<Client, CliError>,
 ) -> Result<(), CliError> {
-    // An invalid declaration is refused when linked, with its reason.
-    let Ok(loaded) = load_manifest(declaration) else {
-        return Ok(());
-    };
     let Some(program) = loaded.command.first() else {
         return Ok(());
     };
@@ -136,8 +228,12 @@ pub fn disable(brick: &str) -> Result<(), CliError> {
 /// Whether the brick named `name` is enabled: its link is in the bricks
 /// directory.
 pub fn is_enabled(name: &str) -> Result<bool, CliError> {
-    let link = bricks_dir()?.join(format!("{name}.toml"));
-    Ok(std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink()))
+    Ok(std::fs::symlink_metadata(link(name)?).is_ok_and(|meta| meta.file_type().is_symlink()))
+}
+
+/// The link that enables the brick named `name`.
+fn link(name: &str) -> Result<PathBuf, CliError> {
+    Ok(bricks_dir()?.join(format!("{name}.toml")))
 }
 
 fn bricks_dir() -> Result<std::path::PathBuf, CliError> {

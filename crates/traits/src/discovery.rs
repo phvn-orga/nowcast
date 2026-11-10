@@ -22,6 +22,10 @@ pub struct BrickDeclaration {
     /// runs there.
     pub dir: PathBuf,
     pub env: BTreeMap<String, String>,
+    /// The command that configures the brick, run by the tool in the user's
+    /// terminal, never by the service. Resolved as [`Self::command`], except
+    /// that a bare program name is looked up in the user's `PATH`.
+    pub configure: Option<Vec<String>>,
     /// By subscription kind.
     pub subscriptions: BTreeMap<String, SubscriptionKind>,
     /// By published or accepted type, for example `forge.pr/v1`.

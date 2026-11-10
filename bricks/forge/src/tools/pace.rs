@@ -1,5 +1,5 @@
-//! When to read a flow next, from what its last reading saw. The first state
-//! that applies wins:
+//! A pace machine providers may use: when to read a branch next, from what
+//! its last reading saw. The first state that applies wins:
 //!
 //! 1. CI expected: a new head (a push, a PR just opened) with no pipeline
 //!    yet, for at most [`EXPECTED_FOR`];
@@ -9,10 +9,11 @@
 //! 4. normal.
 //!
 //! A `refresh` only asks for a reading now: what that reading sees sets the
-//! pace after it.
+//! pace after it. Each provider sets the durations ([`Rhythm`]).
 
 use std::time::Duration;
 
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 /// How long a new head without pipeline counts as expecting a CI. Past it,
@@ -23,7 +24,7 @@ pub const EXPECTED_FIRST: Duration = Duration::from_secs(30);
 /// How long a `refresh` keeps the pace fast.
 pub const WINDOW_FOR: Duration = Duration::from_secs(30);
 
-/// The intervals of one forge.
+/// The intervals of one provider.
 #[derive(Debug, Clone, Copy)]
 pub struct Rhythm {
     pub expected_first: Duration,
@@ -33,19 +34,10 @@ pub struct Rhythm {
     pub normal: Duration,
 }
 
-/// GitHub: a reading that changes nothing is free.
-pub const GITHUB: Rhythm = Rhythm {
-    expected_first: Duration::from_secs(2),
-    expected_after: Duration::from_secs(5),
-    running: Duration::from_secs(5),
-    window: Duration::from_secs(2),
-    normal: Duration::from_secs(60),
-};
-
-/// What the pace remembers of a flow between readings.
+/// What the pace remembers of a branch between readings.
 #[derive(Debug, Default)]
 pub struct Pace {
-    /// What the CI of the flow is about: the head read last and the PR it
+    /// What the CI of the branch is about: the head read last and the PR it
     /// belongs to. `None` before the first reading.
     subject: Option<(Option<String>, Option<u64>)>,
     /// When the subject last changed, for a CI to be expected.
@@ -72,10 +64,22 @@ impl Pace {
         self.subject = Some(subject);
     }
 
+    /// Until when a CI is due while it has not shown up: [`EXPECTED_FOR`]
+    /// after the last change, when there is no pipeline yet. The deadline
+    /// may have passed already.
+    pub fn expected_until(&self, pipelines: usize) -> Option<Instant> {
+        if pipelines == 0 {
+            self.changed_at.map(|at| at + EXPECTED_FOR)
+        } else {
+            None
+        }
+    }
+
     /// Whether a CI is due and has not shown up: a recent change, and no
     /// pipeline yet.
     pub fn expects(&self, now: Instant, pipelines: usize) -> bool {
-        pipelines == 0 && self.changed_at.is_some_and(|at| now < at + EXPECTED_FOR)
+        self.expected_until(pipelines)
+            .is_some_and(|until| now < until)
     }
 
     /// How long to wait before the next reading.
@@ -97,9 +101,43 @@ impl Pace {
     }
 }
 
+/// Waits until `deadline`, or for a `refresh`, which ends the wait unless a
+/// rate limit holds it (`limited`); refreshes that piled up count as one,
+/// each calling `refreshed`. `false` once the core is gone.
+pub async fn wait_or_refresh(
+    deadline: Instant,
+    refreshes: &mut UnboundedReceiver<()>,
+    limited: bool,
+    mut refreshed: impl FnMut(),
+) -> bool {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => return true,
+            refresh = refreshes.recv() => {
+                if refresh.is_none() {
+                    return false;
+                }
+                while refreshes.try_recv().is_ok() {}
+                refreshed();
+                if !limited {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GITHUB: Rhythm = Rhythm {
+        expected_first: Duration::from_secs(2),
+        expected_after: Duration::from_secs(5),
+        running: Duration::from_secs(5),
+        window: Duration::from_secs(2),
+        normal: Duration::from_secs(60),
+    };
 
     const S: fn(u64) -> Duration = Duration::from_secs;
 
@@ -140,6 +178,8 @@ mod tests {
         pace.saw(t0, Some("a"), None);
         pace.saw(t0, Some("a"), Some(7));
         assert!(pace.expects(t0, 0));
+        assert_eq!(pace.expected_until(0), Some(t0 + EXPECTED_FOR));
+        assert_eq!(pace.expected_until(1), None, "the CI showed up");
     }
 
     #[test]
