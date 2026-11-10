@@ -154,6 +154,19 @@ test('a new session starts with an empty list', async ($, on) => {
   expect(await listed(w)).toEqual([entry('feature', 1_000_000)])
 })
 
+test('a reloaded mod takes back the list its state holds', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  tools(on)
+  // What the mod wrote before it reloaded, which outlives the reload.
+  const before = entry('feature', 900_000)
+  on('state.get', { plugin: 'nowcast', key: 'worktrees' }, () => ({ value: { value: [before], version: 1 } }))
+  await $.session.start(START)
+
+  await edit($, `${ROOT('main')}/a.ts`)
+
+  expect(await listed(w)).toEqual([entry('main', 1_000_000), before])
+})
+
 test('the measures carry the list', async ($, on) => {
   const flow = 'claude-code/session/session-1'
   const input = `/v1/flows/${encodeURIComponent(flow)}/input`
