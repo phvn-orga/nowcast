@@ -216,7 +216,7 @@ l'utilisateur du service (droits `0600`, `00-cadrage.md`).
 répond `201` :
 
 ```json
-{ "subscription": "s-7f3a", "flow": "forge/github.com/org/repo#main", "last": null }
+{ "subscription": "s-7f3a", "flow": "forge/pr/github.com/org/repo#main", "last": null }
 ```
 
 - Le service valide `params` contre le JSON Schema déclaré pour cette sorte
@@ -330,7 +330,7 @@ grand. Seule une horloge remise en arrière rompt cette garantie.
 ```
 event: update
 id: 42
-data: {"specversion":"1.0","id":"42","source":"nowcast://bricks/forge","type":"forge.pr/v1","subject":"forge/github.com/org/repo#main","time":"2026-11-05T13:30:00Z","dataschema":"nowcast://bricks/forge/types/forge.pr/v1","data":{"number":123,"state":"open","draft":false,"checks":[{"name":"build","state":"pass"}]}}
+data: {"specversion":"1.0","id":"42","source":"nowcast://bricks/forge","type":"forge.pr/v1","subject":"forge/pr/github.com/org/repo#main","time":"2026-11-05T13:30:00Z","dataschema":"nowcast://bricks/forge/types/forge.pr/v1","data":{"repo":"github.com/org/repo","branch":"main","pr":{"number":123,"state":"open","draft":false},"ci":{"state":"pass"}}}
 ```
 
 Attributs de l'événement :
@@ -396,8 +396,8 @@ Exemple d'échange, en notation JSON pour la lisibilité :
 service → {"v":1,"t":"hello","name":"forge","protocol":1}
 brique  → {"v":1,"t":"ready"}
 service → {"v":1,"t":"subscribe","req":1,"kind":"pr","params":<bin {"remote":"…","branch":"main"}>}
-brique  → {"v":1,"t":"subscribed","req":1,"flow":"github.com/org/repo#main"}
-brique  → {"v":1,"t":"publish","req":7,"flow":"github.com/org/repo#main","type":"forge.pr/v1","detail":<bin {…}>}
+brique  → {"v":1,"t":"subscribed","req":1,"flow":"pr/github.com/org/repo#main"}
+brique  → {"v":1,"t":"publish","req":7,"flow":"pr/github.com/org/repo#main","type":"forge.pr/v1","detail":<bin {…}>}
 service → {"v":1,"t":"ack","req":7}
 ```
 

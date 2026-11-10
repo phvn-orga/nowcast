@@ -145,7 +145,7 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   même nom, ce qui remplace l'abonnement à l'ancien.
 - **Le mod central rafraîchit la brique forge après une action de sa session** :
   après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
-  `az repos pr`…), il demande le rafraîchissement de tous les flux de la sorte
+  `az repos pr`, `gh issue`, `az boards work-item`…), il demande le rafraîchissement de tous les flux de la sorte
   concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
   dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
   Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
