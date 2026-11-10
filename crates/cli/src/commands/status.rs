@@ -33,7 +33,7 @@ pub async fn status(
             json!({ "installed": INSTALLED, "running": running, "setup": setup })
         )?;
     } else {
-        out.write_all(readable(INSTALLED, running.as_ref(), setup).as_bytes())?;
+        out.write_all(readable(INSTALLED, running.as_ref(), setup, ask_systemd).as_bytes())?;
     }
     Ok(())
 }
@@ -58,8 +58,14 @@ pub(crate) fn waits_for_a_connection(states: &str) -> bool {
 
 /// The status for a human, `running` being the service's `GET /v1/status`
 /// answer, `None` when it is stopped, and `setup` the state of the units,
-/// shown when `nowcast setup` has to run.
-fn readable(installed: &str, running: Option<&Value>, setup: Option<Units>) -> String {
+/// shown when `nowcast setup` has to run. `systemd` says whether the socket
+/// is the one systemd holds, which `nowcast reload` restarts.
+fn readable(
+    installed: &str,
+    running: Option<&Value>,
+    setup: Option<Units>,
+    systemd: bool,
+) -> String {
     let mut text = String::new();
     let Some(status) = running else {
         let _ = writeln!(text, "service    stopped");
@@ -76,10 +82,13 @@ fn readable(installed: &str, running: Option<&Value>, setup: Option<Units>) -> S
         version.unwrap_or("unknown version")
     );
     if version.is_some_and(|v| v != installed) {
-        let _ = writeln!(
-            text,
-            "installed  {installed}, not the service's: run nowcast reload to run it"
-        );
+        // What `nowcast reload` would refuse is not offered.
+        let how = match setup {
+            Some(Units::Current) if systemd => "run nowcast reload to run it",
+            Some(Units::Outdated) if systemd => "run nowcast setup, then nowcast reload",
+            _ => "restart the service to run it",
+        };
+        let _ = writeln!(text, "installed  {installed}, not the service's: {how}");
     } else {
         let _ = writeln!(text, "installed  {installed}");
     }
@@ -185,11 +194,11 @@ mod tests {
     #[test]
     fn a_stopped_service_shows_the_installed_version() {
         assert_eq!(
-            readable("0.2.0", None, Some(Units::Current)),
+            readable("0.2.0", None, Some(Units::Current), true),
             "service    stopped\ninstalled  0.2.0\n"
         );
         assert_eq!(
-            readable("0.2.0", None, Some(Units::Missing)),
+            readable("0.2.0", None, Some(Units::Missing), true),
             "service    stopped\ninstalled  0.2.0\n\
              setup      missing: run nowcast setup to let systemd start the service\n"
         );
@@ -218,7 +227,7 @@ mod tests {
             ],
         });
         assert_eq!(
-            readable("0.2.0", Some(&status), None),
+            readable("0.2.0", Some(&status), None, true),
             "\
 service    0.2.0, running since 2026-11-08T16:41:00Z
 installed  0.2.0
@@ -247,15 +256,35 @@ flows
             "flows": [],
         });
         assert_eq!(
-            readable("0.2.0", Some(&status), Some(Units::Outdated)),
+            readable("0.2.0", Some(&status), Some(Units::Outdated), true),
             "\
 service    0.1.0, running since 2026-11-08T16:41:00Z
-installed  0.2.0, not the service's: run nowcast reload to run it
+installed  0.2.0, not the service's: run nowcast setup, then nowcast reload
 setup      outdated: run nowcast setup again
 bricks  none
 sessions  none
 flows  none
 "
+        );
+        let second = |text: String| text.lines().nth(1).unwrap().to_owned();
+        assert_eq!(
+            second(readable("0.2.0", Some(&status), Some(Units::Current), true)),
+            "installed  0.2.0, not the service's: run nowcast reload to run it"
+        );
+        // Where reload would refuse: without the units, or on a socket given.
+        let restart = "installed  0.2.0, not the service's: restart the service to run it";
+        assert_eq!(
+            second(readable("0.2.0", Some(&status), Some(Units::Missing), true)),
+            restart
+        );
+        assert_eq!(
+            second(readable(
+                "0.2.0",
+                Some(&status),
+                Some(Units::Current),
+                false
+            )),
+            restart
         );
     }
 }

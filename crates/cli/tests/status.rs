@@ -64,7 +64,7 @@ async fn flags_a_service_running_another_version() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let expected = format!(
         "service    0.0.1, running since 2026-11-08T16:41:00Z\n\
-         installed  {INSTALLED}, not the service's: run nowcast reload to run it\n"
+         installed  {INSTALLED}, not the service's: restart the service to run it\n"
     );
     assert!(
         stdout(&output).starts_with(&expected),

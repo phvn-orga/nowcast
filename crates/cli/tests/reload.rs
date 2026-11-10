@@ -251,3 +251,71 @@ async fn refuses_a_socket_given() {
     );
     assert!(fake.log().is_empty());
 }
+
+#[tokio::test]
+async fn an_error_after_the_restart_says_the_restart_happened() {
+    let fake = Fake::start(Anchoring::PerProcess).await;
+    let home = Home::new();
+    home.set_up(&fake).await;
+    fake.can("/v1/service", 200, "application/json", &service("0.0.1"));
+
+    home.hold_restart();
+    let child = home
+        .command(&fake)
+        .arg("reload")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    home.restart_called().await;
+    fake.can("/v1/service", 500, "text/plain", "broken");
+    home.let_restart_return();
+    let output = child.wait_with_output().await.unwrap();
+
+    assert_ne!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr(&output).contains("systemd restarted the service, which ran 0.0.1"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[tokio::test]
+async fn a_service_that_never_answers_is_restarted_without_waiting_long() {
+    let fake = Fake::absent(Anchoring::PerProcess);
+    let home = Home::new();
+    home.set_up(&fake).await;
+    // Accepts connections and never answers, before the restart and after.
+    std::fs::create_dir_all(fake.socket().parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(fake.socket()).unwrap();
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let child = home
+        .command(&fake)
+        .arg("reload")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    home.restart_called().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "restarted after {:?}",
+        started.elapsed()
+    );
+    let output = child.wait_with_output().await.unwrap();
+    silent.abort();
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        stderr(&output).contains("systemd restarted the service, which ran an unknown version"),
+        "{}",
+        stderr(&output)
+    );
+}

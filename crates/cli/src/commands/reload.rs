@@ -5,6 +5,7 @@
 //! subscriptions) as after an idle stop; systemd holds the socket meanwhile.
 
 use std::io::Write;
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -12,6 +13,12 @@ use crate::client::Client;
 use crate::commands::setup::{SERVICE, Units, systemctl, units_state};
 use crate::commands::status::{systemd_states, waits_for_a_connection};
 use crate::error::CliError;
+
+/// How long the running service has to tell its version before the restart:
+/// one that no longer answers is what a restart is for.
+const BEFORE_TIMEOUT: Duration = Duration::from_secs(1);
+
+const UNKNOWN: &str = "an unknown version";
 
 pub async fn reload(
     client: &Client,
@@ -50,14 +57,19 @@ pub async fn reload(
         }
         return Ok(());
     }
-    // A service that does not answer is what a restart is for.
-    let before = client.service_version().await.ok().flatten();
+    let before = tokio::time::timeout(BEFORE_TIMEOUT, client.service_version())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
     systemctl(&["restart", SERVICE])?;
-    let after = client.service_version().await?;
+    let after = client
+        .service_version()
+        .await
+        .map_err(|e| restarted(e, before.as_deref()))?;
     if json {
         writeln!(out, "{}", json!({ "before": before, "after": after }))?;
     } else {
-        const UNKNOWN: &str = "an unknown version";
         writeln!(
             out,
             "service restarted: {} → {}",
@@ -66,4 +78,25 @@ pub async fn reload(
         )?;
     }
     Ok(())
+}
+
+/// `error`, from the service after systemd restarted it, saying so and which
+/// version ran `before`.
+fn restarted(error: CliError, before: Option<&str>) -> CliError {
+    let note = format!(
+        "systemd restarted the service, which ran {}",
+        before.unwrap_or(UNKNOWN)
+    );
+    match error {
+        CliError::Unreachable { socket, reason } => CliError::Unreachable {
+            socket,
+            reason: format!("{reason}; {note}"),
+        },
+        CliError::Api { code, message } => CliError::Api {
+            code,
+            message: format!("{message}; {note}"),
+        },
+        CliError::Protocol(message) => CliError::Protocol(format!("{message}; {note}")),
+        other => other,
+    }
 }
