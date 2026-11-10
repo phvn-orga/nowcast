@@ -15,6 +15,7 @@
     "last_request_at": { "type": ["string", "null"] },
     "cache_ttl": { "enum": ["5m", "1h", null] },
     "cache_expires_at": { "type": ["string", "null"], "description": "last_request_at plus cache_ttl, one hour when unknown." },
-    "cost_usd": { "type": ["number", "null"] }
+    "cost_usd": { "type": ["number", "null"] },
+    "worktrees": { "type": "array", "description": "The worktrees the session wrote in, as its last measure sent them; empty until one does." }
   }
 }

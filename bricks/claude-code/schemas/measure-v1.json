@@ -50,6 +50,22 @@
         }
       }
     },
-    "cost_usd": { "type": "number" }
+    "cost_usd": { "type": "number" },
+    "worktrees": {
+      "type": "array",
+      "description": "The worktrees the session wrote in through Edit and Write, the most recent write first, at most 16.",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["path", "repo", "branch", "remote", "written_at"],
+        "properties": {
+          "path": { "type": "string", "description": "The worktree's root." },
+          "repo": { "type": "string", "description": "The common git directory, the same for every worktree of a repository." },
+          "branch": { "type": ["string", "null"], "description": "The branch at the last write; null on a detached HEAD." },
+          "remote": { "type": ["string", "null"], "description": "The origin remote's URL as git has it." },
+          "written_at": { "type": "string", "description": "The last write in it, RFC 3339." }
+        }
+      }
+    }
   }
 }

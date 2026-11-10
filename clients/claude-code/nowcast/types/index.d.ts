@@ -112,6 +112,23 @@ export type NowcastStream = {
 }
 
 /**
+ * A worktree the session wrote in: an `Edit` or `Write` that succeeded, of
+ * the main loop or a subagent. Reads and Bash commands do not count.
+ */
+export type NowcastWorktree = {
+  /** The worktree's root, absolute. */
+  path: string
+  /** The common git directory, the same for every worktree of a repository. */
+  repo: string
+  /** The branch checked out at the last write; null on a detached HEAD. */
+  branch: string | null
+  /** The `origin` remote's URL as git has it, the forge brick's `remote`; null without one. */
+  remote: string | null
+  /** The last write in it, RFC 3339. */
+  written_at: string
+}
+
+/**
  * Requests to the service, as `$.nowcast`. Each goes from this process, as
  * the stream does, so the service ties both to the same session.
  *
@@ -254,6 +271,13 @@ declare module 'claude-code' {
       /** One member per flow the session's stream delivered, by flow id. */
       flows: StateFamily<NowcastFlow>
       stream: NowcastStream
+      /**
+       * The worktrees the session wrote in, the most recent write first, at
+       * most 16; one whose root is gone leaves at the next write. Absent
+       * until the session writes: a consumer then follows the session's
+       * directory. Kept whether or not the claude-code brick is enabled.
+       */
+      worktrees: NowcastWorktree[]
     }
   }
 }

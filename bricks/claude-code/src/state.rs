@@ -382,6 +382,7 @@ impl State {
             "last_request_at",
             "cache_ttl",
             "cost_usd",
+            "worktrees",
         ] {
             if let Some(value) = measure.get(key) {
                 entry.insert(key.into(), value.clone());
@@ -523,6 +524,7 @@ fn empty_entry(id: &str) -> Map<String, Value> {
     ] {
         entry.insert(key.into(), Value::Null);
     }
+    entry.insert("worktrees".into(), json!([]));
     entry
 }
 
@@ -663,6 +665,28 @@ mod tests {
         let out = published(&input(&mut state, "s1", json!({ "effort": "high" }), 6));
         assert_eq!(out[0].1["model"], "claude-opus-5-5");
         assert_eq!(out[0].1["effort"], "high");
+    }
+
+    #[test]
+    fn the_worktrees_are_those_of_the_last_measure_none_before() {
+        let mut state = State::default();
+        subscribe(&mut state, "session", json!({ "id": "s1" }));
+        let out = published(&input(&mut state, "s1", json!({ "model": "m" }), 1));
+        assert_eq!(out[0].1["worktrees"], json!([]));
+
+        let worktrees = json!([{
+            "path": "/lab/r/feature", "repo": "/lab/r/.bare", "branch": "feature",
+            "remote": "git@github.com:o/r.git", "written_at": "2026-11-10T08:58:12Z",
+        }]);
+        let out = published(&input(
+            &mut state,
+            "s1",
+            json!({ "worktrees": worktrees }),
+            2,
+        ));
+        assert_eq!(out[0].1["worktrees"], worktrees);
+        let out = published(&input(&mut state, "s1", json!({ "worktrees": [] }), 3));
+        assert_eq!(out[0].1["worktrees"], json!([]));
     }
 
     #[test]
