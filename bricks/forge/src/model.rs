@@ -177,15 +177,18 @@ impl Ci {
     }
 
     /// The rollup of the required items; `None` when nothing says what is.
+    /// A required check still missing while the CI is expected or runs is
+    /// `running`: it may come yet, from a job that `needs` a running one.
     fn required_state(&self, now: Instant) -> Option<&'static str> {
-        let any = self.elements().any(|(_, r)| r.is_some()) || !self.missing_required.is_empty();
+        let missing = !self.missing_required.is_empty();
+        let any = self.elements().any(|(_, r)| r.is_some()) || missing;
         any.then(|| {
             rollup(
                 self.elements()
                     .filter(|(_, r)| *r == Some(true))
                     .map(|(s, _)| s),
-                !self.missing_required.is_empty(),
-                self.expected(now),
+                missing,
+                self.expected(now) || (missing && self.is_running()),
             )
         })
     }
@@ -415,6 +418,32 @@ pub(crate) mod tests {
         ci.expected_until = None;
         ci.missing_required.clear();
         assert_eq!(ci.detail(now)["required_state"], "pass");
+    }
+
+    /// A required check may `need` a job that still runs: while anything
+    /// runs, a missing one is not a blocker yet.
+    #[test]
+    fn a_missing_required_check_is_running_while_the_ci_runs() {
+        let now = Instant::now();
+        let mut ci = ci(vec![pipeline(
+            State::Running,
+            vec![
+                job("build", State::Running, Some(false)),
+                job("check", State::Pass, Some(true)),
+            ],
+        )]);
+        ci.missing_required = vec!["e2e".into()];
+        assert_eq!(ci.detail(now)["required_state"], "running");
+        ci.missing_required.clear();
+        assert_eq!(
+            ci.detail(now)["required_state"],
+            "pass",
+            "a non-required job running holds back nothing required"
+        );
+        ci.missing_required = vec!["e2e".into()];
+        ci.pipelines[0].state = State::Pass;
+        ci.pipelines[0].jobs[0].state = State::Pass;
+        assert_eq!(ci.detail(now)["required_state"], "missing", "all is over");
     }
 
     /// A required pipeline that waits for its build has no job to carry the
