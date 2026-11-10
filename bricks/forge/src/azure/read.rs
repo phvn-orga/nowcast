@@ -206,8 +206,10 @@ async fn branch_ci(
     })
 }
 
-/// The builds that tested `sha`, the latest of each definition and reason,
-/// those of the definitions in `left_out` aside.
+/// The builds that tested `sha`, the latest of each definition and trigger,
+/// those of the definitions in `left_out` aside. `individualCI` and
+/// `batchedCI` are both a push, so one pipeline; a reason without a neutral
+/// trigger keeps its own.
 fn latest(builds: &Value, sha: &str, left_out: &HashSet<u64>) -> Vec<Value> {
     let mut tested: Vec<&Value> = list(builds)
         .iter()
@@ -222,7 +224,14 @@ fn latest(builds: &Value, sha: &str, left_out: &HashSet<u64>) -> Vec<Value> {
     let mut kept = HashSet::new();
     tested
         .into_iter()
-        .filter(|b| kept.insert((b["definition"]["id"].as_u64(), b["reason"].as_str())))
+        .filter(|b| {
+            let reason = b["reason"].as_str().unwrap_or_default();
+            let key = match trigger(reason) {
+                Trigger::Other => reason,
+                neutral => neutral.as_str(),
+            };
+            kept.insert((b["definition"]["id"].as_u64(), key))
+        })
         .cloned()
         .collect()
 }
@@ -730,6 +739,32 @@ mod tests {
         ] {
             assert_eq!(trigger(reason), trigger_, "{reason}");
         }
+    }
+
+    #[test]
+    fn one_pipeline_per_definition_and_trigger() {
+        let build = |id: u64, definition: u64, reason: &str| {
+            json!({ "id": id, "sourceVersion": "abc", "reason": reason,
+                    "definition": { "id": definition } })
+        };
+        let builds = json!({ "value": [
+            build(1, 10, "individualCI"),
+            build(2, 10, "batchedCI"),
+            build(3, 10, "pullRequest"),
+            build(4, 10, "buildCompletion"),
+            build(5, 10, "checkInShelveset"),
+            build(6, 10, "checkInShelveset"),
+            build(7, 11, "individualCI"),
+        ] });
+        let ids: Vec<_> = latest(&builds, "abc", &HashSet::new())
+            .iter()
+            .map(|b| b["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [7, 6, 4, 3, 2],
+            "both pushes are one, each other reason its own"
+        );
     }
 
     fn evaluation(id: &str, status: &str, context: Value, blocking: bool) -> Value {
