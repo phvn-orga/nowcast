@@ -16,9 +16,10 @@ use jiff::Timestamp;
 use nowcast_types::{BrickMessage, FlowId, RequestId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Instant;
 
 use crate::model::Ci;
-use crate::provider::{BranchReading, Outcome, Provider, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
 
 pub const PR_TYPE: &str = "forge.pr/v1";
 pub const PIPELINES_TYPE: &str = "forge.pipelines/v1";
@@ -64,12 +65,24 @@ struct Target {
     repo: Repo,
     branch: String,
     watch: Watch,
-    flows: usize,
+    /// The flows this target serves; it is released with the last one.
+    flows: Vec<FlowId>,
     /// The last successful reading.
     reading: Option<BranchReading>,
-    /// `pending` until the first reading, then `ok` or the last failure.
-    status: &'static str,
+    /// `None` until the first reading, then how the last one went.
+    status: Option<Result<(), Failure>>,
     as_of: Option<Timestamp>,
+}
+
+impl Target {
+    /// `source.status` in the details.
+    fn source_status(&self) -> &'static str {
+        match self.status {
+            None => "pending",
+            Some(Ok(())) => "ok",
+            Some(Err(failure)) => failure.as_str(),
+        }
+    }
 }
 
 struct Flow {
@@ -162,37 +175,43 @@ impl Core {
                     repo,
                     branch: branch.to_owned(),
                     watch,
-                    flows: 0,
+                    flows: Vec::new(),
                     reading: None,
-                    status: "pending",
+                    status: None,
                     as_of: None,
                 },
             );
         }
         let target = self.targets.get_mut(&key).expect("just inserted");
-        target.flows += 1;
+        target.flows.push(flow.clone());
         let mut new = Flow {
             kind,
             target: key,
             force: false,
             published: None,
         };
-        if target.status != "pending" {
-            out.extend(publish(&mut self.last_req, &flow, &mut new, target));
+        if target.status.is_some() {
+            out.extend(publish(
+                &mut self.last_req,
+                &flow,
+                &mut new,
+                target,
+                Instant::now(),
+            ));
         }
         self.flows.insert(flow, new);
         out
     }
 
-    /// The last subscriber of `flow` left; its branch stops being followed
+    /// The last subscriber of flow `id` left; its branch stops being followed
     /// when no other flow needs it.
-    pub fn release(&mut self, flow: &FlowId) {
-        let Some(flow) = self.flows.remove(flow) else {
+    pub fn release(&mut self, id: &FlowId) {
+        let Some(flow) = self.flows.remove(id) else {
             return;
         };
         if let Some(target) = self.targets.get_mut(&flow.target) {
-            target.flows -= 1;
-            if target.flows == 0
+            target.flows.retain(|f| f != id);
+            if target.flows.is_empty()
                 && let Some(target) = self.targets.remove(&flow.target)
             {
                 self.by_id.remove(&target.id);
@@ -212,9 +231,15 @@ impl Core {
     }
 
     /// Takes in what a provider read for target `id` at `at`, and publishes
-    /// the flows whose detail changed or that a `refresh` asked for. A
-    /// failure keeps the last reading.
-    pub fn update(&mut self, id: u64, outcome: Outcome, at: Timestamp) -> Vec<BrickMessage> {
+    /// the flows whose detail changed or that a `refresh` asked for, as of
+    /// `now`. A failure keeps the last reading.
+    pub fn update(
+        &mut self,
+        id: u64,
+        outcome: Outcome,
+        at: Timestamp,
+        now: Instant,
+    ) -> Vec<BrickMessage> {
         let Some(key) = self.by_id.get(&id) else {
             return vec![];
         };
@@ -224,29 +249,34 @@ impl Core {
         match outcome {
             Ok(reading) => {
                 target.reading = Some(reading);
-                target.status = "ok";
+                target.status = Some(Ok(()));
                 target.as_of = Some(at);
             }
-            Err(failure) => target.status = failure.as_str(),
+            Err(failure) => target.status = Some(Err(failure)),
         }
+        let target = &*target;
         let mut out = Vec::new();
-        for (flow_id, flow) in self.flows.iter_mut().filter(|(_, f)| f.target == *key) {
-            out.extend(publish(&mut self.last_req, flow_id, flow, target));
+        for flow_id in &target.flows {
+            if let Some(flow) = self.flows.get_mut(flow_id) {
+                out.extend(publish(&mut self.last_req, flow_id, flow, target, now));
+            }
         }
         out
     }
 }
 
-/// Publishes `flow` when its detail changed or a `refresh` asked for it.
+/// Publishes `flow` when its detail as of `now` changed or a `refresh`
+/// asked for it.
 fn publish(
     last_req: &mut u64,
     id: &FlowId,
     flow: &mut Flow,
     target: &Target,
+    now: Instant,
 ) -> Option<BrickMessage> {
     let detail = match flow.kind {
-        Kind::Pr => pr_detail(target),
-        Kind::Pipelines => pipelines_detail(target),
+        Kind::Pr => pr_detail(target, now),
+        Kind::Pipelines => pipelines_detail(target, now),
     };
     let force = std::mem::take(&mut flow.force);
     if !force && flow.published.as_ref() == Some(&detail) {
@@ -264,8 +294,8 @@ fn publish(
     })
 }
 
-/// `forge.pr/v1`, without its `as_of`.
-fn pr_detail(target: &Target) -> Value {
+/// `forge.pr/v1` as of `now`, without its `as_of`.
+fn pr_detail(target: &Target, now: Instant) -> Value {
     let reading = target.reading.as_ref();
     let pr = reading.and_then(|r| r.pr.as_ref()).map(|p| {
         json!({
@@ -285,16 +315,16 @@ fn pr_detail(target: &Target) -> Value {
         "branch": target.branch,
         "head_sha": reading.and_then(|r| r.head_sha.as_deref()),
         "pr": pr,
-        "ci": reading.and_then(|r| r.ci.as_ref()).map(Ci::synthesis),
-        "source": { "status": target.status, "as_of": null },
+        "ci": reading.and_then(|r| r.ci.as_ref()).map(|c| c.synthesis(now)),
+        "source": { "status": target.source_status(), "as_of": null },
     })
 }
 
-/// `forge.pipelines/v1`, without its `as_of`.
-fn pipelines_detail(target: &Target) -> Value {
+/// `forge.pipelines/v1` as of `now`, without its `as_of`.
+fn pipelines_detail(target: &Target, now: Instant) -> Value {
     let reading = target.reading.as_ref();
     let ci = reading.and_then(|r| r.ci.as_ref());
-    let mut detail = ci.map_or_else(|| Ci::default().detail(), Ci::detail);
+    let mut detail = ci.map_or_else(|| Ci::default().detail(now), |c| c.detail(now));
     detail["repo"] = json!(target.repo.id);
     detail["branch"] = json!(target.branch);
     detail["sha"] = json!(ci.map(|c| &c.sha));
@@ -304,20 +334,20 @@ fn pipelines_detail(target: &Target) -> Value {
             .filter(|p| p.is_open())
             .map(|p| p.number)
     );
-    detail["source"] = json!({ "status": target.status, "as_of": null });
+    detail["source"] = json!({ "status": target.source_status(), "as_of": null });
     detail
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     use super::*;
     use crate::model::tests::{ci, job, pipeline};
     use crate::model::{Pr, State};
-    use crate::provider::Failure;
 
     /// Recognises `https://forge/<repo>`; records what it follows and each
     /// `refresh` it receives.
@@ -437,7 +467,12 @@ mod tests {
         let (mut core, _) = core();
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
         core.subscribe(RequestId(2), "pipelines", &params("https://forge/o/r"));
-        let first = published(&core.update(1, reading("a", State::Running), Timestamp::now()));
+        let first = published(&core.update(
+            1,
+            reading("a", State::Running),
+            Timestamp::now(),
+            Instant::now(),
+        ));
         assert_eq!(first.len(), 2);
         let pr = &first.iter().find(|(f, _)| f.starts_with("pr/")).unwrap().1;
         assert_eq!(pr["pr"]["number"], 7);
@@ -458,7 +493,7 @@ mod tests {
 
         let later = Timestamp::now() + jiff::SignedDuration::from_secs(5);
         assert!(
-            core.update(1, reading("a", State::Running), later)
+            core.update(1, reading("a", State::Running), later, Instant::now())
                 .is_empty(),
             "only as_of moved"
         );
@@ -468,12 +503,22 @@ mod tests {
     async fn a_refresh_reaches_the_provider_and_forces_a_publication() {
         let (mut core, fake) = core();
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
-        core.update(1, reading("a", State::Pass), Timestamp::now());
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
         let flow = FlowId::new("pr/forge/o/r#feat").unwrap();
         core.refresh(&flow);
         tokio::task::yield_now().await;
         assert_eq!(*fake.refreshes.lock().unwrap(), 1);
-        let out = core.update(1, reading("a", State::Pass), Timestamp::now());
+        let out = core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
         assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
     }
 
@@ -481,10 +526,42 @@ mod tests {
     async fn a_failure_keeps_the_last_reading() {
         let (mut core, _) = core();
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
-        core.update(1, reading("a", State::Pass), Timestamp::now());
-        let out = published(&core.update(1, Err(Failure::Unreachable), Timestamp::now()));
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        let out = published(&core.update(
+            1,
+            Err(Failure::Unreachable),
+            Timestamp::now(),
+            Instant::now(),
+        ));
         assert_eq!(out[0].1["source"]["status"], "unreachable");
         assert_eq!(out[0].1["pr"]["number"], 7, "the last reading stays");
+    }
+
+    #[tokio::test]
+    async fn an_expected_ci_expires_even_when_the_readings_fail() {
+        let (mut core, _) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        let t0 = Instant::now();
+        let expected = Ok(BranchReading {
+            head_sha: Some("a".into()),
+            pr: None,
+            ci: Some(Ci {
+                sha: "a".into(),
+                expected_until: Some(t0 + Duration::from_secs(120)),
+                ..Ci::default()
+            }),
+        });
+        let out = published(&core.update(1, expected, Timestamp::now(), t0));
+        assert_eq!(out[0].1["ci"]["state"], "running");
+        let later = t0 + Duration::from_secs(121);
+        let out = published(&core.update(1, Err(Failure::Unreachable), Timestamp::now(), later));
+        assert_eq!(out[0].1["source"]["status"], "unreachable");
+        assert_eq!(out[0].1["ci"]["state"], "none", "no CI came for this push");
     }
 
     #[tokio::test]
@@ -497,7 +574,12 @@ mod tests {
             "nothing read yet"
         );
         core.release(&FlowId::new("pipelines/forge/o/r#feat").unwrap());
-        core.update(1, reading("a", State::Pass), Timestamp::now());
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
         let out = core.subscribe(RequestId(3), "pipelines", &params("https://forge/o/r"));
         assert!(matches!(out[0], BrickMessage::Subscribed { .. }));
         assert_eq!(published(&out)[0].1["state"], "pass");
@@ -510,19 +592,35 @@ mod tests {
         core.subscribe(RequestId(2), "pipelines", &params("https://forge/o/r"));
         core.release(&FlowId::new("pr/forge/o/r#feat").unwrap());
         assert!(
-            !published(&core.update(1, reading("a", State::Pass), Timestamp::now())).is_empty(),
+            !published(&core.update(
+                1,
+                reading("a", State::Pass),
+                Timestamp::now(),
+                Instant::now()
+            ))
+            .is_empty(),
             "the pipelines flow still needs the branch"
         );
         core.release(&FlowId::new("pipelines/forge/o/r#feat").unwrap());
         assert!(
-            core.update(1, reading("b", State::Pass), Timestamp::now())
-                .is_empty()
+            core.update(
+                1,
+                reading("b", State::Pass),
+                Timestamp::now(),
+                Instant::now()
+            )
+            .is_empty()
         );
         core.subscribe(RequestId(3), "pr", &params("https://forge/o/r"));
         assert_eq!(fake.followed.lock().unwrap().len(), 2, "followed anew");
         assert!(
-            core.update(1, reading("c", State::Pass), Timestamp::now())
-                .is_empty(),
+            core.update(
+                1,
+                reading("c", State::Pass),
+                Timestamp::now(),
+                Instant::now()
+            )
+            .is_empty(),
             "a reading of the released target is ignored"
         );
     }
@@ -531,7 +629,12 @@ mod tests {
     async fn without_commit_the_pipelines_are_empty() {
         let (mut core, _) = core();
         core.subscribe(RequestId(1), "pipelines", &params("https://forge/o/r"));
-        let out = published(&core.update(1, Ok(BranchReading::default()), Timestamp::now()));
+        let out = published(&core.update(
+            1,
+            Ok(BranchReading::default()),
+            Timestamp::now(),
+            Instant::now(),
+        ));
         let detail = &out[0].1;
         assert_eq!(detail["sha"], Value::Null);
         assert_eq!(detail["pr"], Value::Null);

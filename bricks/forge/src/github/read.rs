@@ -44,8 +44,8 @@ pub async fn read(
         let closed = get(format!("{repo}/pulls?head={head}&state=closed&per_page=1")).await?;
         pr = closed.as_array().and_then(|a| a.first()).and_then(pr_of);
     }
-    let open_pr = pr.as_ref().filter(|p| p.is_open());
-    let head_sha = match open_pr {
+    let open_one = pr.as_ref().filter(|p| p.is_open());
+    let head_sha = match open_one {
         Some(pr) => Some(pr.head_sha.clone()),
         None => match get(format!("{repo}/branches/{}", encode(branch))).await {
             Ok(b) => b["commit"]["sha"].as_str().map(str::to_owned),
@@ -62,9 +62,9 @@ pub async fn read(
             )?;
             Some(Ci {
                 sha: sha.clone(),
-                pipelines: pipelines(&runs, &checks, &statuses, open_pr.map(|p| p.number)),
+                pipelines: pipelines(&runs, &checks, &statuses, open_one.map(|p| p.number)),
                 missing_required: Vec::new(),
-                expected: false,
+                expected_until: None,
             })
         }
         None => None,

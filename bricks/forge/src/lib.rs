@@ -27,6 +27,7 @@ use nowcast_codec::{read_service, write_brick};
 use nowcast_types::{BrickMessage, ServiceMessage};
 use tokio::io::{Stdout, stdin, stdout};
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::time::Instant;
 
 use crate::github::GitHub;
 use crate::provider::Provider;
@@ -137,7 +138,7 @@ async fn serve() -> ExitCode {
                     ServiceMessage::Input { .. } | ServiceMessage::Ack { .. } => vec![],
                 }
             }
-            Some((target, outcome)) = updates.recv() => core.update(target, outcome, Timestamp::now()),
+            Some((target, outcome)) = updates.recv() => core.update(target, outcome, Timestamp::now(), Instant::now()),
         };
         if !send(&mut output, out).await {
             return ExitCode::FAILURE;

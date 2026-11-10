@@ -115,7 +115,7 @@ impl Branch {
                     );
                     let delay = match &mut reading.ci {
                         Some(ci) => {
-                            ci.expected = pace.expects(now, ci.pipelines.len());
+                            ci.expected_until = pace.expected_until(ci.pipelines.len());
                             pace.next(&RHYTHM, now, ci.pipelines.len(), ci.is_running())
                         }
                         None => pace.next(&RHYTHM, now, 0, false),
@@ -339,11 +339,14 @@ mod tests {
             .lock()
             .unwrap()
             .insert("denied".into(), "old".into());
-        // SAFETY: tests of this module only read the variable.
-        unsafe { std::env::set_var(TOKEN_VAR, "t") };
         assert_eq!(denied.read_once().await, (Err(Failure::Unauthorized), None));
         assert!(denied.tokens.lock().unwrap().is_empty());
         let limited = branch(&server, "busy");
+        limited
+            .tokens
+            .lock()
+            .unwrap()
+            .insert("busy".into(), "t".into());
         assert_eq!(
             limited.read_once().await,
             (Err(Failure::RateLimited), Some(Duration::from_secs(300)))
@@ -369,9 +372,8 @@ mod tests {
             }
         })
         .await;
-        // SAFETY: tests of this module only read the variable.
-        unsafe { std::env::set_var(TOKEN_VAR, "t") };
         let github = GitHub::new(Http::new().unwrap(), server.base());
+        github.tokens.lock().unwrap().insert("o".into(), "t".into());
         let repo = github.recognise("git@github.com:o/r.git").unwrap();
         assert_eq!(repo.id, "github.com/o/r");
         let (tx, mut rx) = unbounded_channel();
@@ -382,6 +384,6 @@ mod tests {
         assert_eq!(reading.pr.unwrap().number, 7);
         let ci = reading.ci.unwrap();
         assert_eq!(ci.sha, "abc");
-        assert!(!ci.expected, "the first reading expects nothing");
+        assert_eq!(ci.expected_until, None, "the first reading expects nothing");
     }
 }

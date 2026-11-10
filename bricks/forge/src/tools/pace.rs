@@ -63,10 +63,22 @@ impl Pace {
         self.subject = Some(subject);
     }
 
+    /// Until when a CI is due while it has not shown up: [`EXPECTED_FOR`]
+    /// after the last change, when there is no pipeline yet. The deadline
+    /// may have passed already.
+    pub fn expected_until(&self, pipelines: usize) -> Option<Instant> {
+        if pipelines == 0 {
+            self.changed_at.map(|at| at + EXPECTED_FOR)
+        } else {
+            None
+        }
+    }
+
     /// Whether a CI is due and has not shown up: a recent change, and no
     /// pipeline yet.
     pub fn expects(&self, now: Instant, pipelines: usize) -> bool {
-        pipelines == 0 && self.changed_at.is_some_and(|at| now < at + EXPECTED_FOR)
+        self.expected_until(pipelines)
+            .is_some_and(|until| now < until)
     }
 
     /// How long to wait before the next reading.
@@ -139,6 +151,8 @@ mod tests {
         pace.saw(t0, Some("a"), None);
         pace.saw(t0, Some("a"), Some(7));
         assert!(pace.expects(t0, 0));
+        assert_eq!(pace.expected_until(0), Some(t0 + EXPECTED_FOR));
+        assert_eq!(pace.expected_until(1), None, "the CI showed up");
     }
 
     #[test]
