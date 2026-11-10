@@ -119,9 +119,16 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   d'après (`0.1.0-alpha.5 → 0.1.0-alpha.6`) ; sous `--json`, `{"before": <version ou
   null>, "after": <version>}`. Il redémarre même à version égale : un binaire
   reconstruit depuis les sources garde la sienne.
+  - **Un service qui ne répond plus est redémarré sans attendre.** Le service en
+    marche a 1 s pour dire sa version : c'est précisément lui qu'un redémarrage
+    répare. Sans réponse, la version d'avant est inconnue (`null`).
+  - **Une erreur après le redémarrage le dit.** Si le nouveau service ne répond pas,
+    le message d'erreur précise que systemd l'a redémarré, et quelle version tournait
+    avant.
   - **Un service arrêté n'est pas réveillé.** Quand systemd tient le socket sans que
     le service tourne, la prochaine connexion lancera déjà le binaire installé :
     `reload` le dit et sort en 0, comme `status` ne se connecte pas dans ce cas.
+    Sous `--json`, `before` et `after` valent alors `null` tous les deux.
   - **Il ne vaut que sous systemd, avec des unités à jour.** Sans les unités de
     `setup`, ou avec un socket donné explicitement, il n'y a rien à redémarrer pour
     lui : il le dit et sort en erreur. Des unités `outdated` le font refuser aussi, en
@@ -139,6 +146,9 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   - **Ce qui renvoie à `reload`.** `nowcast status`, quand la version en marche
     diffère de l'installée, et le mod central, quand il refuse un service trop
     ancien, nomment la commande plutôt qu'un redémarrage à faire soi-même.
+    `status` ne la propose que là où elle aboutirait : unités à jour et socket de
+    systemd. Avec des unités `outdated`, il dit `nowcast setup` puis `nowcast
+    reload` ; sans unités ou sur un socket donné, il dit de redémarrer le service.
   - **Écartés pour l'instant**, faute d'un consommateur qui souffre de la perte de
     l'historique : un service qui écrit ses flux (dernières valeurs, historique) sur
     disque à l'arrêt et les relit au démarrage, à reprendre avec la trace des flux
