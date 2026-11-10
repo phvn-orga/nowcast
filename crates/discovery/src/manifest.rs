@@ -33,6 +33,8 @@ pub enum ManifestError {
     },
     #[error("[run] command is empty")]
     EmptyCommand,
+    #[error("[configure] command is empty")]
+    EmptyConfigureCommand,
     #[error("the command resolves to {path}, which is not valid UTF-8")]
     NonUtf8Command { path: PathBuf },
     #[error("subscription kind {kind:?} publishes {publishes:?}, which [types] does not declare")]
@@ -70,6 +72,8 @@ struct RawManifest {
     protocol: u32,
     run: RawRun,
     #[serde(default)]
+    configure: Option<RawConfigure>,
+    #[serde(default)]
     subscriptions: BTreeMap<String, RawSubscription>,
     #[serde(default)]
     types: BTreeMap<String, RawType>,
@@ -81,6 +85,12 @@ struct RawRun {
     command: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfigure {
+    command: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -137,7 +147,11 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
         version: raw.version.clone(),
         source,
     })?;
-    let command = resolve_command(raw.run.command, &dir)?;
+    let command = resolve_command(raw.run.command, &dir, ManifestError::EmptyCommand)?;
+    let configure = raw
+        .configure
+        .map(|c| resolve_command(c.command, &dir, ManifestError::EmptyConfigureCommand))
+        .transpose()?;
 
     for (kind, subscription) in &raw.subscriptions {
         if subscription.publishes.is_none() && subscription.accepts.is_none() {
@@ -195,18 +209,23 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
         command,
         dir,
         env: raw.run.env,
+        configure,
         subscriptions,
         types,
     })
 }
 
 /// A program path (one with a `/`) resolves from `dir` when relative; a bare
-/// program name is kept for a `PATH` lookup at launch.
-fn resolve_command(mut command: Vec<String>, dir: &Path) -> Result<Vec<String>, ManifestError> {
-    let program = command.first_mut().ok_or(ManifestError::EmptyCommand)?;
-    if program.is_empty() {
-        return Err(ManifestError::EmptyCommand);
-    }
+/// program name is kept for a `PATH` lookup at launch. An empty command is
+/// `empty`.
+fn resolve_command(
+    mut command: Vec<String>,
+    dir: &Path,
+    empty: ManifestError,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(program) = command.first_mut().filter(|p| !p.is_empty()) else {
+        return Err(empty);
+    };
     if program.contains('/') {
         let resolved = normalize(&dir.join(&*program));
         // The trait holds the command as strings: a directory whose path is

@@ -288,3 +288,45 @@ run = { command = ["bin/b"] }
         "{error}"
     );
 }
+
+#[test]
+fn the_configure_command_is_optional_and_resolved_as_the_run_command() {
+    let repo = Repo::new();
+    let brick = load_manifest(&repo.manifest(r#"command = ["b"]"#, OBJECT, OBJECT)).unwrap();
+    assert_eq!(brick.configure, None);
+    for (configure, expected) in [
+        (
+            r#"["./bin/configure", "x"]"#,
+            vec![repo.root.join("bin/configure").to_str().unwrap(), "x"],
+        ),
+        (r#"["/abs/configure"]"#, vec!["/abs/configure"]),
+        (
+            r#"["nowcast", "brick", "b", "configure"]"#,
+            vec!["nowcast", "brick", "b", "configure"],
+        ),
+    ] {
+        let run = format!("command = [\"b\"]\n\n[configure]\ncommand = {configure}");
+        let brick = load_manifest(&repo.manifest(&run, OBJECT, OBJECT)).unwrap();
+        assert_eq!(
+            brick.configure,
+            Some(expected.iter().map(|s| s.to_string()).collect())
+        );
+    }
+}
+
+#[test]
+fn an_empty_or_odd_configure_command_is_refused() {
+    for configure in [r#"command = []"#, r#"command = ["", "x"]"#] {
+        let repo = Repo::new();
+        let run = format!("command = [\"b\"]\n\n[configure]\n{configure}");
+        let error = load_manifest(&repo.manifest(&run, OBJECT, OBJECT)).unwrap_err();
+        assert!(
+            matches!(error, ManifestError::EmptyConfigureCommand),
+            "{configure}: {error}"
+        );
+    }
+    let repo = Repo::new();
+    let run = "command = [\"b\"]\n\n[configure]\ncommand = [\"c\"]\nenv = {}";
+    let error = load_manifest(&repo.manifest(run, OBJECT, OBJECT)).unwrap_err();
+    assert!(matches!(error, ManifestError::Toml(_)), "{error}");
+}

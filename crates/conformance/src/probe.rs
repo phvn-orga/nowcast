@@ -52,6 +52,7 @@ pub fn declaration(command: Vec<String>, dir: PathBuf) -> BrickDeclaration {
         command,
         dir,
         env: BTreeMap::new(),
+        configure: None,
         subscriptions: BTreeMap::from([
             (
                 KIND.into(),

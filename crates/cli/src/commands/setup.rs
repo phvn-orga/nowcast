@@ -71,7 +71,7 @@ pub fn setup(
     for (native, enable) in &wanted {
         let name = native.files.name;
         if *enable {
-            bricks::enable(name, Some(client()))?;
+            bricks::enable(name, false, Some(client()))?;
             log::success(format!("Brick {name} enabled"))?;
         } else {
             bricks::disable(name)?;

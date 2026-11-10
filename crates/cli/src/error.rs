@@ -29,6 +29,8 @@ pub enum CliError {
     /// Setting the service up or removing it failed: a unit file, or
     /// `systemctl`.
     Setup(String),
+    /// A brick's configuration command could not run, or failed.
+    Configure(String),
     /// Writing the output failed.
     Io(io::Error),
 }
@@ -38,7 +40,7 @@ impl CliError {
         match self {
             // Nobody reads a closed pipe: stop quietly, like `head` expects.
             Self::Io(e) if e.kind() == io::ErrorKind::BrokenPipe => 0,
-            Self::Api { .. } | Self::Setup(_) | Self::Io(_) => exit::FAILURE,
+            Self::Api { .. } | Self::Setup(_) | Self::Configure(_) | Self::Io(_) => exit::FAILURE,
             Self::Usage(_) => exit::USAGE,
             Self::Unreachable { .. } => exit::UNREACHABLE,
             Self::Protocol(_) => exit::PROTOCOL,
@@ -53,6 +55,7 @@ impl CliError {
             Self::Unreachable { .. } => "service_unreachable",
             Self::Protocol(_) => "unexpected_response",
             Self::Setup(_) => "setup_failed",
+            Self::Configure(_) => "configure_failed",
             Self::Io(_) => "output_failed",
         }
     }
@@ -60,9 +63,10 @@ impl CliError {
     pub fn message(&self) -> String {
         match self {
             Self::Api { message, .. } => message.clone(),
-            Self::Usage(message) | Self::Protocol(message) | Self::Setup(message) => {
-                message.clone()
-            }
+            Self::Usage(message)
+            | Self::Protocol(message)
+            | Self::Setup(message)
+            | Self::Configure(message) => message.clone(),
             Self::Unreachable { socket, reason } => {
                 format!("cannot reach the service at {}: {reason}", socket.display())
             }

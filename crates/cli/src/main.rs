@@ -38,9 +38,10 @@ fn main() -> ExitCode {
             let result = match action {
                 BricksAction::Enable { brick, force } => {
                     let service = (!force).then(|| client(&cli));
-                    commands::bricks::enable(brick, service)
+                    commands::bricks::enable(brick, *force, service)
                 }
                 BricksAction::Disable { brick } => commands::bricks::disable(brick),
+                BricksAction::Configure { brick } => commands::bricks::configure(brick),
             };
             return exit_code(result, cli.json);
         }

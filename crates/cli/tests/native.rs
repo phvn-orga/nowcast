@@ -1,6 +1,7 @@
 //! The native bricks the binary carries: `nowcast brick <name>` against the
-//! brick side of the protocol, and `nowcast bricks enable|disable`, which
-//! looks a brick's program up in the service's `PATH`.
+//! brick side of the protocol, `nowcast bricks enable|disable`, which looks
+//! a brick's program up in the service's `PATH`, and the configuration
+//! command a brick declares, which `enable` and `bricks configure` run.
 
 mod common;
 
@@ -210,4 +211,176 @@ async fn a_service_out_of_reach_leaves_the_program_unchecked() {
 /// The test brick's declaration, shipped with its crate.
 fn nowcast_test_brick_manifest() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-brick/brick/probe.toml")
+}
+
+/// A brick declared in `root/brick/`, whose configuration command writes
+/// its arguments, and whether its stdin is a terminal, into `configured`
+/// beside the declaration, then exits with `exit`.
+fn configured_brick(root: &Path, exit: u8) -> std::path::PathBuf {
+    let dir = root.join("brick");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("configure");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ -t 0 ]; then tty=tty; else tty=none; fi\n\
+             echo \"$tty $*\" > configured\nexit {exit}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let declaration = dir.join("brick.toml");
+    std::fs::write(
+        &declaration,
+        r#"
+manifest_version = 1
+name = "configured"
+version = "0.1.0"
+description = "A brick with a configuration."
+protocol = 1
+
+[run]
+command = ["./brick"]
+
+[configure]
+command = ["./configure", "a"]
+"#,
+    )
+    .unwrap();
+    declaration
+}
+
+/// What the configuration command wrote, `None` when it did not run.
+fn configured(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join("brick/configured")).ok()
+}
+
+fn configured_link(root: &Path) -> std::path::PathBuf {
+    root.join("config/nowcast/bricks/configured.toml")
+}
+
+/// A pseudo-terminal: its controlling side, kept open while the command
+/// runs, and the terminal to give the command as its stdin.
+fn terminal() -> (rustix::fd::OwnedFd, std::process::Stdio) {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let name = ptsname(&master, Vec::new()).unwrap();
+    let slave = rustix::fs::open(
+        name.as_c_str(),
+        OFlags::RDWR | OFlags::NOCTTY,
+        Mode::empty(),
+    )
+    .unwrap();
+    (master, std::process::Stdio::from(slave))
+}
+
+/// `nowcast bricks <args>` with `root`'s directories, in a terminal or not.
+async fn bricks_in(root: &Path, tty: bool, args: &[&str]) -> std::process::Output {
+    let mut command = bricks(&root.join("config"), &root.join("data"));
+    let _master = if tty {
+        let (master, stdin) = terminal();
+        command.stdin(stdin);
+        Some(master)
+    } else {
+        None
+    };
+    run(&mut command, args).await
+}
+
+#[tokio::test]
+async fn enable_runs_the_configuration_in_the_terminal_first() {
+    let root = tempfile::tempdir().unwrap();
+    let declaration = configured_brick(root.path(), 0);
+    let output = bricks_in(
+        root.path(),
+        true,
+        &["enable", declaration.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(configured(root.path()).as_deref(), Some("tty a\n"));
+    assert!(configured_link(root.path()).is_symlink());
+}
+
+#[tokio::test]
+async fn a_failed_configuration_refuses_the_brick_unless_forced() {
+    let root = tempfile::tempdir().unwrap();
+    let declaration = configured_brick(root.path(), 3);
+    let path = declaration.to_str().unwrap();
+    let output = bricks_in(root.path(), true, &["enable", path]).await;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let message = stderr(&output);
+    assert!(message.contains("configure\" failed (exit status: 3)"), "{message}");
+    assert!(message.contains("--force"), "{message}");
+    assert!(std::fs::symlink_metadata(configured_link(root.path())).is_err());
+
+    let forced = bricks_in(root.path(), true, &["enable", "--force", path]).await;
+    assert_eq!(forced.status.code(), Some(0), "{forced:?}");
+    assert!(
+        stderr(&forced).contains("enabled all the same"),
+        "{forced:?}"
+    );
+    assert!(configured_link(root.path()).is_symlink());
+}
+
+#[tokio::test]
+async fn without_a_terminal_the_brick_is_enabled_unconfigured() {
+    let root = tempfile::tempdir().unwrap();
+    let declaration = configured_brick(root.path(), 0);
+    let output = bricks_in(
+        root.path(),
+        false,
+        &["enable", declaration.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(configured(root.path()), None);
+    let message = stderr(&output);
+    assert!(
+        message.contains("configured enabled without its configuration"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`nowcast bricks configure configured`"),
+        "{message}"
+    );
+    assert!(configured_link(root.path()).is_symlink());
+}
+
+#[tokio::test]
+async fn bricks_configure_runs_the_configuration_again() {
+    let root = tempfile::tempdir().unwrap();
+    let declaration = configured_brick(root.path(), 0);
+    let enabled = bricks_in(
+        root.path(),
+        false,
+        &["enable", declaration.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(enabled.status.code(), Some(0), "{enabled:?}");
+    let output = bricks_in(root.path(), true, &["configure", "configured"]).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(configured(root.path()).as_deref(), Some("tty a\n"));
+
+    configured_brick(root.path(), 5);
+    let failed = bricks_in(root.path(), true, &["configure", "configured"]).await;
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    assert!(stderr(&failed).contains("exit status: 5"), "{failed:?}");
+}
+
+#[tokio::test]
+async fn a_brick_without_configuration_says_so() {
+    let root = tempfile::tempdir().unwrap();
+    let output = bricks_in(root.path(), true, &["configure", "claude-code"]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        stderr(&output).contains("claude-code has nothing to configure"),
+        "{output:?}"
+    );
+    let output = bricks_in(root.path(), true, &["configure", "nope"]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }

@@ -73,6 +73,7 @@ mod tests {
             command: vec!["b".into()],
             dir: PathBuf::from("/"),
             env: Default::default(),
+            configure: None,
             subscriptions: Default::default(),
             types: Default::default(),
         })

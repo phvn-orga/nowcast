@@ -52,6 +52,8 @@ nowcast bricks enable claude-code
 
 `claude-code` publishes the quotas of the Claude Code account and the measures of its running sessions. Any other brick is enabled by the path of its declaration file (`nowcast bricks enable path/to/brick.toml`), and `nowcast bricks disable <name>` turns one off.
 
+A brick that needs a configuration (credentials, for one) declares a command for it in `[configure]`: enabling the brick runs it in your terminal first, and `nowcast bricks configure <name>` runs it again later. Without a terminal, the brick is enabled unconfigured.
+
 ### The bricks' PATH
 
 A brick whose command starts with a bare program name (`node`, `python3`) finds that program in the `PATH` its declaration sets in `[run] env`, or else in the service's. Under systemd, the service's `PATH` is the user manager's (`systemctl --user show-environment`), which lacks the runtimes a version manager installs per user (fnm, nvm, mise, asdf). `nowcast bricks enable` refuses a brick whose program is missing from it (`--force` enables it anyway), and a subscription to such a brick fails with the cause.

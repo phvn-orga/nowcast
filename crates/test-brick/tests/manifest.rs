@@ -112,6 +112,7 @@ impl ManifestSubject for Section1 {
             command,
             dir,
             env: file.run.env,
+            configure: None,
             subscriptions,
             types,
         })
