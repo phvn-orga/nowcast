@@ -1,5 +1,5 @@
-//! The forge brick, native to nowcast: a branch's PR and its pipelines,
-//! whatever the forge. The `nowcast` binary runs it as `nowcast brick
+//! The forge brick, native to nowcast: a branch's PR and its pipelines, and
+//! a repository's issues, whatever the forge. The `nowcast` binary runs it as `nowcast brick
 //! forge`; its declaration and schemas are [`FILES`].
 //!
 //! The brick is organised by usages, not by forges:
@@ -52,6 +52,22 @@ pub const FILES: &[(&str, &str)] = &[
     (
         "schemas/pipelines-v1.json",
         include_str!("../schemas/pipelines-v1.json"),
+    ),
+    (
+        "schemas/params-issues.json",
+        include_str!("../schemas/params-issues.json"),
+    ),
+    (
+        "schemas/params-issue.json",
+        include_str!("../schemas/params-issue.json"),
+    ),
+    (
+        "schemas/issues-v1.json",
+        include_str!("../schemas/issues-v1.json"),
+    ),
+    (
+        "schemas/issue-v1.json",
+        include_str!("../schemas/issue-v1.json"),
     ),
 ];
 

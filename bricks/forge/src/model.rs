@@ -1,7 +1,7 @@
 //! The neutral model every provider maps its forge onto: a PR, the pipelines
-//! of a commit with their jobs, and their rollup. It is the output contract:
-//! `forge.pr/v1` and `forge.pipelines/v1` are built from it, whatever the
-//! forge.
+//! of a commit with their jobs, their rollup, and issues. It is the output
+//! contract: `forge.pr/v1`, `forge.pipelines/v1`, `forge.issues/v1` and
+//! `forge.issue/v1` are built from it, whatever the forge.
 
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -326,6 +326,42 @@ fn pipeline_json(p: &Pipeline) -> Value {
             "url": j.url,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// An issue: a tracking item of the forge, an issue on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue {
+    /// The number the forge shows.
+    pub number: u64,
+    pub title: String,
+    /// The item's type as the forge names it, when it gives one.
+    pub kind: Option<String>,
+    pub url: String,
+    /// Open or closed, as the provider decides from what its forge knows.
+    pub open: bool,
+}
+
+impl Issue {
+    /// The issue as `forge.issues/v1` lists it.
+    pub fn summary(&self) -> Value {
+        json!({ "number": self.number, "title": self.title, "type": self.kind, "url": self.url })
+    }
+
+    pub const fn state(&self) -> &'static str {
+        if self.open { "open" } else { "closed" }
+    }
+}
+
+/// The open issues of a tracker, the most recently created first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Issues {
+    /// The account that reads.
+    pub account: String,
+    /// Those assigned to that account.
+    pub mine: Vec<Issue>,
+    pub others: Vec<Issue>,
+    /// Whether there are more than the provider read.
+    pub truncated: bool,
 }
 
 #[cfg(test)]

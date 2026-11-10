@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "required": ["tracker", "account", "mine", "others", "truncated", "source"],
+  "$defs": {
+    "time": { "type": ["string", "null"], "description": "RFC 3339." },
+    "issue": {
+      "type": "object",
+      "required": ["number", "title", "type", "url"],
+      "properties": {
+        "number": { "type": "integer", "description": "The number the forge shows." },
+        "title": { "type": "string" },
+        "type": { "type": ["string", "null"], "description": "The item's type as the forge names it; null when it gives none." },
+        "url": { "type": "string" }
+      }
+    }
+  },
+  "properties": {
+    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub." },
+    "account": { "type": ["string", "null"], "description": "The account that reads; null before the first reading." },
+    "mine": { "type": "array", "items": { "$ref": "#/$defs/issue" }, "description": "Open issues assigned to the account, the most recently created first." },
+    "others": { "type": "array", "items": { "$ref": "#/$defs/issue" }, "description": "The other open issues, the most recently created first." },
+    "truncated": { "type": "boolean", "description": "Whether there are more open issues than those listed." },
+    "source": {
+      "type": "object",
+      "required": ["status", "as_of"],
+      "properties": {
+        "status": { "enum": ["pending", "ok", "no_credentials", "unauthorized", "not_found", "rate_limited", "unreachable", "unreadable"] },
+        "as_of": { "$ref": "#/$defs/time", "description": "The last successful reading." }
+      }
+    }
+  }
+}

@@ -25,6 +25,7 @@ const CACHE_MAX: usize = 4096;
 pub enum Failure {
     /// `401`, or `403` without a rate limit: the token was refused.
     Unauthorized,
+    /// `404`, or `410`: gone, such as a deleted issue.
     NotFound,
     /// A rate limit, with how long to wait when the forge says.
     Limited(Option<Duration>),
@@ -139,7 +140,7 @@ async fn json(response: Response) -> Result<Value, Failure> {
     let status = response.status();
     match status {
         StatusCode::UNAUTHORIZED => return Err(Failure::Unauthorized),
-        StatusCode::NOT_FOUND => return Err(Failure::NotFound),
+        StatusCode::NOT_FOUND | StatusCode::GONE => return Err(Failure::NotFound),
         StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => {
             return Err(match limit(response.headers()) {
                 Some(wait) => Failure::Limited(wait),
@@ -246,6 +247,7 @@ mod tests {
         let server = Server::start(|request| match request.lines().next().unwrap_or_default() {
             l if l.contains("/401") => (401, vec![], String::new()),
             l if l.contains("/404") => (404, vec![], String::new()),
+            l if l.contains("/410") => (410, vec![], String::new()),
             l if l.contains("/limited") => (403, vec![("Retry-After", "7")], String::new()),
             l if l.contains("/forbidden") => (403, vec![], String::new()),
             _ => (200, vec![], "not json".into()),
@@ -258,6 +260,7 @@ mod tests {
         };
         assert_eq!(get("/401").await, Err(Failure::Unauthorized));
         assert_eq!(get("/404").await, Err(Failure::NotFound));
+        assert_eq!(get("/410").await, Err(Failure::NotFound));
         assert_eq!(
             get("/limited").await,
             Err(Failure::Limited(Some(Duration::from_secs(7))))

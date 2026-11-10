@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["remote"],
+  "properties": {
+    "remote": { "type": "string", "minLength": 1, "description": "URL of the git remote: SSH, HTTPS or SSH alias. The repositories of one tracker share a flow." }
+  },
+  "additionalProperties": false
+}

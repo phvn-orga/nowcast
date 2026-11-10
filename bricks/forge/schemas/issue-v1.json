@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "required": ["tracker", "number", "title", "type", "state", "url", "source"],
+  "$defs": {
+    "time": { "type": ["string", "null"], "description": "RFC 3339." }
+  },
+  "properties": {
+    "tracker": { "type": "string", "description": "What holds the repository's issues: github.com/<owner>/<name> on GitHub." },
+    "number": { "type": "integer", "description": "The number subscribed to." },
+    "title": { "type": ["string", "null"], "description": "Null while the issue was never read, such as a number that is no issue." },
+    "type": { "type": ["string", "null"], "description": "The item's type as the forge names it; null when it gives none." },
+    "state": { "enum": ["open", "closed", null] },
+    "url": { "type": ["string", "null"] },
+    "source": {
+      "type": "object",
+      "required": ["status", "as_of"],
+      "properties": {
+        "status": { "enum": ["pending", "ok", "no_credentials", "unauthorized", "not_found", "rate_limited", "unreachable", "unreadable"] },
+        "as_of": { "$ref": "#/$defs/time", "description": "The last successful reading." }
+      }
+    }
+  }
+}

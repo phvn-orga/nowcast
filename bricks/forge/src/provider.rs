@@ -1,6 +1,6 @@
 //! What a forge implements to be read by the brick. The core knows no forge:
 //! it asks each provider whether it recognises a remote, and has the one
-//! that does follow a branch. How and when the provider reads (protocol,
+//! that does follow a branch, a tracker's open issues, or one issue. How and when the provider reads (protocol,
 //! pace, quotas, cache) is its own business; what it hands back is the
 //! neutral model of [`crate::model`].
 
@@ -9,7 +9,7 @@ use std::future::Future;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::AbortHandle;
 
-use crate::model::{Ci, Pr};
+use crate::model::{Ci, Issue, Issues, Pr};
 
 /// A repository a provider recognised.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,10 @@ pub struct Repo {
     /// The repository's identity, the same for every spelling of its remote:
     /// `github.com/<owner>/<name>`.
     pub id: String,
+    /// The identity of what holds the repository's issues, which several
+    /// repositories may share: `github.com/<owner>/<name>` on GitHub, the
+    /// repository itself.
+    pub tracker: String,
     /// The remote as the first subscriber wrote it.
     pub remote: String,
 }
@@ -57,9 +61,19 @@ impl Failure {
     }
 }
 
-pub type Outcome = Result<BranchReading, Failure>;
+/// What one reading of a target found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reading {
+    Branch(Box<BranchReading>),
+    /// A tracker's open issues.
+    Issues(Issues),
+    /// One issue.
+    Issue(Issue),
+}
 
-/// Where a provider sends the readings of one branch it follows.
+pub type Outcome = Result<Reading, Failure>;
+
+/// Where a provider sends the readings of one target it follows.
 pub struct Updates {
     target: u64,
     tx: UnboundedSender<(u64, Outcome)>,
@@ -76,7 +90,7 @@ impl Updates {
     }
 }
 
-/// A branch a provider follows. Dropping it stops the following.
+/// A target a provider follows. Dropping it stops the following.
 pub struct Watch {
     refresh: UnboundedSender<()>,
     task: AbortHandle,
@@ -117,7 +131,18 @@ pub trait Provider: Send + Sync {
     fn recognise(&self, remote: &str) -> Option<Repo>;
 
     /// Starts following `branch` of `repo`, a repository this provider
-    /// recognised: every reading goes to `updates`, until the returned
-    /// [`Watch`] is dropped.
+    /// recognised: every reading, a [`Reading::Branch`], goes to `updates`,
+    /// until the returned [`Watch`] is dropped.
     fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch;
+
+    /// Starts following the open issues of the tracker of `repo`: every
+    /// reading, a [`Reading::Issues`], goes to `updates`, until the returned
+    /// [`Watch`] is dropped.
+    fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch;
+
+    /// Starts following issue `number` of the tracker of `repo`: every
+    /// reading, a [`Reading::Issue`], goes to `updates`, until the returned
+    /// [`Watch`] is dropped. A number that is no issue is
+    /// [`Failure::NotFound`].
+    fn follow_issue(&self, repo: &Repo, number: u64, updates: Updates) -> Watch;
 }

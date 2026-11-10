@@ -4,11 +4,15 @@
 //! - `pr {remote, branch}` publishes `forge.pr/v1`, flow
 //!   `pr/<repo>#<branch>`;
 //! - `pipelines {remote, branch}` publishes `forge.pipelines/v1`, flow
-//!   `pipelines/<repo>#<branch>`.
+//!   `pipelines/<repo>#<branch>`;
+//! - `issues {remote}` publishes `forge.issues/v1`, flow `issues/<tracker>`;
+//! - `issue {remote, number}` publishes `forge.issue/v1`, flow
+//!   `issue/<tracker>#<number>`.
 //!
-//! Both kinds of one branch share a target: the provider follows the branch
-//! once and each reading serves both flows. A flow is published when its
-//! detail changed, and after a `refresh` in any case.
+//! A target is what a provider follows: a branch, a tracker's open issues,
+//! or one issue. Both kinds of one branch share a target: the provider
+//! follows the branch once and each reading serves both flows. A flow is
+//! published when its detail changed, and after a `refresh` in any case.
 
 use std::collections::HashMap;
 
@@ -18,16 +22,20 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
-use crate::model::Ci;
-use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
+use crate::model::{Ci, Issue, Issues};
+use crate::provider::{BranchReading, Failure, Outcome, Provider, Reading, Repo, Updates, Watch};
 
 pub const PR_TYPE: &str = "forge.pr/v1";
 pub const PIPELINES_TYPE: &str = "forge.pipelines/v1";
+pub const ISSUES_TYPE: &str = "forge.issues/v1";
+pub const ISSUE_TYPE: &str = "forge.issue/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Pr,
     Pipelines,
+    Issues,
+    Issue,
 }
 
 impl Kind {
@@ -35,6 +43,8 @@ impl Kind {
         match kind {
             "pr" => Some(Self::Pr),
             "pipelines" => Some(Self::Pipelines),
+            "issues" => Some(Self::Issues),
+            "issue" => Some(Self::Issue),
             _ => None,
         }
     }
@@ -43,6 +53,8 @@ impl Kind {
         match self {
             Self::Pr => "pr",
             Self::Pipelines => "pipelines",
+            Self::Issues => "issues",
+            Self::Issue => "issue",
         }
     }
 
@@ -50,25 +62,72 @@ impl Kind {
         match self {
             Self::Pr => PR_TYPE,
             Self::Pipelines => PIPELINES_TYPE,
+            Self::Issues => ISSUES_TYPE,
+            Self::Issue => ISSUE_TYPE,
+        }
+    }
+
+    /// The subject `params` name for this kind, or why they do not.
+    fn subject(self, params: &Value) -> Result<Subject, &'static str> {
+        match self {
+            Self::Pr | Self::Pipelines => params["branch"]
+                .as_str()
+                .map(|b| Subject::Branch(b.to_owned()))
+                .ok_or("remote and branch are required"),
+            Self::Issues => Ok(Subject::Issues),
+            Self::Issue => params["number"]
+                .as_u64()
+                .filter(|n| *n > 0)
+                .map(Subject::Issue)
+                .ok_or("remote and a positive number are required"),
         }
     }
 }
 
-/// A branch of a repository: `(repo id, branch)`.
-type TargetKey = (String, String);
+/// What a target is about, within its repository or tracker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Subject {
+    Branch(String),
+    /// The tracker's open issues.
+    Issues,
+    Issue(u64),
+}
 
-/// A branch a provider follows for one or more flows.
+impl Subject {
+    /// What the subject belongs to: the repository for a branch, the
+    /// tracker for issues.
+    fn scope(&self, repo: &Repo) -> String {
+        match self {
+            Self::Branch(_) => repo.id.clone(),
+            Self::Issues | Self::Issue(_) => repo.tracker.clone(),
+        }
+    }
+
+    /// The identifier of `kind`'s flow on this subject, in `scope`.
+    fn flow(&self, kind: Kind, scope: &str) -> String {
+        match self {
+            Self::Branch(branch) => format!("{}/{scope}#{branch}", kind.name()),
+            Self::Issues => format!("{}/{scope}", kind.name()),
+            Self::Issue(number) => format!("{}/{scope}#{number}", kind.name()),
+        }
+    }
+}
+
+/// A subject in its scope: `(repo id or tracker, subject)`.
+type TargetKey = (String, Subject);
+
+/// What a provider follows for one or more flows.
 struct Target {
     /// Tells this target's readings from those of an earlier target of the
     /// same key, released since.
     id: u64,
     repo: Repo,
-    branch: String,
+    subject: Subject,
     watch: Watch,
     /// The flows this target serves; it is released with the last one.
     flows: Vec<FlowId>,
     /// The last successful reading.
-    reading: Option<BranchReading>,
+    reading: Option<Reading>,
     /// `None` until the first reading, then how the last one went.
     status: Option<Result<(), Failure>>,
     as_of: Option<Timestamp>,
@@ -81,6 +140,40 @@ impl Target {
             None => "pending",
             Some(Ok(())) => "ok",
             Some(Err(failure)) => failure.as_str(),
+        }
+    }
+
+    /// `source` in the details, without its `as_of`.
+    fn source(&self) -> Value {
+        json!({ "status": self.source_status(), "as_of": null })
+    }
+
+    fn branch(&self) -> Option<&BranchReading> {
+        match &self.reading {
+            Some(Reading::Branch(reading)) => Some(reading.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn issues(&self) -> Option<&Issues> {
+        match &self.reading {
+            Some(Reading::Issues(issues)) => Some(issues),
+            _ => None,
+        }
+    }
+
+    fn issue(&self) -> Option<&Issue> {
+        match &self.reading {
+            Some(Reading::Issue(issue)) => Some(issue),
+            _ => None,
+        }
+    }
+
+    /// The branch's name, for a branch's target.
+    fn branch_name(&self) -> &str {
+        match &self.subject {
+            Subject::Branch(branch) => branch,
+            _ => "",
         }
     }
 }
@@ -122,7 +215,7 @@ impl Core {
     }
 
     /// Answers a `subscribe`, then publishes the flow at once when its
-    /// branch was already read for another flow.
+    /// target was already read for another flow.
     pub fn subscribe(&mut self, req: RequestId, kind: &str, params: &[u8]) -> Vec<BrickMessage> {
         let refuse = |code: &str, message: String| {
             vec![BrickMessage::Error {
@@ -135,9 +228,9 @@ impl Core {
             return refuse("unknown_kind", format!("no subscription kind {kind:?}"));
         };
         let params: Value = serde_json::from_slice(params).unwrap_or_default();
-        let (Some(remote), Some(branch)) = (params["remote"].as_str(), params["branch"].as_str())
-        else {
-            return refuse("invalid_params", "remote and branch are required".into());
+        let (Some(remote), Ok(subject)) = (params["remote"].as_str(), kind.subject(&params)) else {
+            let why = kind.subject(&params).err();
+            return refuse("invalid_params", why.unwrap_or("remote is required").into());
         };
         let Some((index, repo)) = self
             .providers
@@ -150,7 +243,8 @@ impl Core {
                 format!("{remote:?} is not a repository on a forge the brick reads"),
             );
         };
-        let flow = match FlowId::new(format!("{}/{}#{branch}", kind.name(), repo.id)) {
+        let key = (subject.scope(&repo), subject);
+        let flow = match FlowId::new(key.1.flow(kind, &key.0)) {
             Ok(flow) => flow,
             Err(e) => return refuse("key_too_long", e.to_string()),
         };
@@ -161,26 +255,8 @@ impl Core {
         if self.flows.contains_key(&flow) {
             return out;
         }
-        let key = (repo.id.clone(), branch.to_owned());
         if !self.targets.contains_key(&key) {
-            self.last_target += 1;
-            let id = self.last_target;
-            let updates = Updates::new(id, self.updates.clone());
-            let watch = self.providers[index].follow(&repo, branch, updates);
-            self.by_id.insert(id, key.clone());
-            self.targets.insert(
-                key.clone(),
-                Target {
-                    id,
-                    repo,
-                    branch: branch.to_owned(),
-                    watch,
-                    flows: Vec::new(),
-                    reading: None,
-                    status: None,
-                    as_of: None,
-                },
-            );
+            self.follow(index, repo, key.clone());
         }
         let target = self.targets.get_mut(&key).expect("just inserted");
         target.flows.push(flow.clone());
@@ -203,8 +279,36 @@ impl Core {
         out
     }
 
-    /// The last subscriber of flow `id` left; its branch stops being followed
-    /// when no other flow needs it.
+    /// Has provider `index` follow the subject of `key` in `repo`.
+    fn follow(&mut self, index: usize, repo: Repo, key: TargetKey) {
+        self.last_target += 1;
+        let id = self.last_target;
+        let updates = Updates::new(id, self.updates.clone());
+        let provider = &self.providers[index];
+        let watch = match &key.1 {
+            Subject::Branch(branch) => provider.follow(&repo, branch, updates),
+            Subject::Issues => provider.follow_issues(&repo, updates),
+            Subject::Issue(number) => provider.follow_issue(&repo, *number, updates),
+        };
+        self.by_id.insert(id, key.clone());
+        let subject = key.1.clone();
+        self.targets.insert(
+            key,
+            Target {
+                id,
+                repo,
+                subject,
+                watch,
+                flows: Vec::new(),
+                reading: None,
+                status: None,
+                as_of: None,
+            },
+        );
+    }
+
+    /// The last subscriber of flow `id` left; its target stops being
+    /// followed when no other flow needs it.
     pub fn release(&mut self, id: &FlowId) {
         let Some(flow) = self.flows.remove(id) else {
             return;
@@ -277,6 +381,8 @@ fn publish(
     let detail = match flow.kind {
         Kind::Pr => pr_detail(target, now),
         Kind::Pipelines => pipelines_detail(target, now),
+        Kind::Issues => issues_detail(target),
+        Kind::Issue => issue_detail(target),
     };
     let force = std::mem::take(&mut flow.force);
     if !force && flow.published.as_ref() == Some(&detail) {
@@ -296,7 +402,7 @@ fn publish(
 
 /// `forge.pr/v1` as of `now`, without its `as_of`.
 fn pr_detail(target: &Target, now: Instant) -> Value {
-    let reading = target.reading.as_ref();
+    let reading = target.branch();
     let pr = reading.and_then(|r| r.pr.as_ref()).map(|p| {
         json!({
             "number": p.number,
@@ -312,21 +418,21 @@ fn pr_detail(target: &Target, now: Instant) -> Value {
     });
     json!({
         "repo": target.repo.id,
-        "branch": target.branch,
+        "branch": target.branch_name(),
         "head_sha": reading.and_then(|r| r.head_sha.as_deref()),
         "pr": pr,
         "ci": reading.and_then(|r| r.ci.as_ref()).map(|c| c.synthesis(now)),
-        "source": { "status": target.source_status(), "as_of": null },
+        "source": target.source(),
     })
 }
 
 /// `forge.pipelines/v1` as of `now`, without its `as_of`.
 fn pipelines_detail(target: &Target, now: Instant) -> Value {
-    let reading = target.reading.as_ref();
+    let reading = target.branch();
     let ci = reading.and_then(|r| r.ci.as_ref());
     let mut detail = ci.map_or_else(|| Ci::default().detail(now), |c| c.detail(now));
     detail["repo"] = json!(target.repo.id);
-    detail["branch"] = json!(target.branch);
+    detail["branch"] = json!(target.branch_name());
     detail["sha"] = json!(ci.map(|c| &c.sha));
     detail["pr"] = json!(
         reading
@@ -334,8 +440,43 @@ fn pipelines_detail(target: &Target, now: Instant) -> Value {
             .filter(|p| p.is_open())
             .map(|p| p.number)
     );
-    detail["source"] = json!({ "status": target.source_status(), "as_of": null });
+    detail["source"] = target.source();
     detail
+}
+
+/// `forge.issues/v1`, without its `as_of`: empty lists until a reading.
+fn issues_detail(target: &Target) -> Value {
+    let issues = target.issues();
+    let list = |pick: fn(&Issues) -> &Vec<Issue>| -> Vec<Value> {
+        issues.map_or_else(Vec::new, |i| pick(i).iter().map(Issue::summary).collect())
+    };
+    json!({
+        "tracker": target.repo.tracker,
+        "account": issues.map(|i| &i.account),
+        "mine": list(|i| &i.mine),
+        "others": list(|i| &i.others),
+        "truncated": issues.is_some_and(|i| i.truncated),
+        "source": target.source(),
+    })
+}
+
+/// `forge.issue/v1`, without its `as_of`: the number is the key's, the
+/// other fields `null` until a reading finds the issue.
+fn issue_detail(target: &Target) -> Value {
+    let issue = target.issue();
+    let number = match target.subject {
+        Subject::Issue(number) => Some(number),
+        _ => None,
+    };
+    json!({
+        "tracker": target.repo.tracker,
+        "number": number,
+        "title": issue.map(|i| &i.title),
+        "type": issue.and_then(|i| i.kind.as_ref()),
+        "state": issue.map(Issue::state),
+        "url": issue.map(|i| &i.url),
+        "source": target.source(),
+    })
 }
 
 #[cfg(test)]
@@ -349,34 +490,48 @@ mod tests {
     use crate::model::tests::{ci, job, pipeline};
     use crate::model::{Dequeued, Pr, QueueEntry, State};
 
-    /// Recognises `https://forge/<repo>`; records what it follows and each
-    /// `refresh` it receives.
+    /// Recognises `https://forge/<org>/<repo>`, whose issues the
+    /// organisation holds, as on a forge where several repositories share a
+    /// tracker; records what it follows and each `refresh` it receives.
     #[derive(Default, Clone)]
     struct Fake {
         followed: Arc<Mutex<Vec<(String, String)>>>,
         refreshes: Arc<Mutex<usize>>,
     }
 
-    impl Provider for Fake {
-        fn recognise(&self, remote: &str) -> Option<Repo> {
-            let name = remote.strip_prefix("https://forge/")?;
-            Some(Repo {
-                id: format!("forge/{}", name.to_lowercase()),
-                remote: remote.to_owned(),
-            })
-        }
-
-        fn follow(&self, repo: &Repo, branch: &str, _updates: Updates) -> Watch {
-            self.followed
-                .lock()
-                .unwrap()
-                .push((repo.id.clone(), branch.to_owned()));
+    impl Fake {
+        fn watch(&self, scope: &str, what: String) -> Watch {
+            self.followed.lock().unwrap().push((scope.to_owned(), what));
             let refreshes = self.refreshes.clone();
             Watch::spawn(move |mut rx: UnboundedReceiver<()>| async move {
                 while rx.recv().await.is_some() {
                     *refreshes.lock().unwrap() += 1;
                 }
             })
+        }
+    }
+
+    impl Provider for Fake {
+        fn recognise(&self, remote: &str) -> Option<Repo> {
+            let name = remote.strip_prefix("https://forge/")?.to_lowercase();
+            let org = name.split('/').next()?;
+            Some(Repo {
+                id: format!("forge/{name}"),
+                tracker: format!("forge/{org}"),
+                remote: remote.to_owned(),
+            })
+        }
+
+        fn follow(&self, repo: &Repo, branch: &str, _updates: Updates) -> Watch {
+            self.watch(&repo.id, branch.to_owned())
+        }
+
+        fn follow_issues(&self, repo: &Repo, _updates: Updates) -> Watch {
+            self.watch(&repo.tracker, "issues".to_owned())
+        }
+
+        fn follow_issue(&self, repo: &Repo, number: u64, _updates: Updates) -> Watch {
+            self.watch(&repo.tracker, format!("#{number}"))
         }
     }
 
@@ -395,7 +550,7 @@ mod tests {
     fn reading(sha: &str, state: State) -> Outcome {
         let mut ci = ci(vec![pipeline(state, vec![job("check", state, Some(true))])]);
         ci.sha = sha.into();
-        Ok(BranchReading {
+        Ok(Reading::Branch(Box::new(BranchReading {
             head_sha: Some(sha.into()),
             pr: Some(Pr {
                 number: 7,
@@ -409,7 +564,7 @@ mod tests {
                 dequeued: None,
             }),
             ci: Some(ci),
-        })
+        })))
     }
 
     fn published(out: &[BrickMessage]) -> Vec<(String, Value)> {
@@ -455,7 +610,7 @@ mod tests {
             "unsupported_remote"
         );
         assert_eq!(
-            code(core.subscribe(RequestId(2), "issues", &params("https://forge/o/r"))),
+            code(core.subscribe(RequestId(2), "labels", &params("https://forge/o/r"))),
             "unknown_kind"
         );
         assert_eq!(
@@ -506,7 +661,7 @@ mod tests {
     async fn the_pr_publishes_its_queue_entry_and_why_it_left() {
         let (mut core, _) = core();
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
-        let Ok(mut read) = reading("a", State::Pass) else {
+        let Ok(Reading::Branch(mut read)) = reading("a", State::Pass) else {
             unreachable!()
         };
         let mut queue_ci = ci(vec![pipeline(State::Running, vec![])]);
@@ -524,7 +679,12 @@ mod tests {
             reason: Some("conflict".into()),
             at: "t1".into(),
         });
-        let out = published(&core.update(1, Ok(read), Timestamp::now(), Instant::now()));
+        let out = published(&core.update(
+            1,
+            Ok(Reading::Branch(read)),
+            Timestamp::now(),
+            Instant::now(),
+        ));
         let pr = &out[0].1["pr"];
         assert_eq!(
             pr["queue"],
@@ -583,7 +743,7 @@ mod tests {
         let (mut core, _) = core();
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
         let t0 = Instant::now();
-        let expected = Ok(BranchReading {
+        let expected = Ok(Reading::Branch(Box::new(BranchReading {
             head_sha: Some("a".into()),
             pr: None,
             ci: Some(Ci {
@@ -591,7 +751,7 @@ mod tests {
                 expected_until: Some(t0 + Duration::from_secs(120)),
                 ..Ci::default()
             }),
-        });
+        })));
         let out = published(&core.update(1, expected, Timestamp::now(), t0));
         assert_eq!(out[0].1["ci"]["state"], "running");
         let later = t0 + Duration::from_secs(121);
@@ -667,7 +827,7 @@ mod tests {
         core.subscribe(RequestId(1), "pipelines", &params("https://forge/o/r"));
         let out = published(&core.update(
             1,
-            Ok(BranchReading::default()),
+            Ok(Reading::Branch(Box::default())),
             Timestamp::now(),
             Instant::now(),
         ));
@@ -676,5 +836,162 @@ mod tests {
         assert_eq!(detail["pr"], Value::Null);
         assert_eq!(detail["state"], "none");
         assert_eq!(detail["pipelines"], json!([]));
+    }
+
+    fn issue(number: u64, open: bool) -> Issue {
+        Issue {
+            number,
+            title: format!("issue {number}"),
+            kind: Some("Bug".into()),
+            url: format!("u/{number}"),
+            open,
+        }
+    }
+
+    fn issues_params(remote: &str) -> Vec<u8> {
+        json!({ "remote": remote }).to_string().into_bytes()
+    }
+
+    fn issue_params(remote: &str, number: u64) -> Vec<u8> {
+        json!({ "remote": remote, "number": number })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Issues belong to the tracker: two repositories it holds share one
+    /// following of its open issues, and of one issue.
+    #[tokio::test]
+    async fn the_repositories_of_one_tracker_share_its_issues() {
+        let (mut core, fake) = core();
+        let flow = |out: Vec<BrickMessage>| match &out[..] {
+            [BrickMessage::Subscribed { flow, .. }] => flow.as_str().to_owned(),
+            other => panic!("{other:?}"),
+        };
+        let issues = core.subscribe(RequestId(1), "issues", &issues_params("https://forge/O/a"));
+        let again = core.subscribe(RequestId(2), "issues", &issues_params("https://forge/o/b"));
+        let one = core.subscribe(
+            RequestId(3),
+            "issue",
+            &issue_params("https://forge/o/a", 52),
+        );
+        let same = core.subscribe(
+            RequestId(4),
+            "issue",
+            &issue_params("https://forge/o/b", 52),
+        );
+        assert_eq!(flow(issues), "issues/forge/o");
+        assert_eq!(flow(again), "issues/forge/o");
+        assert_eq!(flow(one), "issue/forge/o#52");
+        assert_eq!(flow(same), "issue/forge/o#52");
+        assert_eq!(
+            *fake.followed.lock().unwrap(),
+            [
+                ("forge/o".to_owned(), "issues".to_owned()),
+                ("forge/o".to_owned(), "#52".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_issue_needs_a_positive_number() {
+        let (mut core, _) = core();
+        for params in [
+            br#"{"remote":"https://forge/o/r"}"#.as_slice(),
+            br#"{"remote":"https://forge/o/r","number":0}"#,
+            br#"{"remote":"https://forge/o/r","number":"52"}"#,
+        ] {
+            match &core.subscribe(RequestId(1), "issue", params)[..] {
+                [BrickMessage::Error { code, .. }] => assert_eq!(code, "invalid_params"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(
+            &core.subscribe(RequestId(2), "issues", b"{}")[..],
+            [BrickMessage::Error { code, .. }] if code == "invalid_params"
+        ));
+    }
+
+    /// The open issues are published split between the reader's and the
+    /// others, again only when they change or after a `refresh`.
+    #[tokio::test]
+    async fn the_open_issues_publish_on_change_and_after_a_refresh() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "issues", &issues_params("https://forge/o/r"));
+        let pending = core.subscribe(RequestId(2), "issues", &issues_params("https://forge/o/r"));
+        assert!(published(&pending).is_empty(), "nothing read yet");
+        let read = || {
+            Ok(Reading::Issues(Issues {
+                account: "me".into(),
+                mine: vec![issue(52, true)],
+                others: vec![issue(51, true)],
+                truncated: true,
+            }))
+        };
+        let out = published(&core.update(1, read(), Timestamp::now(), Instant::now()));
+        let (flow, detail) = &out[0];
+        assert_eq!(flow, "issues/forge/o");
+        assert!(detail["source"]["as_of"].is_string());
+        let mut detail = detail.clone();
+        detail["source"]["as_of"] = Value::Null;
+        assert_eq!(
+            detail,
+            json!({ "tracker": "forge/o", "account": "me",
+                "mine": [{ "number": 52, "title": "issue 52", "type": "Bug", "url": "u/52" }],
+                "others": [{ "number": 51, "title": "issue 51", "type": "Bug", "url": "u/51" }],
+                "truncated": true, "source": { "status": "ok", "as_of": null } })
+        );
+        assert!(
+            core.update(1, read(), Timestamp::now(), Instant::now())
+                .is_empty()
+        );
+        core.refresh(&FlowId::new("issues/forge/o").unwrap());
+        tokio::task::yield_now().await;
+        assert_eq!(*fake.refreshes.lock().unwrap(), 1);
+        let out = core.update(1, read(), Timestamp::now(), Instant::now());
+        assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
+    }
+
+    /// An issue that is not found has null fields but its key's; once
+    /// read, a failure keeps it.
+    #[tokio::test]
+    async fn an_issue_publishes_its_state_and_keeps_it_on_failure() {
+        let (mut core, _) = core();
+        core.subscribe(RequestId(1), "issue", &issue_params("https://forge/o/r", 7));
+        let out =
+            published(&core.update(1, Err(Failure::NotFound), Timestamp::now(), Instant::now()));
+        assert_eq!(
+            out[0].1,
+            json!({ "tracker": "forge/o", "number": 7, "title": null, "type": null,
+                "state": null, "url": null, "source": { "status": "not_found", "as_of": null } })
+        );
+        let read = Ok(Reading::Issue(issue(7, false)));
+        let out = published(&core.update(1, read, Timestamp::now(), Instant::now()));
+        let detail = &out[0].1;
+        assert_eq!(detail["state"], "closed");
+        assert_eq!(detail["title"], "issue 7");
+        assert_eq!(detail["type"], "Bug");
+        assert_eq!(detail["source"]["status"], "ok");
+        let out = published(&core.update(
+            1,
+            Err(Failure::Unreachable),
+            Timestamp::now(),
+            Instant::now(),
+        ));
+        assert_eq!(out[0].1["source"]["status"], "unreachable");
+        assert_eq!(out[0].1["state"], "closed", "the last reading stays");
+    }
+
+    #[tokio::test]
+    async fn the_last_issue_flow_released_stops_its_following() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "issue", &issue_params("https://forge/o/r", 7));
+        core.release(&FlowId::new("issue/forge/o#7").unwrap());
+        let read = Ok(Reading::Issue(issue(7, true)));
+        assert!(
+            core.update(1, read, Timestamp::now(), Instant::now())
+                .is_empty()
+        );
+        core.subscribe(RequestId(2), "issue", &issue_params("https://forge/o/r", 7));
+        assert_eq!(fake.followed.lock().unwrap().len(), 2, "followed anew");
     }
 }

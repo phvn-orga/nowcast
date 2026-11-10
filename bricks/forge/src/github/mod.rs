@@ -3,10 +3,12 @@
 //! checks the base of its open PR requires ([`required`]) and the PR's
 //! entry in the base's merge queue ([`queue`]). A reading
 //! that changes nothing costs no rate limit (`304`), hence a fast pace while
-//! a CI is expected or runs. The token comes from `gh` ([`token`]);
-//! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
-//! for tests.
+//! a CI is expected or runs. A repository's open issues, and one issue, are
+//! followed at the normal pace ([`issues`]). The token comes from `gh`
+//! ([`token`]); [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and
+//! the token, for tests.
 
+mod issues;
 mod queue;
 mod read;
 mod required;
@@ -19,10 +21,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 use crate::model::{Ci, Dequeued, QueueEntry};
-use crate::provider::{BranchReading, Failure, Outcome, Provider, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
 use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
 use crate::tools::remote;
+use issues::{Accounts, Tracker};
 use queue::Queues;
 use required::{Base, Required};
 
@@ -49,6 +52,7 @@ pub struct GitHub {
     http: Http,
     api: String,
     tokens: Tokens,
+    accounts: Accounts,
     required: Required,
     queues: Queues,
 }
@@ -60,27 +64,51 @@ impl GitHub {
             http,
             api,
             tokens: Tokens::default(),
+            accounts: Accounts::default(),
             required: Required::default(),
             queues: Queues::default(),
         }
     }
+
+    /// Follows the open issues of `repo`, or its issue `number`.
+    fn follow_tracker(&self, repo: &Repo, number: Option<u64>, updates: Updates) -> Watch {
+        let (owner, name) = owner_and_name(repo);
+        let tracker = Tracker {
+            http: self.http.clone(),
+            api: self.api.clone(),
+            tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
+            owner,
+            name,
+            number,
+        };
+        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
+    }
+}
+
+/// The owner as the remote writes it, `gh` matching logins
+/// case-sensitively, and the repository's name, the identity's.
+fn owner_and_name(repo: &Repo) -> (String, String) {
+    let (_, path) = remote::split(&repo.remote).unwrap_or_default();
+    let owner = path.split('/').next().unwrap_or_default().to_owned();
+    let name = repo.id.rsplit('/').next().unwrap_or_default().to_owned();
+    (owner, name)
 }
 
 impl Provider for GitHub {
     fn recognise(&self, remote: &str) -> Option<Repo> {
         let (owner, name) = recognise(remote, remote::ssh_hostname)?;
+        let id = format!("github.com/{owner}/{name}");
+        // A repository holds its own issues.
         Some(Repo {
-            id: format!("github.com/{owner}/{name}"),
+            tracker: id.clone(),
+            id,
             remote: remote.to_owned(),
         })
     }
 
     fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
-        // The owner as the remote writes it: `gh` matches logins
-        // case-sensitively. The repository's name is the identity's.
-        let (_, path) = remote::split(&repo.remote).unwrap_or_default();
-        let owner = path.split('/').next().unwrap_or_default().to_owned();
-        let name = repo.id.rsplit('/').next().unwrap_or_default().to_owned();
+        let (owner, name) = owner_and_name(repo);
         let branch = Branch {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -93,6 +121,14 @@ impl Provider for GitHub {
             branch: branch.to_owned(),
         };
         Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+    }
+
+    fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
+        self.follow_tracker(repo, None, updates)
+    }
+
+    fn follow_issue(&self, repo: &Repo, number: u64, updates: Updates) -> Watch {
+        self.follow_tracker(repo, Some(number), updates)
     }
 }
 
@@ -149,42 +185,21 @@ impl Branch {
                     wait.map_or(RHYTHM.normal, |w| w.max(RHYTHM.normal)),
                 ),
             };
-            if !updates.send(outcome) {
+            if !updates.send(outcome.map(|r| Reading::Branch(Box::new(r)))) {
                 return;
             }
-            let deadline = now + delay;
-            loop {
-                tokio::select! {
-                    () = tokio::time::sleep_until(deadline) => break,
-                    refresh = refreshes.recv() => {
-                        if refresh.is_none() {
-                            return;
-                        }
-                        while refreshes.try_recv().is_ok() {}
-                        pace.refreshed(Instant::now());
-                        if wait.is_none() {
-                            break;
-                        }
-                    }
-                }
+            let refreshed = || pace.refreshed(Instant::now());
+            if !wait_or_refresh(now + delay, &mut refreshes, wait.is_some(), refreshed).await {
+                return;
             }
         }
     }
 
     /// One reading, and how long a rate limit asks to wait.
-    async fn read_once(&mut self) -> (Outcome, Option<Duration>) {
-        let kept = self.tokens.lock().unwrap().get(&self.owner).cloned();
-        let token = match kept {
-            Some(token) => Some(token),
-            None => token(&self.owner).await,
-        };
-        let Some(token) = token else {
+    async fn read_once(&mut self) -> (Result<BranchReading, Failure>, Option<Duration>) {
+        let Some(token) = owner_token(&self.tokens, &self.owner).await else {
             return (Err(Failure::NoCredentials), None);
         };
-        self.tokens
-            .lock()
-            .unwrap()
-            .insert(self.owner.clone(), token.clone());
         let read = read::read(
             &self.http,
             &self.api,
@@ -202,25 +217,75 @@ impl Branch {
             }
             Err(failure) => failure,
         };
-        let at = || format!("github.com/{}/{}#{}", self.owner, self.name, self.branch);
-        match failure {
-            http::Failure::Unauthorized => {
-                // The next reading asks `gh` again.
-                self.tokens.lock().unwrap().remove(&self.owner);
-                (Err(Failure::Unauthorized), None)
-            }
-            http::Failure::NotFound => (Err(Failure::NotFound), None),
-            http::Failure::Limited(wait) => (
-                Err(Failure::RateLimited),
-                Some(wait.unwrap_or(RHYTHM.normal)),
-            ),
-            http::Failure::Unreadable(why) => {
-                crate::log(format_args!("{}: {why}", at()));
-                (Err(Failure::Unreadable), None)
-            }
-            http::Failure::Unreachable(why) => {
-                crate::log(format_args!("{}: unreachable: {why}", at()));
-                (Err(Failure::Unreachable), None)
+        let at = format!("github.com/{}/{}#{}", self.owner, self.name, self.branch);
+        let (failure, wait) = failed(&self.tokens, &self.owner, &at, failure);
+        (Err(failure), wait)
+    }
+}
+
+/// The token that reads `owner`'s repositories, kept in `tokens` once `gh`
+/// gave it; `None` without one.
+async fn owner_token(tokens: &Tokens, owner: &str) -> Option<String> {
+    let kept = tokens.lock().unwrap().get(owner).cloned();
+    let token = match kept {
+        Some(token) => token,
+        None => token(owner).await?,
+    };
+    tokens
+        .lock()
+        .unwrap()
+        .insert(owner.to_owned(), token.clone());
+    Some(token)
+}
+
+/// What `failure`, in a reading of `at` with `owner`'s token, says in
+/// `source.status`, and how long a rate limit asks to wait. A refused token
+/// is forgotten: the next reading asks `gh` again.
+fn failed(
+    tokens: &Tokens,
+    owner: &str,
+    at: &str,
+    failure: http::Failure,
+) -> (Failure, Option<Duration>) {
+    match failure {
+        http::Failure::Unauthorized => {
+            tokens.lock().unwrap().remove(owner);
+            (Failure::Unauthorized, None)
+        }
+        http::Failure::NotFound => (Failure::NotFound, None),
+        http::Failure::Limited(wait) => (Failure::RateLimited, Some(wait.unwrap_or(RHYTHM.normal))),
+        http::Failure::Unreadable(why) => {
+            crate::log(format_args!("{at}: {why}"));
+            (Failure::Unreadable, None)
+        }
+        http::Failure::Unreachable(why) => {
+            crate::log(format_args!("{at}: unreachable: {why}"));
+            (Failure::Unreachable, None)
+        }
+    }
+}
+
+/// Waits until `deadline`, or for a `refresh`, which ends the wait unless a
+/// rate limit holds it (`limited`); refreshes that piled up count as one,
+/// each calling `refreshed`. `false` once the core is gone.
+async fn wait_or_refresh(
+    deadline: Instant,
+    refreshes: &mut UnboundedReceiver<()>,
+    limited: bool,
+    mut refreshed: impl FnMut(),
+) -> bool {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => return true,
+            refresh = refreshes.recv() => {
+                if refresh.is_none() {
+                    return false;
+                }
+                while refreshes.try_recv().is_ok() {}
+                refreshed();
+                if !limited {
+                    return true;
+                }
             }
         }
     }
@@ -929,7 +994,9 @@ mod tests {
         let _watch = github.follow(&repo, "feat", Updates::new(3, tx));
         let (target, outcome) = rx.recv().await.unwrap();
         assert_eq!(target, 3);
-        let reading = outcome.unwrap();
+        let Ok(Reading::Branch(reading)) = outcome else {
+            panic!("{outcome:?}");
+        };
         assert_eq!(reading.pr.unwrap().number, 7);
         let ci = reading.ci.unwrap();
         assert_eq!(ci.sha, "abc");
