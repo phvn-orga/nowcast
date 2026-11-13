@@ -397,6 +397,23 @@ test('the grouped writes of the Azure DevOps MCP server take their number from t
   expect(
     mcp('wit_work_item_write', { action: 'update_batch', batchUpdates: [field(4), field('5'), field(4), field(0)] }),
   ).toEqual([item(4), item(5)])
+  // A link names its items in `updates[].id`, a child its parent in `parentId`.
+  expect(
+    mcp('wit_work_item_link_write', { action: 'link', updates: [{ id: 6, linkToId: 7, type: 'related' }] }),
+  ).toEqual([item(6)])
+  expect(mcp('wit_work_item_write', { action: 'add_child', parentId: 3, workItemType: 'Task', items: [] })).toEqual([
+    item(3),
+  ])
+  // A link to a PR takes the number of its work item.
+  expect(
+    mcp('wit_work_item_link_write', {
+      action: 'link_to_pull_request',
+      projectId: 'p',
+      repositoryId: 'repo',
+      pullRequestId: 21,
+      workItemId: 8,
+    }),
+  ).toEqual([{ types: ['issues'], target: { dir: CWD, azure: repo }, number: 8 }])
 })
 
 test('the commands that may move a branch name the directory they ran in', () => {

@@ -982,16 +982,8 @@ function nameWords(name: string): string[] {
     .map(word => word.toLowerCase())
 }
 
-const NUMBER_PARAMS = [
-  'pull_number',
-  'pullNumber',
-  'issue_number',
-  'issueNumber',
-  'pullRequestId',
-  'workItemId',
-  'number',
-  'id',
-]
+const PR_PARAMS = ['pull_number', 'pullNumber', 'pullRequestId']
+const ISSUE_PARAMS = ['issue_number', 'issueNumber', 'workItemId']
 
 /** A positive integer, given as a number or as its digits. */
 function positive(value: unknown): number | undefined {
@@ -1033,8 +1025,11 @@ export function mcpActions(
   if (types.length === 0) return []
   const text = (key: string) =>
     typeof params[key] === 'string' && params[key] !== '' ? (params[key] as string) : undefined
+  // A work item tool may name a PR besides its item (`link_to_pull_request`):
+  // the item comes first.
+  const keys = issue && !pr ? [...ISSUE_PARAMS, ...PR_PARAMS] : [...PR_PARAMS, ...ISSUE_PARAMS]
   let number: number | undefined
-  for (const key of NUMBER_PARAMS) {
+  for (const key of [...keys, 'number', 'id']) {
     const parsed = positive(params[key])
     if (parsed !== undefined && (key !== 'id' || pr || issue)) {
       number = parsed
@@ -1065,20 +1060,23 @@ export function mcpActions(
   if (project !== undefined) names.project = project
   const repo = text('repositoryId') ?? text('repository') ?? text('repositoryName') ?? text('repo')
   if (repo !== undefined) names.repo = repo
-  // `wit_work_item_write` with `action: update_batch` names its items in
-  // `batchUpdates[].id`, several fields of one item apart.
-  const batch = number === undefined && issue ? batchIds(params.batchUpdates) : []
-  if (batch.length > 0) return batch.map(id => azureTarget(types, names, dir, id))
+  const items = number === undefined && issue ? itemIds(params) : []
+  if (items.length > 0) return items.map(id => azureTarget(types, names, dir, id))
   if (number === undefined) number = printedAzure(output, pr)
   return [azureTarget(types, names, dir, number)]
 }
 
-/** The distinct ids of a batch's updates, in their order. */
-function batchIds(updates: unknown): number[] {
-  if (!Array.isArray(updates)) return []
+/**
+ * The distinct work items a write of Azure DevOps names apart from a number,
+ * in their order: `batchUpdates[].id` (`update_batch`), `updates[].id`
+ * (`link`), `parentId` (`add_child`).
+ */
+function itemIds(params: Record<string, unknown>): number[] {
+  const updates = [params.batchUpdates, params.updates].flatMap(list => (Array.isArray(list) ? list : []))
   const ids = updates.map(update =>
     typeof update === 'object' && update !== null ? positive((update as { id?: unknown }).id) : undefined,
   )
+  ids.push(positive(params.parentId))
   return [...new Set(ids.filter(id => id !== undefined))]
 }
 
