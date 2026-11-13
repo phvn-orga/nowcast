@@ -86,7 +86,8 @@ pub enum Command {
     /// Prints nothing. The brick publishes again once it has read its source:
     /// the new value comes on the stream, or through `get` afterwards.
     /// With --brick, every live flow of the brick is refreshed, whoever
-    /// subscribed to it; none at all is no error.
+    /// subscribed to it; none at all is no error. With --scope, the brick
+    /// gets the scope instead, and decides which of its flows it touches.
     Refresh {
         /// Flow id, as `subscribe` prints it: <brick>/<flow>
         #[arg(required_unless_present = "brick", conflicts_with = "brick")]
@@ -97,6 +98,10 @@ pub enum Command {
         /// With --brick, only the flows of this subscription kind
         #[arg(long, requires = "brick", conflicts_with = "flow")]
         kind: Option<String>,
+        /// With --brick, a JSON scope the brick interprets, matching the
+        /// schema it declares
+        #[arg(long, value_name = "JSON", requires = "brick", conflicts_with_all = ["flow", "kind"])]
+        scope: Option<String>,
     },
 
     /// Send the JSON value read on stdin to the brick of a flow the anchor process is subscribed to
@@ -329,23 +334,42 @@ mod tests {
     #[test]
     fn refresh_takes_a_flow_or_a_brick() {
         let cli = Cli::try_parse_from(["nowcast", "refresh", "a/b"]).unwrap();
-        let Command::Refresh { flow, brick, kind } = cli.command else {
+        let Command::Refresh {
+            flow, brick, kind, ..
+        } = cli.command
+        else {
             panic!("refresh");
         };
         assert_eq!((flow.as_deref(), brick, kind), (Some("a/b"), None, None));
         let cli = Cli::try_parse_from(["nowcast", "refresh", "--brick", "forge", "--kind", "pr"])
             .unwrap();
-        let Command::Refresh { flow, brick, kind } = cli.command else {
+        let Command::Refresh {
+            flow, brick, kind, ..
+        } = cli.command
+        else {
             panic!("refresh");
         };
         assert_eq!(
             (flow, brick.as_deref(), kind.as_deref()),
             (None, Some("forge"), Some("pr"))
         );
+        let cli = Cli::try_parse_from(["nowcast", "refresh", "--brick", "forge", "--scope", "{}"])
+            .unwrap();
+        let Command::Refresh { brick, scope, .. } = cli.command else {
+            panic!("refresh");
+        };
+        assert_eq!(
+            (brick.as_deref(), scope.as_deref()),
+            (Some("forge"), Some("{}"))
+        );
         for args in [
             &["nowcast", "refresh"][..],
             &["nowcast", "refresh", "a/b", "--brick", "forge"],
             &["nowcast", "refresh", "a/b", "--kind", "pr"],
+            &["nowcast", "refresh", "a/b", "--scope", "{}"],
+            &[
+                "nowcast", "refresh", "--brick", "f", "--kind", "pr", "--scope", "{}",
+            ],
         ] {
             assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
         }

@@ -30,6 +30,9 @@ pub struct BrickDeclaration {
     pub subscriptions: BTreeMap<String, SubscriptionKind>,
     /// By published or accepted type, for example `forge.pr/v1`.
     pub types: BTreeMap<String, TypeDeclaration>,
+    /// The JSON Schema of a refresh scope (`[refresh] scope`), loaded. Without
+    /// it, the brick is never sent a `refresh-scope`.
+    pub refresh_scope: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

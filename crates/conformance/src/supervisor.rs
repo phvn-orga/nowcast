@@ -381,6 +381,25 @@ pub async fn refresh_is_relayed<S: SupervisorSubject>() {
     );
 }
 
+/// A refresh scope is relayed as is, in one `refresh-scope`, to a brick
+/// running with flows; a stopped brick is not launched for it.
+pub async fn refresh_scope_is_relayed<S: SupervisorSubject>() {
+    let world = world::<S>();
+    world
+        .supervisor
+        .refresh_scope(&probe::name(), br#"{"ids":[]}"#.to_vec());
+    assert_eq!(world.supervisor.bricks(), [], "no launch for a scope");
+    let mut brick = world.subscribed("a").await;
+    let scope = br#"{"ids":["a"]}"#.to_vec();
+    world
+        .supervisor
+        .refresh_scope(&probe::name(), scope.clone());
+    assert_eq!(
+        recv(&mut brick).await,
+        ServiceMessage::RefreshScope { scope }
+    );
+}
+
 /// The supervisor knows the kind each flow was subscribed with, and relays an
 /// input to the brick with its own flow id, in order; an unknown flow is
 /// refused, and so is an input while the brick waits to be relaunched.
@@ -758,6 +777,7 @@ macro_rules! supervisor_suite {
                     a_publish_on_a_released_flow_is_refused,
                     flow_errors_are_relayed,
                     refresh_is_relayed,
+                    refresh_scope_is_relayed,
                     input_is_relayed,
                     an_empty_flow_is_released,
                     an_idle_brick_is_kept_for_the_grace_period,

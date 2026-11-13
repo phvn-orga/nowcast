@@ -28,3 +28,6 @@ schema = "schemas/probe-item-v1.json"
 
 [types."probe.input/v1"]
 schema = "schemas/probe-input-v1.json"
+
+[refresh]
+scope = "schemas/scope.json"

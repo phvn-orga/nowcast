@@ -69,6 +69,54 @@ async fn refreshes_every_flow_of_a_brick() {
     fake.assert_sessions_first();
 }
 
+/// With --scope, the scope in the body, as given.
+#[tokio::test]
+async fn refreshes_what_a_scope_touches() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    fake.can("/v1/bricks/probe/refresh", 202, "", "");
+    let args = ["refresh", "--brick", "probe", "--scope", r#"{"ids":["a"]}"#];
+    let output = run(&mut nowcast(&fake), &args).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    let calls: Vec<_> = fake
+        .log()
+        .into_iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| (r.path, r.body))
+        .collect();
+    assert_eq!(
+        calls,
+        [(
+            "/v1/bricks/probe/refresh".to_owned(),
+            Some(json!({ "scope": { "ids": ["a"] } }))
+        )]
+    );
+}
+
+/// A scope the service refuses fails with its code.
+#[tokio::test]
+async fn a_refused_scope_fails_with_the_service_code() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    let body = r#"{"error":{"code":"invalid_scope","message":"/ids: not an array"}}"#;
+    fake.can("/v1/bricks/probe/refresh", 400, "application/json", body);
+    let args = ["refresh", "--brick", "probe", "--scope", r#"{"ids":1}"#];
+    let output = run(&mut nowcast(&fake), &args).await;
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "nowcast: invalid_scope: /ids: not an array\n"
+    );
+}
+
+#[tokio::test]
+async fn a_scope_that_is_not_json_exits_2_without_a_call() {
+    let fake = Fake::start(Anchoring::Shared).await;
+    let args = ["refresh", "--brick", "probe", "--scope", "{ids"];
+    let output = run(&mut nowcast(&fake), &args).await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(fake.log().is_empty());
+}
+
 #[tokio::test]
 async fn an_invalid_brick_name_exits_2_without_a_call() {
     let fake = Fake::start(Anchoring::Shared).await;

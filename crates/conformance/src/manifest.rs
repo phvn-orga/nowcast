@@ -182,6 +182,15 @@ pub fn refuses_a_kind_without_type<S: ManifestSubject>() {
 pub fn refuses_a_missing_schema<S: ManifestSubject>() {
     refused::<S>("invalid-missing-subscription-schema.toml");
     refused::<S>("invalid-missing-type-schema.toml");
+    refused::<S>("invalid-missing-refresh-schema.toml");
+}
+
+/// `[refresh] scope` is optional; when given, its schema is loaded from its
+/// path, relative to the file.
+pub fn reads_a_refresh_scope<S: ManifestSubject>() {
+    let refresh = load::<S>("refresh.toml").expect("refresh.toml is valid");
+    assert_eq!(refresh.refresh_scope, Some(schema("refresh-scope.json")));
+    assert_eq!(load::<S>("forge.toml").unwrap().refresh_scope, None);
 }
 
 /// Runs the rules of contract section 1 against a declaration loader.
@@ -213,6 +222,7 @@ macro_rules! manifest_suite {
                     refuses_an_undeclared_accepted_type,
                     refuses_a_kind_without_type,
                     refuses_a_missing_schema,
+                    reads_a_refresh_scope,
                 ]
             );
         }

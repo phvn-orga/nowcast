@@ -179,7 +179,10 @@ async fn serve() -> ExitCode {
                         log(format_args!("publication {req} refused: {code:?}"));
                         vec![]
                     }
-                    ServiceMessage::Input { .. } | ServiceMessage::Ack { .. } => vec![],
+                    // A scoped refresh is read once the brick declares its schema.
+                    ServiceMessage::RefreshScope { .. }
+                    | ServiceMessage::Input { .. }
+                    | ServiceMessage::Ack { .. } => vec![],
                 }
             }
             Some((target, outcome)) = updates.recv() => core.update(target, outcome, Timestamp::now(), Instant::now()),

@@ -89,8 +89,14 @@ export async function refresh($: $, flow: string): Promise<NowcastDone | Nowcast
 }
 
 /** `$.nowcast.refreshBrick`. */
-export async function refreshBrick($: $, brick: string, kind?: string): Promise<NowcastDone | NowcastFailure> {
-  const body = kind === undefined ? undefined : { kind }
+export async function refreshBrick(
+  $: $,
+  brick: string,
+  kind?: string,
+  scope?: Record<string, unknown>,
+): Promise<NowcastDone | NowcastFailure> {
+  const fields = { ...(kind === undefined ? {} : { kind }), ...(scope === undefined ? {} : { scope }) }
+  const body = Object.keys(fields).length === 0 ? undefined : fields
   return expect(await request($, 'POST', `/v1/bricks/${encodeURIComponent(brick)}/refresh`, body), 202, done)
 }
 

@@ -77,6 +77,9 @@ pub enum Received {
     Refresh {
         flow: String,
     },
+    RefreshScope {
+        scope: Vec<u8>,
+    },
     Input {
         flow: String,
         #[serde(rename = "type")]
@@ -110,6 +113,9 @@ impl From<&ServiceMessage> for Received {
             },
             ServiceMessage::Refresh { flow } => Self::Refresh {
                 flow: flow.as_str().to_owned(),
+            },
+            ServiceMessage::RefreshScope { scope } => Self::RefreshScope {
+                scope: scope.clone(),
             },
             ServiceMessage::Input {
                 flow,
@@ -147,6 +153,7 @@ impl TryFrom<Received> for ServiceMessage {
             },
             Received::Release { flow: id } => Self::Release { flow: flow(id)? },
             Received::Refresh { flow: id } => Self::Refresh { flow: flow(id)? },
+            Received::RefreshScope { scope } => Self::RefreshScope { scope },
             Received::Input {
                 flow: id,
                 data_type,
@@ -211,6 +218,13 @@ mod tests {
             .unwrap(),
             json!({ "t": "refresh", "flow": "a" })
         );
+        assert_eq!(
+            serde_json::to_value(Received::from(&ServiceMessage::RefreshScope {
+                scope: b"{}".to_vec()
+            }))
+            .unwrap(),
+            json!({ "t": "refresh-scope", "scope": [123, 125] })
+        );
     }
 
     #[test]
@@ -230,6 +244,9 @@ mod tests {
             },
             ServiceMessage::Refresh {
                 flow: FlowId::new("a/b#c d").unwrap(),
+            },
+            ServiceMessage::RefreshScope {
+                scope: br#"{"ids":["a"]}"#.to_vec(),
             },
             ServiceMessage::Shutdown,
             ServiceMessage::Ack { req: RequestId(7) },

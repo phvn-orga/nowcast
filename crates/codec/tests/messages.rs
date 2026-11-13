@@ -39,6 +39,10 @@ fn all_service_messages() -> Vec<ServiceMessage> {
             flow: flow(&"é".repeat(FLOW_ID_MAX_LEN / 2)),
         },
         ServiceMessage::Refresh { flow: flow("") },
+        ServiceMessage::RefreshScope {
+            // The codec carries the bytes, it does not check they are JSON.
+            scope: Vec::new(),
+        },
         ServiceMessage::Input {
             flow: flow("a"),
             data_type: String::new(),

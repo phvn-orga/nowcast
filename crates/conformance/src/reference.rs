@@ -102,6 +102,9 @@ pub fn service_value(msg: &ServiceMessage) -> Value {
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
             map(t, vec![("flow", s(flow.as_str()))])
         }
+        ServiceMessage::RefreshScope { scope } => {
+            map(t, vec![("scope", Value::Binary(scope.clone()))])
+        }
         ServiceMessage::Input {
             flow,
             data_type,
@@ -239,6 +242,9 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, String> {
         },
         "release" => ServiceMessage::Release { flow: f.flow()? },
         "refresh" => ServiceMessage::Refresh { flow: f.flow()? },
+        "refresh-scope" => ServiceMessage::RefreshScope {
+            scope: f.bin("scope")?,
+        },
         "input" => ServiceMessage::Input {
             flow: f.flow()?,
             data_type: f.str("type")?,

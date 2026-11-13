@@ -1,7 +1,7 @@
 //! Subscription params and flow inputs, checked against their JSON Schema.
 
 use jsonschema::Validator;
-use nowcast_types::ApiErrorCode;
+use nowcast_types::{ApiErrorCode, BrickName};
 use serde_json::Value;
 
 use crate::error::HttpError;
@@ -23,6 +23,25 @@ pub(crate) fn validate(schema: &Value, params: &Value, kind: &str) -> Result<(),
         params,
         ApiErrorCode::InvalidParams,
         &format!("params do not match the schema of kind {kind:?}"),
+    )
+}
+
+/// `400` `invalid_scope` when `scope` does not match the refresh scope schema
+/// `brick` declares.
+pub(crate) fn validate_scope(
+    schema: &Value,
+    scope: &Value,
+    brick: &BrickName,
+) -> Result<(), HttpError> {
+    let validator = compile(
+        schema,
+        &format!("the refresh scope schema of brick {brick}"),
+    )?;
+    report(
+        &validator,
+        scope,
+        ApiErrorCode::InvalidScope,
+        &format!("the scope does not match the refresh scope schema of brick {brick}"),
     )
 }
 

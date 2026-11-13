@@ -17,6 +17,8 @@
 //!   `n` counting the refreshes of this process from 1. A refresh of a flow it
 //!   does not serve is ignored. Nothing is published otherwise, so a new flow
 //!   has no value until a test publishes one.
+//! - `refresh-scope` publishes nothing: a test reads the scope among what
+//!   the service sent.
 //! - `release` forgets the flow; `shutdown` or the end of its input ends the
 //!   process with status 0.
 //!

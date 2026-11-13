@@ -21,6 +21,10 @@ impl BrickSubject for TestBrick {
     fn subscription() -> (String, Vec<u8>) {
         (probe::KIND.into(), probe::params("a"))
     }
+
+    fn scope() -> Option<Vec<u8>> {
+        Some(probe::scope(&["a"]))
+    }
 }
 
 nowcast_conformance::brick_suite!(TestBrick);

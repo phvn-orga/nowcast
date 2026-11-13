@@ -205,7 +205,9 @@ impl State {
                 }
                 _ => vec![],
             },
-            ServiceMessage::Shutdown
+            // The brick declares no refresh scope, so it never gets one.
+            ServiceMessage::RefreshScope { .. }
+            | ServiceMessage::Shutdown
             | ServiceMessage::Ack { .. }
             | ServiceMessage::Error { .. } => {
                 vec![]

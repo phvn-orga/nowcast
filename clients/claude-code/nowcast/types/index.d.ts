@@ -174,8 +174,17 @@ export type Nowcast = {
    * a source others may follow. A brick that is not enabled answers
    * `unknown_brick`, a kind it does not declare `unknown_kind`; one without
    * flows answers `ok` and reads nothing.
+   *
+   * With `scope` instead of `kind`, the brick gets the scope and decides
+   * which of its flows it touches. The scope must match the schema the brick
+   * declares (`invalid_scope` otherwise); a brick that declares none answers
+   * `scope_not_accepted`, and `kind` with `scope` `invalid_request`.
    */
-  refreshBrick(request: { brick: string; kind?: string }): Promise<NowcastDone | NowcastFailure>
+  refreshBrick(request: {
+    brick: string
+    kind?: string
+    scope?: Record<string, unknown>
+  }): Promise<NowcastDone | NowcastFailure>
   /**
    * `POST /v1/flows/{flow}/input`: sends `detail` to the flow's brick. The
    * flow's subscription kind must accept an input, and `detail` match the
