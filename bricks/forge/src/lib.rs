@@ -14,7 +14,7 @@
 //!   machine, remote parsing), and nothing obliges it to;
 //! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one;
 //! - [`credentials`] reads the token source each forge's user chose, which
-//!   [`configure`] asks for.
+//!   [`configure()`] asks for.
 
 mod azure;
 mod configure;

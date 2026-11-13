@@ -235,7 +235,7 @@ pub enum BricksAction {
     /// service for. When the service cannot tell, the brick is enabled
     /// unchecked.
     ///
-    /// A brick that declares a configuration command ([configure]) runs it
+    /// A brick that declares a configuration command (`configure`) runs it
     /// first, in this terminal: a configuration that fails refuses the brick.
     /// Without a terminal, the brick is enabled unconfigured, and a note says
     /// so.
