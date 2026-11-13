@@ -97,8 +97,14 @@ export async function refreshFor($: $, actions: ForgeAction[]): Promise<NowcastF
   let failed: NowcastFailure | null = null
   const scopes = new Map<string, { remote: string; types: Set<ForgeType>; number?: number }>()
   const kinds = new Set<string>()
+  // The items of a batch share their target: resolved once.
+  const resolved = new Map<string, string | null>()
   for (const action of actions) {
-    const remote = await resolve($, action.target, action.types)
+    const target = JSON.stringify([action.target, action.types])
+    const remote = resolved.has(target)
+      ? (resolved.get(target) ?? null)
+      : await resolve($, action.target, action.types)
+    resolved.set(target, remote)
     if (remote === null) {
       for (const type of action.types) for (const kind of KINDS[type]) kinds.add(kind)
       continue
