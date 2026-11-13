@@ -1,14 +1,20 @@
 //! The GitHub provider: recognises GitHub remotes and follows a branch, or
-//! a PR by its number, through the REST API ([`read`]), at the pace of
-//! [`RHYTHM`], with the checks the base of its open PR requires
-//! ([`required`]) and the PR's entry in the base's merge queue ([`queue`]).
-//! A reading that changes nothing costs no rate limit (`304`), hence a fast
-//! pace while a CI is expected or runs. A repository's open issues, and one
-//! issue, are followed at the normal pace ([`issues`]). The token comes from the
-//! source the user chose, `gh` or a token of theirs ([`token`]);
+//! a PR by its number, through the REST API ([`read`]), with the checks the
+//! base of its open PR requires ([`required`]) and the PR's entry in the
+//! base's merge queue ([`queue`]). A repository's open issues, and one
+//! issue, are followed too ([`issues`]).
+//!
+//! The detectors of each repository ([`detect`]) see what moved there and
+//! wake the targets it touches, which then read in detail. A reading that
+//! changes nothing costs no rate limit (`304`), hence a fast pace while a
+//! CI is expected or runs ([`RHYTHM`]). Otherwise a branch reads at the
+//! normal pace what no detector sees (a head moved without CI, the base's
+//! rules and queue), and the issues at a slow safety pace. The token comes
+//! from the source the user chose, `gh` or a token of theirs ([`token`]);
 //! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
 //! for tests.
 
+mod detect;
 mod issues;
 mod queue;
 mod read;
@@ -25,8 +31,9 @@ use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, wait_or_refresh};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
 use crate::tools::remote;
+use detect::{Access, Detected, Detection, Interest};
 use issues::{Accounts, Tracker};
 use queue::Queues;
 use required::{Base, Required};
@@ -38,7 +45,9 @@ pub const API_VAR: &str = "NOWCAST_FORGE_GITHUB_API";
 /// A token to use instead of the source chosen, for tests.
 pub const TOKEN_VAR: &str = "NOWCAST_FORGE_GITHUB_TOKEN";
 
-/// A reading that changes nothing is free: fast while something moves.
+/// A reading that changes nothing is free: fast while something moves. The
+/// fast window opens on the detectors a `refresh` reaches, not on the
+/// target.
 pub const RHYTHM: Rhythm = Rhythm {
     expected_first: Duration::from_secs(2),
     expected_after: Duration::from_secs(5),
@@ -65,6 +74,7 @@ pub struct GitHub {
     accounts: Accounts,
     required: Required,
     queues: Queues,
+    detection: Detection,
 }
 
 impl GitHub {
@@ -79,12 +89,33 @@ impl GitHub {
             accounts: Accounts::default(),
             required: Required::default(),
             queues: Queues::default(),
+            detection: Detection::default(),
         }
+    }
+
+    /// Registers a target of `owner/name` about `interest` with the
+    /// repository's detectors.
+    fn detect(&self, owner: &str, name: &str, interest: Interest) -> Detected {
+        let access = Access {
+            http: self.http.clone(),
+            api: self.api.clone(),
+            credentials: self.credentials.clone(),
+            tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
+        };
+        self.detection.watch(&access, owner, name, interest)
     }
 
     /// Follows the open issues of `repo`, or its issue `number`.
     fn follow_tracker(&self, repo: &Repo, number: Option<u64>, updates: Updates) -> Watch {
         let (owner, name) = owner_and_name(repo);
+        let interest = Interest {
+            kinds: detect::TRACKER,
+            issue: number,
+            tracker: number.is_none(),
+            ..Interest::default()
+        };
+        let detected = self.detect(&owner, &name, interest);
         let tracker = Tracker {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -95,7 +126,7 @@ impl GitHub {
             name,
             number,
         };
-        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes, detected))
     }
 }
 
@@ -122,6 +153,19 @@ impl Provider for GitHub {
 
     fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
         let (owner, name) = owner_and_name(repo);
+        let interest = Interest {
+            kinds: detect::BRANCH,
+            branch: match &head {
+                Head::Branch(branch) => Some(branch.clone()),
+                Head::Pr(_) => None,
+            },
+            pr: match head {
+                Head::Branch(_) => None,
+                Head::Pr(number) => Some(number),
+            },
+            ..Interest::default()
+        };
+        let detected = self.detect(&owner, &name, interest);
         let branch = Branch {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -135,7 +179,7 @@ impl Provider for GitHub {
             name,
             head,
         };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes, detected))
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -163,17 +207,23 @@ struct Branch {
 }
 
 impl Branch {
-    /// Reads, sends what it read, waits as the pace says or for a
-    /// `refresh`, and again, until the core is gone. A `refresh` that comes
-    /// during a reading is answered by the next one. A rate limit is waited
-    /// out whatever the refreshes.
-    async fn follow(mut self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    /// Reads, sends what it read, waits as the pace says, for a detector
+    /// to say the branch moved, or for a `refresh`, and again, until the
+    /// core is gone. A `refresh` that comes during a reading is answered by
+    /// the next one. A rate limit is waited out whatever comes.
+    async fn follow(
+        mut self,
+        updates: Updates,
+        mut refreshes: UnboundedReceiver<()>,
+        mut detected: Detected,
+    ) {
         let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
             let (outcome, delay) = match outcome {
                 Ok(mut reading) => {
+                    self.learn(&detected, &reading);
                     pace.saw(
                         now,
                         reading.head_sha.as_deref(),
@@ -205,11 +255,25 @@ impl Branch {
             if !updates.send(outcome.map(|r| Reading::Branch(Box::new(r)))) {
                 return;
             }
-            let refreshed = || pace.refreshed(Instant::now());
-            if !wait_or_refresh(now + delay, &mut refreshes, wait.is_some(), refreshed).await {
+            if !detected
+                .wait(now + delay, &mut refreshes, wait.is_some())
+                .await
+            {
                 return;
             }
         }
+    }
+
+    /// Tells the detectors what `reading` found: the commit read, and the
+    /// branch's PR, or the PR's head branch when it is of this repository.
+    fn learn(&self, detected: &Detected, reading: &BranchReading) {
+        detected.watcher.learn(|interest| {
+            interest.sha.clone_from(&reading.head_sha);
+            match &self.head {
+                Head::Branch(_) => interest.pr = reading.pr.as_ref().map(|p| p.number),
+                Head::Pr(_) => interest.branch.clone_from(&reading.branch),
+            }
+        });
     }
 
     /// One reading, and how long a rate limit asks to wait.
@@ -1228,5 +1292,187 @@ mod tests {
         let ci = reading.ci.unwrap();
         assert_eq!(ci.sha, "abc");
         assert_eq!(ci.expected_until, None, "the first reading expects nothing");
+    }
+
+    /// A forge where every branch has the open PR 7 at `abc`, without CI,
+    /// and the lists the detectors poll are empty.
+    async fn quiet_forge() -> Server {
+        Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pulls?state=open") {
+                json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } }])
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] })
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [] })
+            } else if line.contains("/user ") {
+                json!({ "login": "me" })
+            } else {
+                json!([])
+            };
+            (200, vec![], body.to_string())
+        })
+        .await
+    }
+
+    /// The requests to the detector of `kind`.
+    fn polls(server: &Server, kind: detect::Kind) -> usize {
+        let path = match kind {
+            detect::Kind::Runs => "/actions/runs?per_page=20 ",
+            detect::Kind::Pulls => "/pulls?state=all&sort=updated&direction=desc&per_page=20 ",
+            detect::Kind::Issues => "/issues?state=all&sort=updated&direction=desc&per_page=20 ",
+        };
+        asked(server, path)
+    }
+
+    /// Yields, a few milliseconds at a time, until `done`; fails past a
+    /// second.
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("not reached");
+    }
+
+    fn provider(server: &Server) -> GitHub {
+        let github = GitHub::new(Http::new().unwrap(), server.base(), testing::none());
+        github
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
+        github
+    }
+
+    /// Two branches of one repository share its detectors, polled once at
+    /// the start; the issues detector waits for a target that needs it; the
+    /// detectors stop with the last target.
+    #[tokio::test]
+    async fn one_detector_per_repository_serves_its_targets() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let other = github.follow(&repo, Head::Branch("other".into()), Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        until(|| polls(&server, detect::Kind::Runs) > 0 && polls(&server, detect::Kind::Pulls) > 0)
+            .await;
+        assert_eq!(polls(&server, detect::Kind::Runs), 1);
+        assert_eq!(polls(&server, detect::Kind::Pulls), 1);
+        assert_eq!(polls(&server, detect::Kind::Issues), 0);
+        assert_eq!(github.detection.running(), [("o/r".to_owned(), 2)]);
+        drop(feat);
+        assert_eq!(github.detection.running(), [("o/r".to_owned(), 2)]);
+        drop(other);
+        tokio::task::yield_now().await;
+        assert!(github.detection.running().is_empty());
+    }
+
+    /// A `refresh` has the detectors of the target's kinds poll before the
+    /// target reads again: a branch's, the runs and PRs; the issues', the
+    /// issues.
+    #[tokio::test]
+    async fn a_refresh_polls_the_detectors_of_its_kinds_first() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let issues = github.follow_issues(&repo, Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        let started = |s: &Server| {
+            [
+                detect::Kind::Runs,
+                detect::Kind::Pulls,
+                detect::Kind::Issues,
+            ]
+            .map(|kind| polls(s, kind))
+        };
+        until(|| started(&server) == [1, 1, 1]).await;
+        feat.refresh();
+        let (target, _) = rx.recv().await.unwrap();
+        assert_eq!(target, 1);
+        assert_eq!(started(&server), [2, 2, 1]);
+        let requests = server.requests();
+        let last = |what: &str| requests.iter().rposition(|r| r.contains(what)).unwrap();
+        assert!(last("/actions/runs?per_page=20 ") < last("/pulls?state=open"));
+        assert!(last("/pulls?state=all") < last("/pulls?state=open"));
+        issues.refresh();
+        let (target, _) = rx.recv().await.unwrap();
+        assert_eq!(target, 2);
+        assert_eq!(started(&server), [2, 2, 2]);
+    }
+
+    /// What a detector sees move wakes the target it touches, which reads
+    /// again without a `refresh`.
+    #[tokio::test]
+    async fn a_detector_wakes_the_branch_it_touches() {
+        let runs = Arc::new(Mutex::new(json!({ "workflow_runs": [] })));
+        let polled = runs.clone();
+        let server = Server::start(move |request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/actions/runs?per_page=20 ") {
+                polled.lock().unwrap().clone()
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] })
+            } else if line.contains("/branches/") {
+                json!({ "commit": { "sha": "abc" } })
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [] })
+            } else {
+                json!([])
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let other = github.follow(&repo, Head::Branch("other".into()), Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        until(|| polls(&server, detect::Kind::Runs) == 1).await;
+        *runs.lock().unwrap() = json!({ "workflow_runs": [{ "id": 1, "updated_at": "t",
+            "status": "queued", "head_branch": "feat", "head_sha": "def",
+            "head_repository": { "full_name": "o/r" } }] });
+        // The refresh of `other` has the detectors poll: the run they see
+        // wakes `feat`, which `other`'s refresh does not cover.
+        other.refresh();
+        let mut read = [rx.recv().await.unwrap().0, rx.recv().await.unwrap().0];
+        read.sort_unstable();
+        assert_eq!(
+            read,
+            [1, 2],
+            "the refreshed target, and the one the run touches"
+        );
+        assert_eq!(asked(&server, "/branches/feat"), 2);
+        assert_eq!(asked(&server, "/branches/other"), 2);
+        drop(feat);
     }
 }

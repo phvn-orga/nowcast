@@ -67,7 +67,19 @@ impl Http {
         authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<Arc<Value>, Failure> {
-        Ok(self.get_answer(url, authorization, headers).await?.0)
+        Ok(self.fetch(url, authorization, headers).await?.0)
+    }
+
+    /// [`Http::get`], and whether the body changed: `false` for a `304`,
+    /// which gives back the body kept.
+    pub async fn get_changed(
+        &self,
+        url: &str,
+        authorization: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Arc<Value>, bool), Failure> {
+        let (body, _, changed) = self.fetch(url, authorization, headers).await?;
+        Ok((body, changed))
     }
 
     /// [`Http::get`], with the answer's headers, for a forge that says on a
@@ -78,6 +90,17 @@ impl Http {
         authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<(Arc<Value>, HeaderMap), Failure> {
+        let (body, answer_headers, _) = self.fetch(url, authorization, headers).await?;
+        Ok((body, answer_headers))
+    }
+
+    /// The body, the answer's headers, and whether the body changed.
+    async fn fetch(
+        &self,
+        url: &str,
+        authorization: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Arc<Value>, HeaderMap, bool), Failure> {
         // The body is taken with its ETag: a 304 gives back this one, even if
         // the cache was cleared meanwhile.
         let kept = self.cache.lock().unwrap().get(url).cloned();
@@ -89,7 +112,7 @@ impl Http {
         let answer_headers = response.headers().clone();
         if response.status() == StatusCode::NOT_MODIFIED {
             return match kept {
-                Some((_, body)) => Ok((body, answer_headers)),
+                Some((_, body)) => Ok((body, answer_headers, false)),
                 None => Err(Failure::Unreadable("304 without a kept answer".into())),
             };
         }
@@ -105,7 +128,7 @@ impl Http {
             }
             cache.insert(url.to_owned(), (etag, body.clone()));
         }
-        Ok((body, answer_headers))
+        Ok((body, answer_headers, true))
     }
 
     /// POSTs `body` as JSON to `url`, with `headers` and the `authorization`
@@ -262,6 +285,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("authorization: bearer t"));
         assert!(requests[1].contains("if-none-match: \"v1\""));
+        let (_, changed) = http.get_changed(&url, "Bearer t", &[]).await.unwrap();
+        assert!(!changed, "a 304 changes nothing");
+        let (_, changed) = http.get_changed(&server.url("/b"), "t", &[]).await.unwrap();
+        assert!(changed, "a 200 does");
     }
 
     /// A POST sends its JSON body and caches nothing; its failures are those

@@ -1,8 +1,9 @@
 //! A repository's issues on GitHub, through the REST API: its open issues,
-//! the most recently created first, and one issue. Both are read at the
-//! normal pace of [`RHYTHM`], and at once after a `refresh`. The issues API
-//! mixes pull requests in: they are removed. The account that reads is
-//! `GET /user`, asked once per token.
+//! the most recently created first, and one issue. Both are read when the
+//! repository's issues detector says they moved, at once after a `refresh`,
+//! and at the slow [`SAFETY`] pace for what detection could miss. The
+//! issues API mixes pull requests in: they are removed. The account that
+//! reads is `GET /user`, asked once per token.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,16 +13,20 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
+use super::detect::Detected;
 use super::read::HEADERS;
 use super::{RHYTHM, Tokens, failed, owner_token};
 use crate::credentials::Credentials;
 use crate::model::{Issue, Issues};
 use crate::provider::{Failure, Outcome, Reading, Updates};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::wait_or_refresh;
 
 /// The issues one page lists; two pages at most are read.
 const PAGE: usize = 100;
+/// How often issues are read without a detector saying they moved: for
+/// what it could miss, such as an issue that left its list of 20 between
+/// two polls.
+pub const SAFETY: Duration = Duration::from_secs(300);
 
 /// The login each token reads as, shared by every tracker followed.
 pub type Accounts = Arc<Mutex<HashMap<String, String>>>;
@@ -39,18 +44,26 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Reads, sends what it read, waits for the normal pace or a `refresh`,
-    /// and again, until the core is gone. A rate limit is waited out
-    /// whatever the refreshes.
-    pub async fn follow(self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    /// Reads, sends what it read, waits for the [`SAFETY`] pace, for the
+    /// issues detector to say they moved, or for a `refresh`, and again,
+    /// until the core is gone. A rate limit is waited out whatever comes.
+    pub async fn follow(
+        self,
+        updates: Updates,
+        mut refreshes: UnboundedReceiver<()>,
+        mut detected: Detected,
+    ) {
         loop {
             let (outcome, wait) = self.read_once().await;
             if !updates.send(outcome) {
                 return;
             }
-            let delay = wait.map_or(RHYTHM.normal, |w| w.max(RHYTHM.normal));
+            let delay = wait.map_or(SAFETY, |w| w.max(RHYTHM.normal));
             let deadline = Instant::now() + delay;
-            if !wait_or_refresh(deadline, &mut refreshes, wait.is_some(), || {}).await {
+            if !detected
+                .wait(deadline, &mut refreshes, wait.is_some())
+                .await
+            {
                 return;
             }
         }
@@ -427,6 +440,7 @@ mod tests {
         ));
         watch.refresh();
         assert!(rx.recv().await.unwrap().1.is_ok());
-        assert_eq!(server.requests().len(), 2);
+        let read = |r: &&String| r.contains("/issues/52 ");
+        assert_eq!(server.requests().iter().filter(read).count(), 2);
     }
 }

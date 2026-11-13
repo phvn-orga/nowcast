@@ -21,8 +21,8 @@
 //!
 //! A scoped refresh (`refresh-scope`) is a hint that an action changed a
 //! repository: the targets it covers are read now, through their
-//! [`Watch`], which also opens their fast window, and only the flows whose
-//! detail changed are published.
+//! [`Watch`], the provider looking faster for a while (its own business),
+//! and only the flows whose detail changed are published.
 
 use std::collections::HashMap;
 
