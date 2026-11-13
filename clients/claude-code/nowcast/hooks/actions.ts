@@ -303,15 +303,19 @@ function* programs(command: string, cwd: string | undefined) {
   }
 }
 
-/** The `git branch` options that rename the branch or change its upstream. */
-const BRANCH_MOVES = ['-m', '-M', '--move', '-u', '--set-upstream-to', '--unset-upstream']
+/** The `git branch` options that rename a branch, and those that change its upstream. */
+const BRANCH_RENAMES = ['-m', '-M', '--move']
+const BRANCH_UPSTREAMS = ['-u', '--set-upstream-to', '--unset-upstream']
+/** The `git worktree` subcommands that add, move or remove a worktree. */
+const WORKTREE_MOVES = ['add', 'move', 'remove', 'prune']
 
 /**
  * The directories of a command line run in `cwd` where the branch, or where
  * `git push` sends it, may have changed (`02-clients.md` on the design
  * branch): `git switch`, `git checkout`, `git branch -m`, `git push -u`, `gh
  * pr checkout`. A `cd` moves them as for `commandActions`. Undefined stands
- * for any worktree: a directory not to be followed, or `git worktree`, which
+ * for any worktree: a directory not to be followed, a `git branch` naming a
+ * branch another worktree may have checked out, or `git worktree`, which
  * adds, moves and removes others.
  */
 export function branchMoves(command: string, cwd: string | undefined): Array<string | undefined> {
@@ -329,20 +333,18 @@ export function branchMoves(command: string, cwd: string | undefined): Array<str
       continue
     }
     if (program !== 'git') continue
-    let at = 1
-    let where = dir
-    while (at < args.length && (args[at] as string).startsWith('-')) {
-      const option = args[at] as string
-      if (option === '-C') where = resolveDir(where, args[at + 1])
-      at += GIT_VALUED.includes(option) ? 2 : 1
-    }
-    const rest = args.slice(at + 1)
+    const { sub, rest, dir: where } = gitCommand(args.slice(1), dir)
     const named = (options: string[]) => rest.some(arg => options.some(o => arg === o || arg.startsWith(`${o}=`)))
-    const sub = args[at]
-    if (sub === 'worktree') moved.push(undefined)
+    if (sub === 'worktree' && WORKTREE_MOVES.includes(rest[0] ?? '')) moved.push(undefined)
     else if (sub === 'switch' || sub === 'checkout') moved.push(where)
-    else if (sub === 'branch' && named(BRANCH_MOVES)) moved.push(where)
-    else if (sub === 'push' && named(['-u', '--set-upstream'])) moved.push(where)
+    else if (sub === 'branch' && (named(BRANCH_RENAMES) || named(BRANCH_UPSTREAMS))) {
+      // `-m new` and `-u origin/x` act on the current branch; a branch named
+      // besides (`-m old new`, `-u origin/x feat`) may be another worktree's.
+      const names = rest.filter(
+        (arg, i) => !arg.startsWith('-') && !['-u', '--set-upstream-to'].includes(rest[i - 1] ?? ''),
+      )
+      moved.push(names.length > (named(BRANCH_RENAMES) ? 1 : 0) ? undefined : where)
+    } else if (sub === 'push' && named(['-u', '--set-upstream'])) moved.push(where)
   }
   return moved
 }
@@ -361,8 +363,11 @@ export function isUrl(destination: string): boolean {
 const GIT_VALUED = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']
 const PUSH_VALUED = ['-o', '--push-option', '--receive-pack', '--exec', '--repo']
 
-/** `git [options] push [options] [<repository> [<refspec>...]]`. */
-function gitAction(args: string[], cwd: string | undefined): ForgeAction | null {
+/** `git [options] <sub> <rest...>` run in `cwd`: its subcommand, what follows it, and the directory `-C` gives. */
+function gitCommand(
+  args: string[],
+  cwd: string | undefined,
+): { sub: string | undefined; rest: string[]; dir: string | undefined } {
   let dir = cwd
   let at = 0
   while (at < args.length && (args[at] as string).startsWith('-')) {
@@ -370,13 +375,19 @@ function gitAction(args: string[], cwd: string | undefined): ForgeAction | null 
     if (option === '-C') dir = resolveDir(dir, args[at + 1])
     at += GIT_VALUED.includes(option) ? 2 : 1
   }
-  if (args[at] !== 'push') return null
+  return { sub: args[at], rest: args.slice(at + 1), dir }
+}
+
+/** `git [options] push [options] [<repository> [<refspec>...]]`. */
+function gitAction(args: string[], cwd: string | undefined): ForgeAction | null {
+  const { sub, rest, dir } = gitCommand(args, cwd)
+  if (sub !== 'push') return null
   let destination: string | undefined
-  for (let i = at + 1; i < args.length; i++) {
-    const arg = args[i] as string
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i] as string
     if (['-n', '--dry-run', '-h', '--help'].includes(arg)) return null
     if (arg.startsWith('--repo=')) destination = arg.slice('--repo='.length)
-    else if (arg === '--repo') destination = args[i + 1]
+    else if (arg === '--repo') destination = rest[i + 1]
     if (PUSH_VALUED.includes(arg)) i++
     else if (!arg.startsWith('-') && destination === undefined) destination = arg
   }

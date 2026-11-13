@@ -61,7 +61,7 @@
         "properties": {
           "path": { "type": "string", "description": "The worktree's root." },
           "repo": { "type": "string", "description": "The common git directory, the same for every worktree of a repository." },
-          "branch": { "type": ["string", "null"], "description": "The branch at the last write; null on a detached HEAD." },
+          "branch": { "type": ["string", "null"], "description": "The branch at the last write, or after a command of the agent that may move it; null on a detached HEAD." },
           "remote": { "type": ["string", "null"], "description": "The origin remote's URL as git has it." },
           "written_at": { "type": "string", "description": "The last write in it, RFC 3339." },
           "forge": {

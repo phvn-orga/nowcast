@@ -120,7 +120,10 @@ export type NowcastWorktree = {
   path: string
   /** The common git directory, the same for every worktree of a repository. */
   repo: string
-  /** The branch checked out at the last write; null on a detached HEAD. */
+  /**
+   * The branch checked out at the last write, or after a command of the
+   * agent that may move it; null on a detached HEAD.
+   */
   branch: string | null
   /**
    * The `origin` remote's URL as git has it; null without one. Not the forge

@@ -334,11 +334,18 @@ test('MCP tools of GitHub and Azure DevOps servers that write are classified by 
 
 test('the commands that may move a branch name the directory they ran in', () => {
   const moves = (command: string) => branchMoves(command, CWD)
-  expect(moves('git status && git log && git branch new && git push origin HEAD && gh pr view 3')).toEqual([])
+  expect(
+    moves('git status && git log && git branch new && git push origin HEAD && gh pr view 3 && git worktree list'),
+  ).toEqual([])
   expect(moves('git switch -c x')).toEqual([CWD])
   expect(moves('cd ../other && git checkout main')).toEqual(['/lab/other'])
   expect(moves('git -C /w branch -m new')).toEqual(['/w'])
   expect(moves('git branch --set-upstream-to=origin/x')).toEqual([CWD])
+  expect(moves('git branch -u origin/x')).toEqual([CWD])
+  // A branch named besides may be checked out in another worktree.
+  expect(moves('git branch -m old new')).toEqual([undefined])
+  expect(moves('git branch -u origin/x feat')).toEqual([undefined])
+  expect(moves('git branch --unset-upstream feat')).toEqual([undefined])
   expect(moves('git commit -m x && git push -u origin HEAD')).toEqual([CWD])
   expect(moves('gh -R o/r pr checkout 12')).toEqual([CWD])
   // Any worktree: `git worktree`, or a directory the shell expands.
