@@ -33,6 +33,6 @@ nowcast_conformance::brick_suite!(TestBrick);
 #[test]
 fn binary_is_where_cargo_builds_it() {
     let built = std::path::Path::new(env!("CARGO_BIN_EXE_nowcast-test-brick"));
-    let found = nowcast_test_brick::binary().expect("a path");
+    let found = nowcast_test_brick::binary();
     assert_eq!(found.canonicalize().unwrap(), built.canonicalize().unwrap());
 }

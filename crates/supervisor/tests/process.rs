@@ -3,8 +3,8 @@
 //! delays are shortened.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nowcast_conformance::probe;
@@ -41,31 +41,6 @@ fn fast() -> Config {
     }
 }
 
-/// The test brick binary. Cargo builds it for this package's tests only
-/// under `cargo test --workspace`, so it is built here when missing or stale.
-fn test_brick() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let mut cargo = std::process::Command::new(env!("CARGO"));
-        cargo.args([
-            "build",
-            "--quiet",
-            "-p",
-            "nowcast-test-brick",
-            "--bin",
-            "nowcast-test-brick",
-        ]);
-        if !cfg!(debug_assertions) {
-            cargo.arg("--release");
-        }
-        assert!(
-            cargo.status().expect("cargo runs").success(),
-            "the test brick builds"
-        );
-        nowcast_test_brick::binary().expect("the profile directory of the tests")
-    })
-}
-
 fn flow(id: &str) -> FlowId {
     FlowId::new(id).unwrap()
 }
@@ -86,7 +61,7 @@ impl Harness {
     fn new(mode: Mode, config: Config) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let control = Control::bind(dir.path().join("control.sock")).unwrap();
-        let command = vec![test_brick().to_string_lossy().into_owned()];
+        let command = vec![nowcast_test_brick::binary().to_string_lossy().into_owned()];
         let mut declaration = probe::declaration(command, dir.path().to_owned());
         declaration.env.insert(
             CONTROL_VAR.into(),
@@ -334,7 +309,7 @@ fn shell(script: &str, dir: &Path) -> BrickDeclaration {
 async fn the_launcher_speaks_the_protocol_over_standard_input_and_output() {
     let dir = tempfile::tempdir().unwrap();
     let declaration = probe::declaration(
-        vec![test_brick().to_string_lossy().into_owned()],
+        vec![nowcast_test_brick::binary().to_string_lossy().into_owned()],
         dir.path().to_owned(),
     );
     let mut connection = ProcessLauncher.launch(&declaration).unwrap();
