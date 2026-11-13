@@ -636,18 +636,24 @@ impl Published {
 /// The PR's statuses as one `external` pipeline, a job per context: the
 /// latest of each, on the latest `iteration` or on the whole PR. A status a
 /// published build posts itself is that build's, already published, and
-/// left out. Each job is required when a blocking status policy names it;
-/// such a policy that nothing answered is missing.
+/// left out, unless a blocking status policy requires it. Each job is
+/// required when a blocking status policy names it; such a policy that
+/// nothing answered is missing.
 fn statuses_pipeline(
     statuses: &Value,
     iteration: Option<u64>,
     published: &Published,
     policies: &[StatusPolicy],
 ) -> (Option<Pipeline>, Vec<String>) {
+    let requires = |name: &str| {
+        policies
+            .iter()
+            .any(|p| p.blocking && p.context.eq_ignore_ascii_case(name))
+    };
     let mut latest: Vec<(String, &Value)> = Vec::new();
     for status in list(statuses) {
         let on = status["iterationId"].as_u64();
-        if on.is_some_and(|on| Some(on) != iteration) || from_build(status, published) {
+        if on.is_some_and(|on| Some(on) != iteration) {
             continue;
         }
         let context = &status["context"];
@@ -655,17 +661,15 @@ fn statuses_pipeline(
             context["genre"].as_str(),
             context["name"].as_str().unwrap_or_default(),
         );
+        if from_build(status, published) && !requires(&name) {
+            continue;
+        }
         match latest.iter_mut().find(|(n, _)| *n == name) {
             Some(kept) if kept.1["id"].as_u64() < status["id"].as_u64() => kept.1 = status,
             Some(_) => {}
             None => latest.push((name, status)),
         }
     }
-    let requires = |name: &str| {
-        policies
-            .iter()
-            .any(|p| p.blocking && p.context.eq_ignore_ascii_case(name))
-    };
     let jobs: Vec<Job> = latest
         .iter()
         .map(|(name, status)| status_job(name, status, requires(name)))
@@ -923,6 +927,46 @@ mod tests {
             ]
         );
         assert_eq!(missing, ["ci/e2e"]);
+    }
+
+    /// A published build's own status that a blocking status policy
+    /// requires answers that policy: it stays a required job, by its
+    /// `targetUrl` as by its genre, and nothing is missing.
+    #[test]
+    fn a_required_status_of_a_published_build_answers_its_policy() {
+        let mut coverage = status(1, "coverage", "failed", None);
+        coverage["targetUrl"] = json!("https://dev.azure.com/o/p/_build/results?buildId=41");
+        let mut tests = status(2, "tests", "pending", None);
+        tests["context"]["genre"] = json!("app-validation");
+        tests["targetUrl"] = Value::Null;
+        let statuses = json!({ "value": [coverage, tests] });
+        let published = Published {
+            builds: HashSet::from(["41".to_owned()]),
+            definitions: HashSet::from(["app-validation".to_owned()]),
+        };
+        let policies = ["ci/coverage", "app-validation/tests"].map(|context| StatusPolicy {
+            context: context.into(),
+            blocking: true,
+        });
+        let (pipeline, missing) = statuses_pipeline(&statuses, None, &published, &policies);
+        let jobs: Vec<_> = pipeline
+            .unwrap()
+            .jobs
+            .iter()
+            .map(|j| (j.name.clone(), j.state, j.required))
+            .collect();
+        assert_eq!(
+            jobs,
+            [
+                ("ci/coverage".to_owned(), State::Fail, Some(true)),
+                (
+                    "app-validation/tests".to_owned(),
+                    State::Running,
+                    Some(true)
+                ),
+            ]
+        );
+        assert!(missing.is_empty());
     }
 
     /// A forge where `feat` has the active PR 7, also read by its number,
