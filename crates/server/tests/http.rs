@@ -550,6 +550,22 @@ fn a_scope_to_a_brick_declaring_none_answers_405() {
 }
 
 #[test]
+fn a_null_scope_is_checked_not_a_refresh_of_every_flow() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        subscribe(&harness, "a").await;
+        let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+        let body = json!({ "scope": null }).to_string();
+        request(&harness, "POST", &path, &body)
+            .await
+            .error(400, "invalid_scope");
+        assert!(harness.supervisor.refreshes().is_empty());
+        assert!(harness.supervisor.scoped_refreshes().is_empty());
+    });
+}
+
+#[test]
 fn an_invalid_scope_says_what_is_wrong() {
     run(async {
         let harness = start(ProbeMode::Ready);

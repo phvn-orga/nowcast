@@ -79,8 +79,15 @@ struct Subscribe {
 #[serde(deny_unknown_fields)]
 struct RefreshBrick {
     kind: Option<String>,
-    /// A scope the brick interprets, instead of a kind.
+    /// A scope the brick interprets, instead of a kind. A `null` scope is a
+    /// scope too, checked like any other, not a refresh of every flow.
+    #[serde(default, deserialize_with = "given")]
     scope: Option<Value>,
+}
+
+/// `Some` for a field present in the body, `null` included.
+fn given<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(value).map(Some)
 }
 
 #[derive(serde::Serialize)]
