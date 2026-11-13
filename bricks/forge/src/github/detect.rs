@@ -466,15 +466,16 @@ pub struct Detected {
 
 impl Detected {
     /// Waits until `deadline`, for a `refresh`, or for a detector to say the
-    /// target moved; what piled up counts as one. A `refresh` has the
-    /// target's detectors poll first: what they wake is the reading that
-    /// follows. A rate limit (`limited`) holds the wait whatever comes.
-    /// `false` once the core is gone.
+    /// target moved; what piled up counts as one. A `refresh` calls
+    /// `refreshed`, and has the target's detectors poll first: what they
+    /// wake is the reading that follows. A rate limit (`limited`) holds the
+    /// wait whatever comes. `false` once the core is gone.
     pub async fn wait(
         &mut self,
         deadline: Instant,
         refreshes: &mut UnboundedReceiver<()>,
         limited: bool,
+        mut refreshed_now: impl FnMut(),
     ) -> bool {
         let mut refreshed = false;
         loop {
@@ -488,6 +489,7 @@ impl Detected {
                     }
                     while refreshes.try_recv().is_ok() {}
                     refreshed = true;
+                    refreshed_now();
                     if !limited {
                         break;
                     }

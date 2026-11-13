@@ -45,9 +45,9 @@ pub const API_VAR: &str = "NOWCAST_FORGE_GITHUB_API";
 /// A token to use instead of the source chosen, for tests.
 pub const TOKEN_VAR: &str = "NOWCAST_FORGE_GITHUB_TOKEN";
 
-/// A reading that changes nothing is free: fast while something moves. The
-/// fast window opens on the detectors a `refresh` reaches, not on the
-/// target.
+/// A reading that changes nothing is free: fast while something moves. A
+/// `refresh` opens the fast window on the target and on the detectors it
+/// reaches.
 pub const RHYTHM: Rhythm = Rhythm {
     expected_first: Duration::from_secs(2),
     expected_after: Duration::from_secs(5),
@@ -253,8 +253,12 @@ impl Branch {
             if !updates.send(outcome.map(|r| Reading::Branch(Box::new(r)))) {
                 return;
             }
+            // A refresh opens the target's own fast window too: the head
+            // pushed without CI on a branch without PR is a move no detector
+            // sees, and the API may not show it yet at the next reading.
+            let refreshed = || pace.refreshed(Instant::now());
             if !detected
-                .wait(now + delay, &mut refreshes, wait.is_some())
+                .wait(now + delay, &mut refreshes, wait.is_some(), refreshed)
                 .await
             {
                 return;
@@ -1418,6 +1422,23 @@ mod tests {
         let (target, _) = rx.recv().await.unwrap();
         assert_eq!(target, 2);
         assert_eq!(started(&server), [2, 2, 2]);
+    }
+
+    /// A `refresh` opens the target's own fast window: with nothing moving,
+    /// it reads again at the window pace, not the normal one, for a head
+    /// the API did not show yet and no detector sees.
+    #[tokio::test]
+    async fn a_refresh_opens_the_targets_fast_window() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(&repo, Head::Branch("feat".into()), Updates::new(1, tx));
+        let _ = rx.recv().await.unwrap();
+        feat.refresh();
+        let _ = rx.recv().await.unwrap();
+        let next = tokio::time::timeout(RHYTHM.window * 3, rx.recv()).await;
+        assert_eq!(next.expect("read at the window pace").unwrap().0, 1);
     }
 
     /// What a detector sees move wakes the target it touches, which reads

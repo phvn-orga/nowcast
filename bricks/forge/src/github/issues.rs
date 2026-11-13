@@ -68,7 +68,7 @@ impl Tracker {
             let delay = wait.map_or(pace, |w| w.max(RHYTHM.normal));
             let deadline = Instant::now() + delay;
             if !detected
-                .wait(deadline, &mut refreshes, wait.is_some())
+                .wait(deadline, &mut refreshes, wait.is_some(), || {})
                 .await
             {
                 return;
