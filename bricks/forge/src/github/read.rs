@@ -91,11 +91,8 @@ pub async fn read_pr(
     let p = http.get(&url, token, HEADERS).await?;
     let pr = pr_of(&p).ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
     let ci = ci(http, api, token, owner, name, &pr.head_sha, Some(number)).await?;
-    let own = p["head"]["repo"]["full_name"]
-        .as_str()
-        .is_some_and(|f| f.eq_ignore_ascii_case(&format!("{owner}/{name}")));
     Ok(BranchReading {
-        branch: own
+        branch: is_repo(&p["head"]["repo"], &format!("{owner}/{name}"))
             .then(|| p["head"]["ref"].as_str().map(str::to_owned))
             .flatten(),
         head_sha: Some(pr.head_sha.clone()),
@@ -135,13 +132,18 @@ pub async fn ci(
 fn open_pr(pulls: &Value, owner: &str, name: &str, branch: &str) -> Option<Pr> {
     let full = format!("{owner}/{name}");
     pulls.as_array()?.iter().find_map(|p| {
-        let same_repo = p["head"]["repo"]["full_name"]
-            .as_str()
-            .is_some_and(|f| f.eq_ignore_ascii_case(&full));
-        (same_repo && p["head"]["ref"] == branch)
+        (is_repo(&p["head"]["repo"], &full) && p["head"]["ref"] == branch)
             .then(|| pr_of(p))
             .flatten()
     })
+}
+
+/// Whether `repo`, a repository as the API gives it, is `full`
+/// (`<owner>/<name>`), whatever the case.
+pub(super) fn is_repo(repo: &Value, full: &str) -> bool {
+    repo["full_name"]
+        .as_str()
+        .is_some_and(|f| f.eq_ignore_ascii_case(full))
 }
 
 fn pr_of(p: &Value) -> Option<Pr> {

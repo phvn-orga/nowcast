@@ -29,7 +29,7 @@ use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 use super::issues::Accounts;
-use super::read::HEADERS;
+use super::read::{HEADERS, is_repo};
 use super::{RHYTHM, Tokens, owner_token};
 use crate::credentials::Credentials;
 use crate::tools::http::{self, Http};
@@ -41,6 +41,9 @@ pub const PERIOD: Duration = Duration::from_secs(10);
 pub const SLOWEST: Duration = Duration::from_secs(60);
 /// The polls the slowdown rule looks back on.
 const LOOKBACK: usize = 6;
+/// How long a `refresh` waits for its detectors before the target reads
+/// anyway, on a slow or unreachable forge.
+const ASKED_FOR: Duration = Duration::from_secs(5);
 
 /// What a detector polls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -197,11 +200,7 @@ pub fn moved(kind: Kind, before: &Value, after: &Value, repo: &str) -> Vec<Moved
 
 /// The move of `item`, from a list of `kind` in `repo`.
 fn describe(kind: Kind, item: &Value, repo: &str) -> Option<Moved> {
-    let own = |r: &Value| {
-        r["full_name"]
-            .as_str()
-            .is_some_and(|f| f.eq_ignore_ascii_case(repo))
-    };
+    let own = |r: &Value| is_repo(r, repo);
     let text = |v: &Value| v.as_str().map(str::to_owned);
     Some(match kind {
         Kind::Runs => Moved::Run {
@@ -426,7 +425,7 @@ impl Watcher {
     }
 
     /// Has the detectors the target depends on poll now, opening their fast
-    /// window, and returns once they did, or could not.
+    /// window, and returns once they did, could not, or [`ASKED_FOR`] passed.
     pub async fn poll_now(&self) {
         let answers: Vec<oneshot::Receiver<()>> = {
             let state = self.repo.state.lock().unwrap();
@@ -444,9 +443,12 @@ impl Watcher {
                 })
                 .collect()
         };
-        for answered in answers {
-            let _ = answered.await;
-        }
+        let all = async {
+            for answered in answers {
+                let _ = answered.await;
+            }
+        };
+        let _ = tokio::time::timeout(ASKED_FOR, all).await;
     }
 }
 
@@ -476,8 +478,10 @@ impl Detected {
     ) -> bool {
         let mut refreshed = false;
         loop {
+            // A pending `refresh` wins over a wake or the deadline, for its
+            // detectors to poll before the reading.
             tokio::select! {
-                () = tokio::time::sleep_until(deadline) => break,
+                biased;
                 refresh = refreshes.recv() => {
                     if refresh.is_none() {
                         return false;
@@ -493,6 +497,7 @@ impl Detected {
                         break;
                     }
                 }
+                () = tokio::time::sleep_until(deadline) => break,
             }
         }
         if refreshed {
@@ -536,7 +541,7 @@ impl Detector {
 
     /// Polls, wakes what moved, waits for its period or to be asked, and
     /// again. Those who asked are answered once the poll that follows is
-    /// done; during a rate limit, at once, without a poll.
+    /// done; while it cannot poll (a rate limit, no token), at once.
     async fn run(mut self, mut asked: UnboundedReceiver<oneshot::Sender<()>>) {
         let mut waiting: Vec<oneshot::Sender<()>> = Vec::new();
         loop {
@@ -578,11 +583,15 @@ impl Detector {
         }
     }
 
-    /// One poll, and how long a rate limit asks to wait. Without a token,
-    /// nothing is polled.
+    /// One poll, and how long to wait when it cannot poll: what a rate
+    /// limit asks, or the normal pace without a token, which asking its
+    /// source again sooner (`gh auth token`) would not bring.
     async fn poll(&mut self) -> Option<Duration> {
         let a = &self.access;
-        let token = owner_token(&a.tokens, &a.accounts, &a.credentials, &self.owner).await?;
+        let Some(token) = owner_token(&a.tokens, &a.accounts, &a.credentials, &self.owner).await
+        else {
+            return Some(RHYTHM.normal);
+        };
         let url = format!(
             "{}/repos/{}/{}/{}",
             a.api,
@@ -930,7 +939,7 @@ mod tests {
     }
 
     /// A rate limit is waited out and logged once; a refused token is
-    /// forgotten.
+    /// forgotten, and without one the detector waits for the normal pace.
     #[tokio::test]
     async fn a_failing_detector_waits_out_a_rate_limit() {
         let server = Server::start(|request| {
@@ -948,5 +957,8 @@ mod tests {
         let mut pulls = Detector::new(&repo, Kind::Pulls);
         assert_eq!(pulls.poll().await, None);
         assert!(repo.access.tokens.lock().unwrap().by_owner.is_empty());
+        if std::env::var(super::super::TOKEN_VAR).is_err() {
+            assert_eq!(pulls.poll().await, Some(RHYTHM.normal));
+        }
     }
 }

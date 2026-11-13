@@ -153,16 +153,14 @@ impl Provider for GitHub {
 
     fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
         let (owner, name) = owner_and_name(repo);
+        let (branch, pr) = match &head {
+            Head::Branch(branch) => (Some(branch.clone()), None),
+            Head::Pr(number) => (None, Some(*number)),
+        };
         let interest = Interest {
             kinds: detect::BRANCH,
-            branch: match &head {
-                Head::Branch(branch) => Some(branch.clone()),
-                Head::Pr(_) => None,
-            },
-            pr: match head {
-                Head::Branch(_) => None,
-                Head::Pr(number) => Some(number),
-            },
+            branch,
+            pr,
             ..Interest::default()
         };
         let detected = self.detect(&owner, &name, interest);

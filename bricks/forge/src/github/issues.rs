@@ -44,8 +44,9 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Reads, sends what it read, waits for the [`SAFETY`] pace, for the
-    /// issues detector to say they moved, or for a `refresh`, and again,
+    /// Reads, sends what it read, waits for the [`SAFETY`] pace (the normal
+    /// one after a failure), for the issues detector to say they moved, or
+    /// for a `refresh`, and again,
     /// until the core is gone. A rate limit is waited out whatever comes.
     pub async fn follow(
         self,
@@ -55,10 +56,16 @@ impl Tracker {
     ) {
         loop {
             let (outcome, wait) = self.read_once().await;
+            // A failure is retried at the normal pace: no detector sees it end.
+            let pace = if outcome.is_ok() {
+                SAFETY
+            } else {
+                RHYTHM.normal
+            };
             if !updates.send(outcome) {
                 return;
             }
-            let delay = wait.map_or(SAFETY, |w| w.max(RHYTHM.normal));
+            let delay = wait.map_or(pace, |w| w.max(RHYTHM.normal));
             let deadline = Instant::now() + delay;
             if !detected
                 .wait(deadline, &mut refreshes, wait.is_some())
