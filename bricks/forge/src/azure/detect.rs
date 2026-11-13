@@ -29,8 +29,8 @@
 //! on poll at once and opens their fast window: they poll at the provider's
 //! window pace for [`WINDOW_FOR`].
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -42,7 +42,9 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
-use super::{BUDGET, Context, HEADERS, Names, RHYTHM, VERSION, decode, limited, token};
+use super::{
+    BUDGET, Context, HEADERS, Names, RHYTHM, VERSION, decode, header_number, limited, token,
+};
 use crate::tools::http::{self, encode};
 use crate::tools::pace::WINDOW_FOR;
 use crate::tools::throttle::{SLOWEST, Throttle};
@@ -233,7 +235,7 @@ fn compare<'a, K: Eq + Hash, S: PartialEq>(
         .iter()
         .filter(|item| key(item).is_some_and(|k| known.get(&k) != Some(&signature(item))))
         .collect();
-    let now: Vec<K> = after.iter().filter_map(&key).collect();
+    let now: HashSet<K> = after.iter().filter_map(&key).collect();
     moved.extend(
         before
             .iter()
@@ -366,12 +368,7 @@ fn now() -> String {
 /// Whether an answer says the budget left is under [`LOW_BUDGET`] of it:
 /// Azure DevOps sends `X-RateLimit-Remaining` only as it runs out.
 fn budget_low(headers: &HeaderMap) -> bool {
-    let number = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<f64>().ok())
-    };
+    let number = |name: &str| header_number(headers, name);
     number("x-ratelimit-remaining").is_some_and(|remaining| {
         remaining < number("x-ratelimit-limit").unwrap_or(BUDGET) * LOW_BUDGET
     })
@@ -880,8 +877,9 @@ impl Detector {
 
     /// The work items of the project whose revisions since the last poll
     /// changed what the contract shows. The feed's watermark is the
-    /// server's; the first poll starts from now. A feed refused (`404`, or
-    /// `403` while WIQL answers) gives way to WIQL for good.
+    /// server's; the first poll starts from now. A poll that fails keeps
+    /// nothing of its batches: the next reads them again. A feed refused
+    /// (`404`, or `403` while WIQL answers) gives way to WIQL for good.
     // https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/reporting-work-item-revisions/read-reporting-revisions-get?view=azure-devops-rest-7.1
     async fn poll_work_items(&mut self, token: &str) -> Result<Option<Vec<Moved>>, http::Failure> {
         if self.revisions.wiql {
@@ -889,12 +887,16 @@ impl Detector {
         }
         let api = self.names.project_api();
         let first = !self.revisions.started;
+        let mut watermark = self.revisions.watermark.clone();
+        let mut since = self.revisions.since.clone();
+        // The last revision of each work item this poll saw change.
+        let mut seen: HashMap<u64, [Value; 4]> = HashMap::new();
         let mut moved = Vec::new();
         for page in 0..PAGES {
-            let start = match &self.revisions.watermark {
+            let start = match &watermark {
                 Some(watermark) => format!("continuationToken={}", encode(watermark)),
                 None => {
-                    let since = self.revisions.since.clone().unwrap_or_else(now);
+                    let since = since.clone().unwrap_or_else(now);
                     format!("startDateTime={}", encode(&since))
                 }
             };
@@ -910,7 +912,6 @@ impl Detector {
                 }
                 Err(failure) => return Err(failure),
             };
-            self.revisions.started = true;
             let values = batch["values"].as_array().map_or(&[][..], Vec::as_slice);
             for revision in values {
                 let fields = &revision["fields"];
@@ -921,22 +922,29 @@ impl Detector {
                     continue;
                 };
                 let signature = revision_signature(fields);
-                let known = &mut self.revisions.known;
-                if known.get(&id) != Some(&signature) {
-                    if known.len() >= KNOWN_MAX {
-                        known.clear();
-                    }
-                    known.insert(id, signature);
+                let last = seen.get(&id).or_else(|| self.revisions.known.get(&id));
+                if last != Some(&signature) {
+                    seen.insert(id, signature);
                     moved.push(Moved::WorkItem(id));
                 }
             }
             match watermark_of(&batch) {
-                Some(watermark) => self.revisions.watermark = Some(watermark),
-                None => self.revisions.since = Some(started_at),
+                Some(next) => watermark = Some(next),
+                None => since = Some(started_at),
             }
             if batch["isLastBatch"].as_bool() != Some(false) {
                 break;
             }
+        }
+        self.revisions.started = true;
+        self.revisions.watermark = watermark;
+        self.revisions.since = since;
+        let known = &mut self.revisions.known;
+        for (id, signature) in seen {
+            if known.len() >= KNOWN_MAX && !known.contains_key(&id) {
+                known.clear();
+            }
+            known.insert(id, signature);
         }
         Ok((!first).then_some(moved))
     }
@@ -1355,6 +1363,37 @@ mod tests {
         assert!(requests.iter().all(|r| {
             r.starts_with("get /o/p/_apis/wit/reporting/workitemrevisions?") && r.contains(fields)
         }));
+    }
+
+    /// A poll whose later batch fails keeps nothing of its earlier ones:
+    /// the next poll reads them again and wakes what they moved.
+    #[tokio::test]
+    async fn a_failed_batch_leaves_the_watermark_where_it_was() {
+        let failed_once = Arc::new(Mutex::new(false));
+        let server = Server::start(move |request| {
+            let body = if request.contains("startdatetime=") {
+                json!({ "values": [], "continuationToken": "w0", "isLastBatch": true })
+            } else if request.contains("continuationtoken=w0&") {
+                json!({ "values": [revision(3, "Active")], "continuationToken": "w1",
+                    "isLastBatch": false })
+            } else if !std::mem::replace(&mut *failed_once.lock().unwrap(), true) {
+                return (500, vec![], String::new());
+            } else {
+                json!({ "values": [], "continuationToken": "w2", "isLastBatch": true })
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let (project, mut wakes) = project(&server, interests()).await;
+        let mut detector = Detector::new(&project, Kind::WorkItems, "");
+        detector.poll().await;
+        detector.poll().await;
+        assert!(detector.failing);
+        assert!(woken(&mut wakes).is_empty(), "the poll failed");
+        assert_eq!(detector.revisions.watermark.as_deref(), Some("w0"));
+        detector.poll().await;
+        assert_eq!(woken(&mut wakes), [3, 4]);
+        assert_eq!(detector.revisions.watermark.as_deref(), Some("w2"));
     }
 
     /// A feed that is not there gives way to WIQL on the changed date, from

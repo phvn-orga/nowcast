@@ -471,12 +471,7 @@ fn limited(headers: &HeaderMap) -> Result<(), http::Failure> {
 /// left (`X-RateLimit-Remaining` of `X-RateLimit-Limit`), until
 /// `X-RateLimit-Reset`, else the normal pace. `None` when it does not ask.
 fn slow_down(headers: &HeaderMap, now: u64) -> Option<Duration> {
-    let number = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<f64>().ok())
-    };
+    let number = |name: &str| header_number(headers, name);
     if let Some(secs) = number(RETRY_AFTER.as_str()) {
         return Some(Duration::from_secs_f64(secs.max(0.0)));
     }
@@ -490,6 +485,14 @@ fn slow_down(headers: &HeaderMap, now: u64) -> Option<Duration> {
             .filter(|wait| !wait.is_zero())
             .unwrap_or(RHYTHM.normal),
     )
+}
+
+/// The number header `name` of an answer holds, if any.
+fn header_number(headers: &HeaderMap, name: &str) -> Option<f64> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<f64>().ok())
 }
 
 /// What `failure`, in a reading of `at`, says in `source.status`, and how
