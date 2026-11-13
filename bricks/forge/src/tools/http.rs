@@ -1,4 +1,5 @@
-//! JSON over HTTP. GET requests are conditional: each answer's `ETag` is
+//! JSON over HTTP, answers asked for compressed in gzip (GitHub's weigh 150
+//! to 600 KB, about ten times less in gzip). GET requests are conditional: each answer's `ETag` is
 //! sent back with the next request for the same URL (`If-None-Match`), and a
 //! `304` gives back the body kept from the last `200`. GitHub does not count
 //! a `304` against its rate limit. The cache is shared by every branch
@@ -292,6 +293,27 @@ mod tests {
             http.post(&server.url("/limited"), "t", &[], &body).await,
             Err(Failure::Limited(None))
         );
+    }
+
+    /// `{"n":1}`, compressed by `gzip -n`.
+    const GZIPPED: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 171, 86, 202, 83, 178, 50, 172, 5, 0, 126, 59, 75, 212, 7,
+        0, 0, 0,
+    ];
+
+    /// Answers are asked for in gzip, and a gzip body is decoded.
+    #[tokio::test]
+    async fn answers_are_asked_for_compressed() {
+        let server = Server::start_raw(|request| {
+            if request.contains("accept-encoding: gzip") {
+                (200, vec![("Content-Encoding", "gzip")], GZIPPED.to_vec())
+            } else {
+                (200, vec![], b"{\"n\":0}".to_vec())
+            }
+        })
+        .await;
+        let http = Http::new().unwrap();
+        assert_eq!(http.get(&server.url("/a"), "t", &[]).await.unwrap()["n"], 1);
     }
 
     #[tokio::test]
