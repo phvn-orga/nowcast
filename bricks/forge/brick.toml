@@ -47,3 +47,8 @@ schema = "schemas/issues-v1.json"
 
 [types."forge.issue/v1"]
 schema = "schemas/issue-v1.json"
+
+# A hint that an action changed a repository: what the brick follows there
+# is read now, and published when it changed.
+[refresh]
+scope = "schemas/scope.json"

@@ -58,6 +58,10 @@ impl BrickSubject for Forge {
             br#"{"remote":"https://github.com/o/r.git","branch":"main"}"#.to_vec(),
         )
     }
+
+    fn scope() -> Option<Vec<u8>> {
+        Some(br#"{"remote":"git@github.com:o/r.git","types":["pr"]}"#.to_vec())
+    }
 }
 
 mod forge {

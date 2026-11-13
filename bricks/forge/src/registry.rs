@@ -18,11 +18,17 @@
 //! is; a provider shares their requests where it can (GitHub's conditional
 //! requests). A flow is published when its detail changed, and after a
 //! `refresh` in any case.
+//!
+//! A scoped refresh (`refresh-scope`) is a hint that an action changed a
+//! repository: the targets it covers are read now, through their
+//! [`Watch`], which also opens their fast window, and only the flows whose
+//! detail changed are published.
 
 use std::collections::HashMap;
 
 use jiff::Timestamp;
 use nowcast_types::{BrickMessage, FlowId, RequestId};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
@@ -179,6 +185,20 @@ impl Target {
         }
     }
 
+    /// The number of the PR the target is about, when known: a PR's own,
+    /// or the open PR the last reading of a branch found.
+    fn pr_number(&self) -> Option<u64> {
+        match self.subject {
+            Subject::Pr(number) => Some(number),
+            Subject::Branch(_) => self
+                .branch()
+                .and_then(|r| r.pr.as_ref())
+                .filter(|p| p.is_open())
+                .map(|p| p.number),
+            _ => None,
+        }
+    }
+
     /// The branch's name, for a branch's target; for a PR's, its head
     /// branch, `None` until a reading names it.
     fn branch_name(&self) -> Option<&str> {
@@ -186,6 +206,45 @@ impl Target {
             Subject::Branch(branch) => Some(branch),
             Subject::Pr(_) => self.branch().and_then(|r| r.branch.as_deref()),
             _ => None,
+        }
+    }
+}
+
+/// A scoped refresh, as `schemas/scope.json` describes it.
+#[derive(Deserialize)]
+struct Scope {
+    remote: String,
+    /// `pr`, `pipelines`, `issues`; every kind when absent.
+    types: Option<Vec<String>>,
+    /// The PR or issue an action touched.
+    number: Option<u64>,
+}
+
+impl Scope {
+    fn names(&self, kind: &str) -> bool {
+        self.types
+            .as_ref()
+            .is_none_or(|types| types.iter().any(|t| t == kind))
+    }
+
+    /// Whether the scope covers `target`, of key `key`, in `repo`, the
+    /// scope's repository. `pr` and `pipelines` cover the repository's
+    /// branches and PRs, but those whose PR is known to be another than
+    /// `number`; `issues` covers the tracker's open issues, and its issues
+    /// but those whose number is another than `number`. A branch whose
+    /// open PR is unknown stays covered: the action may have opened it.
+    fn covers(&self, repo: &Repo, (scope, subject): &TargetKey, target: &Target) -> bool {
+        let other = |known: Option<u64>| self.number.zip(known).is_some_and(|(n, k)| n != k);
+        match subject {
+            Subject::Branch(_) | Subject::Pr(_) => {
+                *scope == repo.id
+                    && (self.names("pr") || self.names("pipelines"))
+                    && !other(target.pr_number())
+            }
+            Subject::Issues => *scope == repo.tracker && self.names("issues"),
+            Subject::Issue(number) => {
+                *scope == repo.tracker && self.names("issues") && !other(Some(*number))
+            }
         }
     }
 }
@@ -345,6 +404,28 @@ impl Core {
         flow.force = true;
         if let Some(target) = self.targets.get(&flow.target) {
             target.watch.refresh();
+        }
+    }
+
+    /// Answers a `refresh-scope`: asks for a reading now of each target the
+    /// scope covers, its remote recognised as a subscription's. Nothing is
+    /// forced: a scope is a hint, and only what changed is published. A
+    /// scope no provider recognises, or that covers nothing, does nothing.
+    pub fn refresh_scope(&mut self, scope: &[u8]) {
+        let Ok(scope) = serde_json::from_slice::<Scope>(scope) else {
+            return;
+        };
+        let Some(repo) = self
+            .providers
+            .iter()
+            .find_map(|p| p.recognise(&scope.remote))
+        else {
+            return;
+        };
+        for (key, target) in &self.targets {
+            if scope.covers(&repo, key, target) {
+                target.watch.refresh();
+            }
         }
     }
 
@@ -516,18 +597,30 @@ mod tests {
     #[derive(Default, Clone)]
     struct Fake {
         followed: Arc<Mutex<Vec<(String, String)>>>,
-        refreshes: Arc<Mutex<usize>>,
+        /// Each `refresh`, as `<scope> <what>` of the target it reached.
+        refreshes: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
         fn watch(&self, scope: &str, what: String) -> Watch {
+            let label = format!("{scope} {what}");
             self.followed.lock().unwrap().push((scope.to_owned(), what));
             let refreshes = self.refreshes.clone();
             Watch::spawn(move |mut rx: UnboundedReceiver<()>| async move {
                 while rx.recv().await.is_some() {
-                    *refreshes.lock().unwrap() += 1;
+                    refreshes.lock().unwrap().push(label.clone());
                 }
             })
+        }
+
+        /// The targets refreshed since the last call, sorted.
+        async fn refreshed(&self) -> Vec<String> {
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            let mut refreshed = std::mem::take(&mut *self.refreshes.lock().unwrap());
+            refreshed.sort();
+            refreshed
         }
     }
 
@@ -733,7 +826,7 @@ mod tests {
         let flow = FlowId::new("pr/forge/o/r#feat").unwrap();
         core.refresh(&flow);
         tokio::task::yield_now().await;
-        assert_eq!(*fake.refreshes.lock().unwrap(), 1);
+        assert_eq!(fake.refreshes.lock().unwrap().len(), 1);
         let out = core.update(
             1,
             reading("a", State::Pass),
@@ -822,6 +915,102 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
+    }
+
+    /// A scope refreshes what it covers in its repository, its remote
+    /// spelt any way: the kinds it names, and with a number, the PR or
+    /// issue of that number and the branches whose open PR is unknown.
+    #[tokio::test]
+    async fn a_scope_refreshes_the_targets_it_covers() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        let main = json!({ "remote": "https://forge/o/r", "branch": "main" });
+        core.subscribe(RequestId(2), "pipelines", main.to_string().as_bytes());
+        core.subscribe(RequestId(3), "pr", &pr_params("https://forge/o/r", 9));
+        core.subscribe(RequestId(4), "pr", &params("https://forge/o/x"));
+        core.subscribe(RequestId(5), "issues", &issues_params("https://forge/o/r"));
+        core.subscribe(
+            RequestId(6),
+            "issue",
+            &issue_params("https://forge/o/r", 52),
+        );
+        core.subscribe(
+            RequestId(7),
+            "issue",
+            &issue_params("https://forge/o/r", 53),
+        );
+        // `feat` of o/r has the open PR 7.
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        let scope = |scope: Value| scope.to_string().into_bytes();
+
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/O/R", "types": ["pr"], "number": 7 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o/r feat", "forge/o/r main"]);
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pipelines"], "number": 9 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o/r !9", "forge/o/r main"]);
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pipelines"] }),
+        ));
+        assert_eq!(
+            fake.refreshed().await,
+            ["forge/o/r !9", "forge/o/r feat", "forge/o/r main"]
+        );
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/x", "types": ["issues"], "number": 52 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o #52", "forge/o issues"]);
+        core.refresh_scope(&scope(json!({ "remote": "https://forge/o/x" })));
+        assert_eq!(
+            fake.refreshed().await,
+            [
+                "forge/o #52",
+                "forge/o #53",
+                "forge/o issues",
+                "forge/o/x feat"
+            ]
+        );
+        core.refresh_scope(&scope(json!({ "remote": "https://elsewhere/o/r" })));
+        core.refresh_scope(&scope(json!({ "remote": "https://forge/a/b" })));
+        core.refresh_scope(b"not json");
+        assert!(fake.refreshed().await.is_empty());
+    }
+
+    /// Unlike a flow's `refresh`, a scope forces no publication: a reading
+    /// that changed nothing publishes nothing.
+    #[tokio::test]
+    async fn a_scope_publishes_only_what_changed() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        core.refresh_scope(br#"{"remote":"https://forge/o/r","types":["pr"]}"#);
+        assert_eq!(fake.refreshed().await, ["forge/o/r feat"]);
+        let same = core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        assert!(same.is_empty(), "unchanged");
+        let moved = core.update(
+            1,
+            reading("b", State::Running),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        assert_eq!(published(&moved).len(), 1);
     }
 
     #[tokio::test]
@@ -1053,7 +1242,7 @@ mod tests {
         );
         core.refresh(&FlowId::new("issues/forge/o").unwrap());
         tokio::task::yield_now().await;
-        assert_eq!(*fake.refreshes.lock().unwrap(), 1);
+        assert_eq!(fake.refreshes.lock().unwrap().len(), 1);
         let out = core.update(1, read(), Timestamp::now(), Instant::now());
         assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
     }

@@ -78,6 +78,7 @@ pub const FILES: &[(&str, &str)] = &[
         "schemas/issue-v1.json",
         include_str!("../schemas/issue-v1.json"),
     ),
+    ("schemas/scope.json", include_str!("../schemas/scope.json")),
 ];
 
 /// Runs the brick on standard input and output until `shutdown` or the end
@@ -179,9 +180,11 @@ async fn serve() -> ExitCode {
                         log(format_args!("publication {req} refused: {code:?}"));
                         vec![]
                     }
-                    // A scoped refresh is read once the brick declares its schema.
-                    ServiceMessage::RefreshScope { .. }
-                    | ServiceMessage::Input { .. }
+                    ServiceMessage::RefreshScope { scope } => {
+                        core.refresh_scope(&scope);
+                        vec![]
+                    }
+                    ServiceMessage::Input { .. }
                     | ServiceMessage::Ack { .. } => vec![],
                 }
             }
