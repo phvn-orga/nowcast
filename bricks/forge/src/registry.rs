@@ -34,7 +34,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 use crate::model::{Ci, Issue, Issues};
-use crate::provider::{BranchReading, Failure, Outcome, Provider, Reading, Repo, Updates, Watch};
+use crate::provider::{
+    BranchReading, Failure, Head, Outcome, Provider, Reading, Repo, Updates, Watch,
+};
 
 pub const PR_TYPE: &str = "forge.pr/v1";
 pub const PIPELINES_TYPE: &str = "forge.pipelines/v1";
@@ -361,8 +363,10 @@ impl Core {
         let updates = Updates::new(id, self.updates.clone());
         let provider = &self.providers[index];
         let watch = match &key.1 {
-            Subject::Branch(branch) => provider.follow(&repo, branch, updates),
-            Subject::Pr(number) => provider.follow_pr(&repo, *number, updates),
+            Subject::Branch(branch) => {
+                provider.follow(&repo, Head::Branch(branch.clone()), updates)
+            }
+            Subject::Pr(number) => provider.follow(&repo, Head::Pr(*number), updates),
             Subject::Issues => provider.follow_issues(&repo, updates),
             Subject::Issue(number) => provider.follow_issue(&repo, *number, updates),
         };
@@ -642,12 +646,12 @@ mod tests {
             })
         }
 
-        fn follow(&self, repo: &Repo, branch: &str, _updates: Updates) -> Watch {
-            self.watch(&repo.id, branch.to_owned())
-        }
-
-        fn follow_pr(&self, repo: &Repo, number: u64, _updates: Updates) -> Watch {
-            self.watch(&repo.id, format!("!{number}"))
+        fn follow(&self, repo: &Repo, head: Head, _updates: Updates) -> Watch {
+            let what = match head {
+                Head::Branch(branch) => branch,
+                Head::Pr(number) => format!("!{number}"),
+            };
+            self.watch(&repo.id, what)
         }
 
         fn follow_issues(&self, repo: &Repo, _updates: Updates) -> Watch {

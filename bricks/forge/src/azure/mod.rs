@@ -1,9 +1,9 @@
 //! The Azure DevOps provider: recognises Azure DevOps remotes, the old
 //! `visualstudio.com` addresses included, and follows a branch, or a PR by
-//! its number, through the REST API ([`read`], [`timeline`]) at the pace of [`RHYTHM`]. Work items
-//! belong to the project, not to the repository: the tracker is the project,
-//! whose open work items, and one work item, are followed at the normal pace
-//! ([`issues`]). Azure DevOps gives no `ETag` and counts every request
+//! its number, through the REST API ([`read`], [`timeline`]) at the pace of
+//! [`RHYTHM`]. Work items belong to the project, not to the repository: the
+//! tracker is the project, whose open work items, and one work item, are
+//! followed at the normal pace ([`issues`]). Azure DevOps gives no `ETag` and counts every request
 //! against a budget: the core publishes only what changed, and a reading
 //! whose answer asks to slow down is a rate limit ([`slow_down`]). The token
 //! comes from the source the user chose, `az` or a personal access token
@@ -119,17 +119,6 @@ impl Azure {
         };
         Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
     }
-
-    /// Follows `head` of `repo`: a branch, or a PR by its number.
-    fn follow_head(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
-        let branch = Branch {
-            context: self.context.clone(),
-            names: Names::of(repo),
-            head,
-            memory: read::Memory::default(),
-        };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
-    }
 }
 
 impl Provider for Azure {
@@ -142,12 +131,14 @@ impl Provider for Azure {
         })
     }
 
-    fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
-        self.follow_head(repo, Head::Branch(branch.to_owned()), updates)
-    }
-
-    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch {
-        self.follow_head(repo, Head::Pr(number), updates)
+    fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
+        let branch = Branch {
+            context: self.context.clone(),
+            names: Names::of(repo),
+            head,
+            memory: read::Memory::default(),
+        };
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -926,7 +917,7 @@ mod tests {
         let repo = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
         assert_eq!(repo.id, "dev.azure.com/o/p/r");
         let (tx, mut rx) = unbounded_channel();
-        let _watch = azure.follow(&repo, "feat", Updates::new(3, tx));
+        let _watch = azure.follow(&repo, Head::Branch("feat".into()), Updates::new(3, tx));
         let (target, outcome) = rx.recv().await.unwrap();
         assert_eq!(target, 3);
         let Ok(Reading::Branch(reading)) = outcome else {

@@ -1,9 +1,9 @@
 //! What a forge implements to be read by the brick. The core knows no forge:
 //! it asks each provider whether it recognises a remote, and has the one
 //! that does follow a branch, a PR by its number, a tracker's open issues,
-//! or one issue. How and
-//! when the provider reads (protocol, pace, quotas, cache) is its own
-//! business; what it hands back is the neutral model of [`crate::model`].
+//! or one issue. How and when the provider reads (protocol, pace, quotas,
+//! cache) is its own business; what it hands back is the neutral model of
+//! [`crate::model`].
 
 use std::future::Future;
 
@@ -155,18 +155,13 @@ pub trait Provider: Send + Sync {
     /// The repository `remote` designates, when this forge holds it.
     fn recognise(&self, remote: &str) -> Option<Repo>;
 
-    /// Starts following `branch` of `repo`, a repository this provider
+    /// Starts following `head` of `repo`, a repository this provider
     /// recognised: every reading, a [`Reading::Branch`], goes to `updates`,
-    /// until the returned [`Watch`] is dropped.
-    fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch;
-
-    /// Starts following PR `number` of `repo`, a repository this provider
-    /// recognised, whatever its state: every reading, a
-    /// [`Reading::Branch`] naming the PR's head branch, with the CI of its
-    /// head read as for a branch, goes to `updates`, until the returned
-    /// [`Watch`] is dropped. A number that is no PR is
+    /// until the returned [`Watch`] is dropped. A PR is followed whatever
+    /// its state, each reading naming its head branch, with the CI of its
+    /// head read as for a branch; a number that is no PR is
     /// [`Failure::NotFound`].
-    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch;
+    fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch;
 
     /// Starts following the open issues of the tracker of `repo`: every
     /// reading, a [`Reading::Issues`], goes to `updates`, until the returned

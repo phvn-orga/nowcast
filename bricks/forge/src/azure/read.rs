@@ -877,10 +877,10 @@ mod tests {
     }
 
     /// A forge where `feat` has the active PR 7, also read by its number,
-    /// whose blocking build
-    /// policy designates build 40: two stages, `build` with the jobs `a`
-    /// and `b`, `deploy` waiting for an approval. Build 41 of another
-    /// definition tested the merge commit; build 39, an older merge commit.
+    /// whose blocking build policy designates build 40: two stages, `build`
+    /// with the jobs `a` and `b`, `deploy` waiting for an approval. Build 41
+    /// of another definition tested the merge commit; build 39, an older
+    /// merge commit.
     /// Build 42 of the branch tested its head; build 43, an older head. A
     /// blocking build policy and a blocking status policy do not apply.
     async fn forge() -> Server {

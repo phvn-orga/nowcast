@@ -1,8 +1,8 @@
 //! JSON over HTTP, answers asked for compressed in gzip (GitHub's weigh 150
-//! to 600 KB, about ten times less in gzip). GET requests are conditional: each answer's `ETag` is
-//! sent back with the next request for the same URL (`If-None-Match`), and a
-//! `304` gives back the body kept from the last `200`. GitHub does not count
-//! a `304` against its rate limit. The cache is shared by every branch
+//! to 600 KB, about ten times less in gzip). GET requests are conditional:
+//! each answer's `ETag` is sent back with the next request for the same URL
+//! (`If-None-Match`), and a `304` gives back the body kept from the last
+//! `200`. GitHub does not count a `304` against its rate limit. The cache is shared by every branch
 //! followed, so two readings of the same URL pay for it once. POST requests,
 //! for an API that only answers them (GraphQL), are not cached. A forge
 //! without `ETag` is read in full every time; the answer's headers say what

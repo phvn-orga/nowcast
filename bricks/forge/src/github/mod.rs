@@ -1,10 +1,10 @@
 //! The GitHub provider: recognises GitHub remotes and follows a branch, or
-//! a PR by its number, through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
-//! checks the base of its open PR requires ([`required`]) and the PR's
-//! entry in the base's merge queue ([`queue`]). A reading
-//! that changes nothing costs no rate limit (`304`), hence a fast pace while
-//! a CI is expected or runs. A repository's open issues, and one issue, are
-//! followed at the normal pace ([`issues`]). The token comes from the
+//! a PR by its number, through the REST API ([`read`]), at the pace of
+//! [`RHYTHM`], with the checks the base of its open PR requires
+//! ([`required`]) and the PR's entry in the base's merge queue ([`queue`]).
+//! A reading that changes nothing costs no rate limit (`304`), hence a fast
+//! pace while a CI is expected or runs. A repository's open issues, and one
+//! issue, are followed at the normal pace ([`issues`]). The token comes from the
 //! source the user chose, `gh` or a token of theirs ([`token`]);
 //! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
 //! for tests.
@@ -97,25 +97,6 @@ impl GitHub {
         };
         Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
     }
-
-    /// Follows `head` of `repo`: a branch, or a PR by its number.
-    fn follow_head(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
-        let (owner, name) = owner_and_name(repo);
-        let branch = Branch {
-            http: self.http.clone(),
-            api: self.api.clone(),
-            credentials: self.credentials.clone(),
-            tokens: self.tokens.clone(),
-            accounts: self.accounts.clone(),
-            required: self.required.clone(),
-            queues: self.queues.clone(),
-            memory: Memory::default(),
-            owner,
-            name,
-            head,
-        };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
-    }
 }
 
 /// The owner as the remote writes it, `gh` matching logins
@@ -139,12 +120,22 @@ impl Provider for GitHub {
         })
     }
 
-    fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
-        self.follow_head(repo, Head::Branch(branch.to_owned()), updates)
-    }
-
-    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch {
-        self.follow_head(repo, Head::Pr(number), updates)
+    fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
+        let (owner, name) = owner_and_name(repo);
+        let branch = Branch {
+            http: self.http.clone(),
+            api: self.api.clone(),
+            credentials: self.credentials.clone(),
+            tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
+            required: self.required.clone(),
+            queues: self.queues.clone(),
+            memory: Memory::default(),
+            owner,
+            name,
+            head,
+        };
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -1215,7 +1206,7 @@ mod tests {
         let repo = github.recognise("git@github.com:o/r.git").unwrap();
         assert_eq!(repo.id, "github.com/o/r");
         let (tx, mut rx) = unbounded_channel();
-        let _watch = github.follow(&repo, "feat", Updates::new(3, tx));
+        let _watch = github.follow(&repo, Head::Branch("feat".into()), Updates::new(3, tx));
         let (target, outcome) = rx.recv().await.unwrap();
         assert_eq!(target, 3);
         let Ok(Reading::Branch(reading)) = outcome else {
