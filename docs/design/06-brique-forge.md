@@ -733,9 +733,9 @@ les détecteurs le voient, comme le reste du monde.
 
 | Étape | Ce qui change sur la forge | Qui le voit | Réaction |
 |---|---|---|---|
-| Un worktree, une nouvelle branche | rien | le mod central, si son agent a lancé la commande | aucune clé forge tant que la branche n'a pas d'amont |
+| Un worktree, une nouvelle branche | rien | le mod central, si son agent a lancé la commande | abonnement aux clés de la branche là où `git push` l'enverrait (`02-clients.md`) ; `head_sha` est `null` |
 | Des commits locaux | rien | personne | aucune ; un consommateur compare `head_sha` à son HEAD |
-| `git push` | la branche est créée ou avance, une CI démarre | le mod central | abonnement aux clés de la branche amont si elle vient d'en avoir une ; portée `pr`, `pipelines` ; CI attendue |
+| `git push` | la branche est créée ou avance, une CI démarre | le mod central | la clé ne change pas, `head_sha` se remplit ; portée `pr`, `pipelines` ; CI attendue |
 | `gh pr create` | une PR s'ouvre, sa CI démarre | le mod central, le numéro tiré de l'URL affichée | portée avec `number` : la brique résout la PR, le flux de la branche la montre |
 | D'autres pushs | la tête avance, la PR change | le mod central | comme `git push` |
 | La CI tourne | runs et jobs changent | la brique seule | « CI en cours » : sur GitHub, les check runs du commit, chaque job vu 8 à 15 s après |

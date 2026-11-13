@@ -209,12 +209,24 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   (un dépôt, des sortes, un numéro), par le mod central, sans parler la langue du
   service.
 - **Le mod central traduit chaque worktree de sa session en clés forge** : la branche
-  amont et son remote, ni le nom local ni le seul `origin`. Brique forge activée, il
-  s'abonne aux flux `pr` et `pipelines` de ces clés, s'abonne à nouveau quand la
-  branche change, et retire les abonnements d'un worktree sorti de la liste. Une
-  branche sans amont n'a pas de clé. Il voit un `git switch` lancé par son agent,
-  pas un lancé dans un terminal, jusqu'à ce que la brique git (#51) lui donne l'état
-  local.
+  où `git push` l'enverrait, et l'URL de ce remote, ni l'amont ni le seul `origin`.
+  Il la lit dans `@{push}` (`git rev-parse --abbrev-ref --symbolic-full-name @{push}`
+  donne `<remote>/<branche>`). Quand git ne le résout pas, la clé est le nom local sur
+  le remote de push : `branch.<nom>.pushRemote`, sinon `remote.pushDefault`, sinon le
+  remote de l'amont, sinon `origin`. Une branche pas encore poussée a donc sa clé, et
+  son flux montre `head_sha: null`. Brique forge activée, il s'abonne aux flux `pr` et
+  `pipelines` de ces clés, s'abonne à nouveau quand la branche change, et retire les
+  abonnements d'un worktree sorti de la liste. Il voit un `git switch` lancé par son
+  agent, pas un lancé dans un terminal, jusqu'à ce que la brique git (#51) lui donne
+  l'état local.
+
+  Vérifié le 2026-11-13 (git 2.56) : `git switch -c <branche> origin/main` donne
+  `origin/main` pour amont jusqu'au premier `git push -u`, d'où l'abandon de l'amont.
+  Avant ce push, `@{push}` échoue avec `push.default` à `simple` (le défaut, où `git
+  push` refuse aussi) comme à `current` (tant que `refs/remotes/origin/<branche>`
+  n'existe pas) : le repli donne `origin/<branche>`. Après, il donne
+  `origin/<branche>` dans les deux cas. À `upstream`, il donne `origin/main`, là où
+  `git push` enverrait vraiment.
 - **Le mod central relève les worktrees où écrit sa session**, d'après les appels
   d'outils, et les tient dans son état, brique claude-code activée ou non. Une
   session peut écrire dans un autre worktree que le sien : un consommateur qui ne
@@ -414,11 +426,6 @@ protocole.
 - **Vérifier en session interactive `/clear` et plusieurs observateurs sur la même
   clé.** Le rechargement à chaud et le rafraîchissement y ont été vérifiés (Claude Code
   2.1.319) ; `/clear` seulement en session sans interface (`claude -p`).
-- **L'amont d'une branche créée depuis une branche distante.** `git switch -c
-  <branche> origin/main` donne `origin/main` pour amont à la nouvelle branche
-  (git 2.56, réglages par défaut, vérifié le 2026-11-13), jusqu'à son premier `git
-  push -u`. Le mod central la traduirait en clés de `main`. Ignorer un amont qui ne
-  porte pas le nom de la branche n'est pas décidé.
 
 ## Hors périmètre pour l'instant
 

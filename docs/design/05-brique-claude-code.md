@@ -336,7 +336,7 @@ l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la derni
 | `path` | Racine du worktree |
 | `repo` | Répertoire git commun, le même pour tous les worktrees d'un dépôt |
 | `branch` | Branche courante, `null` en HEAD détaché |
-| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Les clés forge viennent de la branche amont et de son remote, pas de lui (`02-clients.md`) |
+| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Les clés forge viennent de la branche où `git push` l'enverrait et de son remote, pas de lui (`02-clients.md`) |
 | `written_at` | Dernière écriture relevée dans ce worktree |
 
 - **Triée par écriture**, la plus récente d'abord.
