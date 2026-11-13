@@ -57,6 +57,12 @@ test('git push, in any form, refreshes the PR and pipelines of its push remote',
   expect(actions('timeout 60 env -u X git push')).toEqual([{ types: PR, target: { dir: CWD } }])
   // A directory the mod cannot follow leaves the repository unknown.
   expect(actions('cd ~/x && git push')).toEqual([{ types: PR, target: null }])
+  // A subshell's `cd` ends with it.
+  expect(actions('(cd sub && git push) && git push && (git push)')).toEqual([
+    { types: PR, target: { dir: '/lab/repo/sub' } },
+    { types: PR, target: { dir: CWD } },
+    { types: PR, target: { dir: CWD } },
+  ])
   expect(commandActions('git push', undefined, '')).toEqual([{ types: PR, target: null }])
 })
 
@@ -79,6 +85,12 @@ test('read-only git and gh commands, and a dry run, refresh nothing', () => {
 test('gh pr takes its number and repository from the arguments, else from what gh printed', () => {
   expect(actions('gh pr merge 12 --squash -d')).toEqual([{ types: MERGE, target: { dir: CWD }, number: 12 }])
   expect(actions('gh pr merge -m 12')).toEqual([{ types: MERGE, target: { dir: CWD }, number: 12 }])
+  expect(actions('gh pr merge -r 12')).toEqual([{ types: MERGE, target: { dir: CWD }, number: 12 }])
+  expect(actions('gh pr review -a 12')).toEqual([{ types: PR, target: { dir: CWD }, number: 12 }])
+  // `gh` prints its messages on stderr.
+  expect(commandActions('gh issue close', CWD, '', '✓ Closed issue o/r#3 (title)')).toEqual([
+    { types: ['issues'], target: { remote: GH }, number: 3 },
+  ])
   expect(actions("gh pr close '#7' -R o/r -c done")).toEqual([{ types: MERGE, target: { remote: GH }, number: 7 }])
   expect(actions('gh -R github.com/o/r pr ready 3')).toEqual([{ types: PR, target: { remote: GH }, number: 3 }])
   expect(actions('gh pr comment https://github.com/x/y/pull/9 --body "a b"')).toEqual([
@@ -144,6 +156,13 @@ test('curl and http calls that write to a forge API are mapped like gh api', () 
     { types: PR, target: { remote: GH }, number: 2 },
   ])
   expect(actions('curl https://api.github.com/repos/o/r/pulls/2')).toEqual([])
+  // Short options run together.
+  expect(actions('curl -sX POST -sH "Authorization: x" https://api.github.com/repos/o/r/issues')).toEqual([
+    { types: ['issues'], target: { remote: GH } },
+  ])
+  expect(actions('curl -sXPATCH https://api.github.com/repos/o/r/issues/4')).toEqual([
+    { types: ['issues'], target: { remote: GH }, number: 4 },
+  ])
   expect(actions('curl -X POST https://example.com/repos/o/r/issues')).toEqual([])
   expect(
     actions(
@@ -168,6 +187,10 @@ test('curl and http calls that write to a forge API are mapped like gh api', () 
     { types: ['issues'], target: { remote: GH }, number: 1 },
   ])
   expect(actions('http https://api.github.com/repos/o/r/issues')).toEqual([])
+  expect(actions('http https://api.github.com/repos/o/r/issues state==open')).toEqual([])
+  expect(actions('http -a u:t POST https://api.github.com/repos/o/r/issues')).toEqual([
+    { types: ['issues'], target: { remote: GH } },
+  ])
 })
 
 test('az commands that write refresh by group, the names from their flags', () => {
@@ -191,6 +214,10 @@ test('az commands that write refresh by group, the names from their flags', () =
   ])
   expect(actions('az pipelines run --name ci --organization=https://org.visualstudio.com')).toEqual([
     { types: PR, target: { dir: CWD, azure: { org: 'org' } } },
+  ])
+  // The id a create prints is a PR's or a work item's only.
+  expect(actions('az repos policy create --config p.json', '{"id": 3}')).toEqual([
+    { types: PR, target: { dir: CWD, azure: {} } },
   ])
   expect(actions('az pipelines build queue --definition-id 4')).toEqual([
     { types: PR, target: { dir: CWD, azure: {} } },
@@ -280,6 +307,11 @@ test('MCP tools of GitHub and Azure DevOps servers that write are classified by 
     types: ['issues'],
     target: { dir: CWD, azure: {} },
     number: 9,
+  })
+  expect(mcp('mcp__ado__repo_create_pull_request', { project: 'proj' }, '{"pullRequestId": 15}')).toEqual({
+    types: PR,
+    target: { dir: CWD, azure: { project: 'proj' } },
+    number: 15,
   })
   expect(mcp('mcp__ado__pipelines_run_pipeline', { project: 'proj', pipelineId: 2 })).toEqual({
     types: PR,

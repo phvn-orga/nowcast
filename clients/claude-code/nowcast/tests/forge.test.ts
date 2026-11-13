@@ -15,8 +15,8 @@ function repository(args: readonly string[], cwd: string | undefined) {
   const answers: Record<string, string> = {
     'symbolic-ref --quiet --short HEAD': 'feature',
     'config --get branch.feature.pushRemote': 'fork',
-    'remote get-url fork': 'git@github.com:me/r.git',
-    'remote get-url origin': 'git@github.com:o/r.git',
+    'remote get-url --push fork': 'git@github.com:me/r.git',
+    'remote get-url --push origin': 'git@github.com:o/r.git',
   }
   const out = answers[args.join(' ')]
   return out === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: `${out}\n` }

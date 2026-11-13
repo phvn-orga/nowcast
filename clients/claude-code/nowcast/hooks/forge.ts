@@ -15,9 +15,11 @@ import {
   type ForgeAction,
   type ForgeType,
   type Target,
+  MAY_ACT,
   azureNames,
   azureRemote,
   commandActions,
+  isUrl,
   mcpAction,
   ordered,
 } from './actions'
@@ -32,7 +34,6 @@ const SCOPE_REFUSED = new Set(['invalid_request', 'scope_not_accepted', 'invalid
 /** The kinds a type of a scope covers. */
 const KINDS: Record<ForgeType, string[]> = { pr: ['pr'], pipelines: ['pipelines'], issues: ['issues', 'issue'] }
 
-const MAY_COMMAND = /\b(git|gh|az|curl|https?|xh)\b/
 const MAY_SERVER = /github|azure|devops|ado/i
 
 /** The session the brick is not enabled for; the session whose service refuses scopes. */
@@ -44,7 +45,7 @@ let queue: Promise<void> = Promise.resolve()
 export function registerForge(on: On): void {
   on('tool.call', async ($, e, next) => {
     // Only a command or a server that may speak to a forge.
-    const may = e.tool === 'Bash' ? MAY_COMMAND.test(e.command) : e.tool.startsWith('mcp__') && MAY_SERVER.test(e.tool)
+    const may = e.tool === 'Bash' ? MAY_ACT.test(e.command) : e.tool.startsWith('mcp__') && MAY_SERVER.test(e.tool)
     if (!may) return next(e)
     // Read before the command runs: a `cd` in it moves the session.
     const cwd = await $.session.cwd().catch(() => undefined)
@@ -53,9 +54,10 @@ export function registerForge(on: On): void {
     const value: unknown = result.result
     let actions: ForgeAction[]
     if (e.tool === 'Bash') {
-      // `az` prints JSON, read whole.
+      // `az` prints JSON on stdout, read whole; `gh` its messages on stderr.
       const stdout = isObject(value) && typeof value.stdout === 'string' ? value.stdout : (result.text ?? '')
-      actions = commandActions(e.command, cwd, stdout)
+      const stderr = isObject(value) && typeof value.stderr === 'string' ? value.stderr : ''
+      actions = commandActions(e.command, cwd, stdout, stderr)
     } else {
       const output = `${result.text ?? ''}\n${typeof value === 'string' ? value : JSON.stringify(value ?? null)}`
       const found = mcpAction(e.tool, e as unknown as Record<string, unknown>, cwd, output)
@@ -129,7 +131,7 @@ async function resolve($: $, target: Target, types: ForgeType[]): Promise<string
     return azure(target.azure, here === null ? null : azureNames(here), types)
   }
   if (target.name === undefined) return pushUrl($, target.dir)
-  return git($, target.dir, ['remote', 'get-url', target.name])
+  return git($, target.dir, ['remote', 'get-url', '--push', target.name])
 }
 
 /**
@@ -153,7 +155,7 @@ export function azure(given: AzureNames, here: Required<AzureNames> | null, type
 }
 
 /**
- * The URL of the remote `git push` sends `dir`'s branch to: its
+ * The push URL of the remote `git push` sends `dir`'s branch to: its
  * `pushRemote`, else `remote.pushDefault`, else its upstream's remote, else
  * `origin` (`02-clients.md` on the design branch).
  */
@@ -166,8 +168,8 @@ async function pushUrl($: $, dir: string): Promise<string | null> {
     (branch === null ? null : await config(`branch.${branch}.remote`)) ??
     'origin'
   // A remote may be given as its URL.
-  if (name.includes('://') || /^[^/]*@[^/:]+:/.test(name)) return name
-  return git($, dir, ['remote', 'get-url', name])
+  if (isUrl(name)) return name
+  return git($, dir, ['remote', 'get-url', '--push', name])
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

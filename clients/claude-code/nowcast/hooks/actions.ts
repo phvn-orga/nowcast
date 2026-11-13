@@ -38,8 +38,14 @@ export function ordered(types: Iterable<ForgeType>): ForgeType[] {
 // ---------------------------------------------------------------------------
 // Shell
 
-/** One simple command: its words, quotes removed; `depth` > 0 inside `$(...)`. */
-export type Simple = { words: string[]; depth: number }
+/** A command line that may name a program taking forge actions. */
+export const MAY_ACT = /\b(git|gh|az|curl|https?|xh)\b/
+
+/**
+ * One simple command: its words, quotes removed; `depth` > 0 inside `$(...)`;
+ * `group` the path of the `( ... )` subshells around it (`/1/2`), empty outside.
+ */
+export type Simple = { words: string[]; depth: number; group: string }
 
 /**
  * The simple commands of a shell command line: split on `&&`, `||`, `;`,
@@ -57,6 +63,9 @@ export function simpleCommands(line: string): Simple[] {
 class Parser {
   i = 0
   readonly out: Simple[] = []
+  /** The subshells open, innermost last, and the count of those opened so far. */
+  private groups: number[] = []
+  private opened = 0
   constructor(private readonly s: string) {}
 
   /** Reads commands up to `close` (consumed) or the end. */
@@ -77,7 +86,7 @@ class Parser {
     }
     const endCommand = () => {
       endWord()
-      if (words.length > 0) this.out.push({ words, depth })
+      if (words.length > 0) this.out.push({ words, depth, group: this.groups.map(id => `/${id}`).join('') })
       words = []
     }
     while (this.i < s.length) {
@@ -130,10 +139,17 @@ class Parser {
           next = 'drop'
         }
       } else if (';|&()'.includes(c)) {
-        if (c === '(') groups++
-        if (c === ')' && groups > 0) groups--
         this.i += after === c || (c === '|' && after === '&') ? 2 : 1
+        // The command before a parenthesis is outside the subshell it opens or closes.
         endCommand()
+        if (c === '(') {
+          groups++
+          this.groups.push(++this.opened)
+        }
+        if (c === ')' && groups > 0) {
+          groups--
+          this.groups.pop()
+        }
       } else {
         word = (word ?? '') + c
         this.i++
@@ -238,25 +254,35 @@ export function resolveDir(base: string | undefined, path: string | undefined): 
 
 /**
  * The forge actions of a successful shell command run in `cwd`, `output`
- * what it printed. A leading `cd` moves the commands after it; one the mod
- * cannot follow leaves their directory unknown.
+ * what it printed (`stderr` apart, which `gh` prints its messages on). A
+ * leading `cd` moves the commands after it, up to the end of its subshell;
+ * one the mod cannot follow leaves their directory unknown.
  */
-export function commandActions(command: string, cwd: string | undefined, output: string): ForgeAction[] {
-  if (!/\b(git|gh|az|curl|https?|xh)\b/.test(command)) return []
+export function commandActions(
+  command: string,
+  cwd: string | undefined,
+  output: string,
+  stderr = '',
+): ForgeAction[] {
+  if (!MAY_ACT.test(command)) return []
   const actions: ForgeAction[] = []
-  let dir = cwd
-  for (const { words, depth } of simpleCommands(command)) {
+  // The directory each subshell moved to; a subshell starts in the one around it.
+  const dirs = new Map<string, string | undefined>([['', cwd]])
+  const dirOf = (group: string): string | undefined =>
+    dirs.has(group) ? dirs.get(group) : dirOf(group.slice(0, group.lastIndexOf('/')))
+  for (const { words, depth, group } of simpleCommands(command)) {
     const args = argv(words)
     const program = basename(args[0] ?? '')
+    const dir = dirOf(group)
     if (program === 'cd' || program === 'pushd' || program === 'popd') {
-      if (depth === 0) dir = program === 'popd' ? undefined : resolveDir(dir, args[1])
+      if (depth === 0) dirs.set(group, program === 'popd' ? undefined : resolveDir(dir, args[1]))
       continue
     }
     const found =
       program === 'git'
         ? gitAction(args.slice(1), dir)
         : program === 'gh'
-          ? ghAction(args.slice(1), dir, output)
+          ? ghAction(args.slice(1), dir, stderr === '' ? output : `${output}\n${stderr}`)
           : program === 'az'
             ? azAction(args.slice(1), dir, output)
             : program === 'curl'
@@ -276,7 +302,7 @@ function inDir(dir: string | undefined, name?: string): Target {
 }
 
 /** Whether a push destination is a URL rather than a remote's name. */
-function isUrl(destination: string): boolean {
+export function isUrl(destination: string): boolean {
   return destination.includes('://') || /^[^/]*@[^/:]+:/.test(destination)
 }
 
@@ -439,6 +465,14 @@ const GH_VALUED = new Set([
   '--ref',
 ])
 
+/** The short options of `GH_VALUED` that a verb reads as switches, taking nothing. */
+const GH_SWITCHES = new Map([
+  // `--merge`, `--rebase`.
+  ['merge', ['-m', '-r']],
+  // `--approve`, `--request-changes`, `--comment`.
+  ['review', ['-a', '-r', '-c']],
+])
+
 /** `gh [-R repo] <group> <verb> [args]`. */
 function ghAction(args: string[], dir: string | undefined, output: string): ForgeAction | null {
   let repo: string | undefined
@@ -448,8 +482,8 @@ function ghAction(args: string[], dir: string | undefined, output: string): Forg
     if (arg === '-R' || arg === '--repo') repo = args[i + 1]
     else if (arg.startsWith('--repo=')) repo = arg.slice('--repo='.length)
     else if (arg.startsWith('-R') && arg.length > 2) repo = arg.slice(2)
-    // `-m` is `--merge` for `gh pr merge`, and takes nothing.
-    const valued = GH_VALUED.has(arg) && !(arg === '-m' && positional[1] === 'merge')
+    // A short option some verbs read as a switch: `gh pr merge -m` is `--merge`.
+    const valued = GH_VALUED.has(arg) && !GH_SWITCHES.get(positional[1] ?? '')?.includes(arg)
     if (valued) i++
     else if (!arg.startsWith('-')) positional.push(arg)
   }
@@ -649,9 +683,11 @@ function azAction(args: string[], dir: string | undefined, output: string): Forg
   if (project !== undefined) names.project = project
   const repo = group === 'repos' ? (options['--repository'] ?? options['-r']) : undefined
   if (repo !== undefined) names.repo = repo
+  // Only a PR or a work item has a number: the id of a policy or a pipeline is not one.
+  if (sub !== 'pr' && sub !== 'work-item') return azureTarget(types, names, dir)
   let number: number | undefined
   const id = options['--id']
-  if ((sub === 'pr' || sub === 'work-item') && id !== undefined && /^\d+$/.test(id)) number = Number(id)
+  if (id !== undefined && /^\d+$/.test(id)) number = Number(id)
   if (number === undefined && last === 'create') number = printedId(output, sub === 'pr' ? 'pullRequestId' : 'id')
   return azureTarget(types, names, dir, number)
 }
@@ -748,8 +784,34 @@ const CURL_VALUED = new Set([
   '--proxy-user',
 ])
 
+/**
+ * Short options run together split apart, a value stuck to its option
+ * included: `-sXPOST` is `-s -X POST`, `-sH x` is `-s -H x`.
+ */
+function curlArgs(args: string[]): string[] {
+  const out: string[] = []
+  for (const arg of args) {
+    if (!/^-[^-]./.test(arg)) {
+      out.push(arg)
+      continue
+    }
+    for (let at = 1; at < arg.length; at++) {
+      const option = `-${arg[at]}`
+      out.push(option)
+      const valued = CURL_VALUED.has(option) || CURL_DATA.test(option) || option === '-X' || option === '-T'
+      if (valued && at + 1 < arg.length) {
+        out.push(arg.slice(at + 1))
+        break
+      }
+      if (valued) break
+    }
+  }
+  return out
+}
+
 /** `curl` with a writing method to a forge's API. */
-function curlAction(args: string[], dir: string | undefined): ForgeAction | null {
+function curlAction(given: string[], dir: string | undefined): ForgeAction | null {
+  const args = curlArgs(given)
   let method: string | undefined
   let implied: string | undefined
   let url: string | undefined
@@ -757,7 +819,6 @@ function curlAction(args: string[], dir: string | undefined): ForgeAction | null
     const arg = args[i] as string
     if (arg === '-X' || arg === '--request') method = args[++i]
     else if (arg.startsWith('--request=')) method = arg.slice('--request='.length)
-    else if (/^-X[A-Za-z]+$/.test(arg)) method = arg.slice(2)
     else if (arg === '-T' || arg === '--upload-file') {
       implied = 'PUT'
       i++
@@ -774,14 +835,38 @@ function curlAction(args: string[], dir: string | undefined): ForgeAction | null
   return restAction(url, dir)
 }
 
-/** `http|https|xh [METHOD] URL [items]`: data items imply POST. */
+const HTTPIE_VALUED = new Set([
+  '-a',
+  '--auth',
+  '-A',
+  '--auth-type',
+  '--session',
+  '--session-read-only',
+  '-o',
+  '--output',
+  '-p',
+  '--print',
+  '--proxy',
+  '--timeout',
+  '--verify',
+  '--cert',
+  '--cert-key',
+  '--default-scheme',
+])
+
+/** `http|https|xh [METHOD] URL [items]`: data items imply POST, not query ones (`==`). */
 function httpieAction(args: string[], dir: string | undefined): ForgeAction | null {
-  const words = args.filter(arg => !arg.startsWith('-'))
+  const words: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (HTTPIE_VALUED.has(arg)) i++
+    else if (!arg.startsWith('-')) words.push(arg)
+  }
   let method: string | undefined
   if (words[0] !== undefined && /^[A-Za-z]+$/.test(words[0]) && !API.test(words[0])) method = words.shift()
   const url = words.shift()
   if (url === undefined || !API.test(url)) return null
-  const data = words.some(item => /^[^=:]+(:=|=|@)/.test(item))
+  const data = words.some(item => /^[^=:@]+(:=|=(?!=)|@)/.test(item))
   if (!WRITING.has((method ?? (data ? 'POST' : 'GET')).toUpperCase())) return null
   return restAction(url, dir)
 }
@@ -915,8 +1000,10 @@ export function mcpAction(
   return azureTarget(types, names, dir, number)
 }
 
-/** The number of an Azure DevOps PR or work item page named in `text`. */
+/** The number of an Azure DevOps PR or work item page named in `text`, or of the PR its JSON gives. */
 function printedAzure(text: string, pr: boolean): number | undefined {
-  const match = (pr ? /\/_git\/[^/\s]+\/pullrequest\/(\d+)/ : /\/_workitems\/edit\/(\d+)/).exec(text)
+  const match = pr
+    ? (/\/_git\/[^/\s]+\/pullrequest\/(\d+)/.exec(text) ?? /"pullRequestId"\s*:\s*(\d+)/.exec(text))
+    : /\/_workitems\/edit\/(\d+)/.exec(text)
   return match === null ? undefined : Number(match[1])
 }
