@@ -501,8 +501,9 @@ async fn pr_ci(
         }
     }
     let iteration = latest_iteration(client, names, pr, &statuses, memory).await?;
-    let built = pipelines.iter().map(|p| p.id.clone()).collect();
-    let (external, missing) = statuses_pipeline(&statuses, iteration, &built, &policies.statuses);
+    let published = Published::of(&pipelines);
+    let (external, missing) =
+        statuses_pipeline(&statuses, iteration, &published, &policies.statuses);
     pipelines.extend(external);
     Ok(Ci {
         sha: pr.head_sha.clone(),
@@ -607,22 +608,43 @@ fn context_name(genre: Option<&str>, name: &str) -> String {
     }
 }
 
+/// The builds already published for a PR, which its statuses may come from.
+#[derive(Debug, Default)]
+struct Published {
+    /// Their ids.
+    builds: HashSet<String>,
+    /// Their definitions' names, in lowercase.
+    definitions: HashSet<String>,
+}
+
+impl Published {
+    fn of(pipelines: &[Pipeline]) -> Self {
+        let mut published = Self::default();
+        for pipeline in pipelines {
+            published.builds.insert(pipeline.id.clone());
+            if pipeline.definition.is_some() {
+                published.definitions.insert(pipeline.name.to_lowercase());
+            }
+        }
+        published
+    }
+}
+
 /// The PR's statuses as one `external` pipeline, a job per context: the
 /// latest of each, on the latest `iteration` or on the whole PR. A status a
-/// build of the PR posts itself (its `targetUrl` names a build in `built`)
-/// is that build's, already published. Each job is required when a
-/// blocking status policy names it; such a policy that nothing answered is
-/// missing.
+/// published build posts itself is that build's, already published, and
+/// left out. Each job is required when a blocking status policy names it;
+/// such a policy that nothing answered is missing.
 fn statuses_pipeline(
     statuses: &Value,
     iteration: Option<u64>,
-    built: &HashSet<String>,
+    published: &Published,
     policies: &[StatusPolicy],
 ) -> (Option<Pipeline>, Vec<String>) {
     let mut latest: Vec<(String, &Value)> = Vec::new();
     for status in list(statuses) {
         let on = status["iterationId"].as_u64();
-        if on.is_some_and(|on| Some(on) != iteration) || from_build(status, built) {
+        if on.is_some_and(|on| Some(on) != iteration) || from_build(status, published) {
             continue;
         }
         let context = &status["context"];
@@ -670,14 +692,21 @@ fn statuses_pipeline(
     (pipeline, missing)
 }
 
-/// Whether a build in `built` posted `status`: its `targetUrl` names it.
-fn from_build(status: &Value, built: &HashSet<String>) -> bool {
+/// Whether a published build posted `status`: its `targetUrl` names the
+/// build, or its `genre` the build's definition, case aside. A build's
+/// own statuses (code coverage) carry no `targetUrl`, and the definition's
+/// name, in lowercase, as their genre.
+fn from_build(status: &Value, published: &Published) -> bool {
+    let genre = status["context"]["genre"].as_str();
+    if genre.is_some_and(|g| published.definitions.contains(&g.to_lowercase())) {
+        return true;
+    }
     let Some(url) = status["targetUrl"].as_str() else {
         return false;
     };
     url.split_once("buildId=").is_some_and(|(_, rest)| {
         let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        built.contains(&id)
+        published.builds.contains(&id)
     })
 }
 
@@ -844,7 +873,10 @@ mod tests {
             status(4, "deploy", "pending", None),
             coverage,
         ]});
-        let built = HashSet::from(["41".to_owned()]);
+        let published = Published {
+            builds: HashSet::from(["41".to_owned()]),
+            ..Published::default()
+        };
         let policies = [
             StatusPolicy {
                 context: "ci/scan".into(),
@@ -859,7 +891,7 @@ mod tests {
                 blocking: false,
             },
         ];
-        let (pipeline, missing) = statuses_pipeline(&statuses, Some(2), &built, &policies);
+        let (pipeline, missing) = statuses_pipeline(&statuses, Some(2), &published, &policies);
         let pipeline = pipeline.unwrap();
         assert_eq!(pipeline.trigger, Trigger::External);
         let jobs: Vec<_> = pipeline
@@ -1244,5 +1276,47 @@ mod tests {
         let pr = reading.pr.unwrap();
         assert_eq!((pr.number, pr.state), (7, "merged"));
         assert_eq!((reading.head_sha, reading.ci), (None, None));
+    }
+
+    /// A status a build posts on the PR, code coverage, carries no
+    /// `targetUrl` and its definition's name in lowercase as its genre: it
+    /// is that build's, not an external job running as long as the build.
+    #[tokio::test]
+    async fn a_build_s_own_status_without_target_url_is_the_build_s() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pullrequests?searchcriteria.status=active") {
+                json!({ "value": [raw_pr("active")] })
+            } else if line.contains("/policy/evaluations?") {
+                json!({ "value": [evaluation("e1", "running", json!({ "buildId": 40 }), true)] })
+            } else if line.contains("/build/builds?branchname=refs%2fpull%2f7%2fmerge") {
+                json!({ "value": [{ "id": 40, "status": "inProgress", "reason": "pullRequest",
+                    "definition": { "id": 12, "name": "App-Code-Validation" },
+                    "sourceVersion": "m1", "sourceBranch": "refs/pull/7/merge" }] })
+            } else if line.contains("/build/builds?") {
+                json!({ "value": [] })
+            } else if line.contains("/timeline") {
+                json!({ "changeId": 1, "records": [] })
+            } else if line.contains("/statuses?") {
+                json!({ "value": [
+                    { "id": 1, "state": "pending", "targetUrl": null,
+                      "context": { "genre": "app-code-validation", "name": "codecoverage" },
+                      "createdBy": { "displayName": "Azure Pipelines Test Service" } },
+                    { "id": 2, "state": "succeeded", "targetUrl": "https://scan",
+                      "context": { "genre": "sonar", "name": "quality" } },
+                ]})
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let ci = read_feat(&context(&server)).await.ci.unwrap();
+        let ids: Vec<_> = ci.pipelines.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["40", "statuses"]);
+        let external = &ci.pipelines[1];
+        let jobs: Vec<_> = external.jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(jobs, ["sonar/quality"]);
+        assert_eq!(external.state, State::Pass);
     }
 }
