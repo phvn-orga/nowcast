@@ -737,7 +737,8 @@ l'interpréter (`03-contrats.md`) :
 
 Le service ne connaît aucun agent (`00-cadrage.md`) : reconnaître une action d'agent
 qui peut changer la forge revient au client, et dans Claude Code au mod central
-(`02-clients.md`). Après un appel d'outil qui a abouti, il en fait une portée :
+(`02-clients.md`). Après un appel Bash ou MCP qui a abouti, du fil principal comme
+d'un sous-agent, il en fait une portée :
 
 | Appel | `types` |
 |---|---|
@@ -752,12 +753,23 @@ qui peut changer la forge revient au client, et dans Claude Code au mod central
 
 - **Le dépôt vient des arguments** : `-R`, l'URL que `gh` affiche, le chemin de
   l'API, les paramètres de l'outil MCP. À défaut, c'est celui du répertoire de
-  travail de la commande. Le numéro vient des mêmes sources.
+  travail de la commande. Le numéro vient des mêmes sources. `gh` écrit une part
+  de ses messages sur stderr : le mod lit les deux sorties.
+- **Un work item Azure DevOps connu par son seul projet** prend pour remote le
+  dépôt par défaut du projet, qui porte son nom : les work items appartiennent au
+  projet, pas à un dépôt.
+- **Une commande lancée en arrière-plan** compte comme terminée dès son lancement,
+  quand l'appel rend son résultat : la portée part avant qu'elle ait agi, et les
+  détecteurs voient la suite.
 - **Un dépôt introuvable** fait demander le rafraîchissement de tous les flux des
   sortes visées, comme avant les portées.
 - **La portée nomme le dépôt visé**, pas celui de la session : une session qui crée
   une issue dans un autre dépôt (`gh issue create -R`) rafraîchit ce qu'y suit une
   autre session, sans connaître ses flux.
+- **Un service qui refuse la portée** (`400` d'un service antérieur aux portées,
+  ou une brique qui n'en déclare pas) reçoit la demande par sorte, et le mod s'en
+  tient là pour le reste de la session. Les portées ne font donc pas relever
+  `OLDEST_SERVICE`, la plus ancienne version du service que le mod accepte.
 
 Sans brique forge activée, le service répond `unknown_brick` et le mod n'insiste
 pas ; sans flux, rien ne se lit. Un push depuis un terminal n'envoie aucun indice :

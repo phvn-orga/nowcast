@@ -306,18 +306,30 @@ montrer.
   résultat n'a pas `isError`), du fil principal comme d'un sous-agent : son
   `file_path` désigne le worktree. Une lecture ne compte pas : une session qui lit
   `main` pour comparer n'y travaille pas.
-- **Pas de commande Bash pour commencer.** Un `git -C <worktree> commit`, un `cd`
-  suivi d'une écriture ou un `rm` ne sont pas relevés : il faudrait analyser la commande pour
-  savoir où elle écrit. Claude Code n'a pas d'outil de suppression.
+- **Une commande Bash n'ajoute pas de worktree.** Un `git -C <worktree> commit`, un
+  `cd` suivi d'une écriture ou un `rm` ne sont pas relevés : il faudrait analyser la
+  commande pour savoir où elle écrit. Claude Code n'a pas d'outil de suppression.
+  Certaines commandes font en revanche relire les entrées déjà là (plus bas).
 - Un fichier hors de tout dépôt git ne compte pas.
 
 ### Du fichier au worktree
 
 Pour un répertoire qu'il n'a pas encore vu, le mod demande à git la racine du
 worktree et le répertoire git commun (`git rev-parse --show-toplevel
---git-common-dir`), et garde la réponse. À chaque écriture, il relit la branche et
-l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la dernière
-écriture est ainsi pris. La brique git (#51) pourra remplacer ces appels.
+--git-common-dir`), et garde la réponse. À chaque écriture, il relit la branche,
+l'URL du remote `origin` et la clé forge de ce worktree : un `git checkout` lancé
+dans un terminal est ainsi pris à l'écriture suivante.
+
+Il relit aussi une entrée, sans changer son rang ni sa date, après une commande de
+son agent qui peut déplacer une branche ou changer où `git push` l'envoie : `git
+switch`, `git checkout`, `git branch -m`, `-u` ou `--unset-upstream`, `git push
+-u`, `gh pr checkout`. Le répertoire de la commande, `cd` et `git -C` compris,
+désigne l'entrée. Toutes sont relues quand ce répertoire reste inconnu, quand un
+`git branch` nomme une autre branche que la courante (un autre worktree peut la
+porter), et après `git worktree add`, `move`, `remove` ou `prune`. Une commande
+qui a échoué compte aussi : elle a pu changer de branche avant d'échouer. Une
+relecture fait sortir une entrée dont le worktree n'existe plus. La brique git
+(#51) pourra remplacer ces appels.
 
 ### La liste
 
@@ -327,7 +339,9 @@ l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la derni
     "repo": "/home/…/nowcast/.bare",
     "branch": "design-session-worktrees",
     "remote": "git@github.com:phvn-orga/nowcast.git",
-    "written_at": "2026-11-10T08:58:12Z" }
+    "written_at": "2026-11-10T08:58:12Z",
+    "forge": { "remote": "git@github.com:phvn-orga/nowcast.git",
+               "branch": "design-session-worktrees" } }
 ]
 ```
 
@@ -336,15 +350,16 @@ l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la derni
 | `path` | Racine du worktree |
 | `repo` | Répertoire git commun, le même pour tous les worktrees d'un dépôt |
 | `branch` | Branche courante, `null` en HEAD détaché |
-| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Les clés forge viennent de la branche où `git push` l'enverrait et de son remote, pas de lui (`02-clients.md`) |
+| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Pas la clé forge : voir `forge` |
 | `written_at` | Dernière écriture relevée dans ce worktree |
+| `forge` | Clé des flux `pr` et `pipelines` de la brique forge, `{remote, branch}` : la branche où `git push` l'enverrait et l'URL de push de ce remote (`02-clients.md`). `null` en HEAD détaché ou sans remote de push ; absent d'une entrée écrite par un mod plus ancien. Le schéma de `claude-code.measure/v1` le décrit |
 
 - **Triée par écriture**, la plus récente d'abord.
 - **Au plus 16 worktrees.** Au-delà, celui dont l'écriture est la plus ancienne
   sort. Aucun délai : une fenêtre de temps (les worktrees des dix dernières
   minutes, par exemple) est l'affaire du consommateur, qui a les dates.
 - **Un worktree dont la racine n'existe plus sort de la liste**, vérifié à chaque
-  écriture relevée.
+  écriture relevée et à chaque relecture.
 - **Vide tant que la session n'a rien écrit** : un consommateur se rabat alors sur
   le répertoire de la session.
 - **Elle appartient à la session.** Après un `/clear`, la nouvelle session part
@@ -357,6 +372,23 @@ l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la derni
 - **Dans la session publiée par la brique**, champ `worktrees` de
   `claude-code.session/v1`, pour une autre session ou un tableau de bord. Le mod
   l'envoie avec ses mesures ; la brique la recopie sans l'interpréter.
+- **Les flux forge d'un worktree, dans les abonnements du mod central.** Brique
+  forge activée, il s'abonne aux flux `pr` et `pipelines` de la clé de chaque
+  entrée, sous les noms `worktree-pr:<path>` et `worktree-pipelines:<path>`
+  (`02-clients.md`). Un mod d'affichage lit l'abonnement
+  `nowcast/worktree-pr:<path>` de la famille `subscriptions`, puis la valeur de son
+  flux dans `flows`.
+
+### Limites connues
+
+- **Des options courtes groupées** (`git push -fu`) ne sont pas vues comme
+  déplaçant la branche : l'entrée n'est relue qu'à l'écriture suivante.
+- **Un nom de ref local ambigu**, une branche locale nommée comme une branche
+  distante (`origin/x`), peut faire retomber la clé sur le nom local au lieu de
+  celle que donne `@{push}`.
+- **Une clé dont la première demande échoue par une erreur passagère**, puis que
+  la brique refuse, reste retentée : le mod central garde l'abonnement, et ne le
+  retire que sur un `subscription_refused` reçu à la première demande.
 
 ### Plus tard
 
