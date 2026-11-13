@@ -2,8 +2,8 @@
 
 État au 2026-11-13 : conception refaite sous #52, implémentation dans #125 ;
 détection des changements, clés dynamiques et rafraîchissement ciblé conçus le
-2026-11-13, pas encore implémentés. Brique native (`01-briques.md`), qui remplace le
-premier jet décrit dans `00-cadrage.md`.
+2026-11-13, implémentés dans #132 (la détection sur GitHub seulement). Brique
+native (`01-briques.md`), qui remplace le premier jet décrit dans `00-cadrage.md`.
 
 La brique est organisée par usages : une PR, des pipelines, des issues. Chaque
 forge (GitHub et Azure DevOps d'abord, GitLab ensuite) est un provider compilé dans
@@ -31,8 +31,9 @@ en détail que les cibles touchées (voir « Voir un changement »).
   ou un numéro d'issue. La brique en fait sa cible. Elle ne contacte pas la forge
   pour accepter un abonnement, si bien que l'identifiant de flux dérive de la clé
   telle que donnée : `{remote, pr: 111}` et le `{remote, branch}` de la tête de la
-  PR 111 sont deux flux, nourris par une même lecture une fois que la brique a
-  résolu la PR.
+  PR 111 sont deux flux et deux cibles, lues chacune de son côté. Sur GitHub, elles
+  partagent leurs requêtes par le cache d'`ETag` ; sur Azure DevOps, chaque lecture
+  est comptée deux fois.
 - **`<dépôt>` est l'identité normalisée du dépôt**, quelle que soit l'écriture du
   remote (SSH, HTTPS, alias SSH). Le provider qui reconnaît le remote la donne :
   `github.com/<propriétaire>/<dépôt>`, `dev.azure.com/<organisation>/<projet>/<dépôt>`.
@@ -79,7 +80,8 @@ plus.
   `null` sans PR. `state` vaut `open`, `merged` ou `closed`.
 - **Sous une clé `{remote, pr}`**, `pr` est cette PR quel que soit son état, et
   `branch` et `head_sha` sont ceux de sa tête, `null` avant la première lecture. Une
-  PR qui n'existe pas se lit dans `source` (`not_found`).
+  PR qui n'existe pas se lit dans `source` (`not_found`). La PR d'un fork publie
+  `branch` à `null` : sa tête n'est pas une branche de ce dépôt.
 - **`ci` est la synthèse de la CI**, la même que celle de `forge.pipelines/v1` pour
   la même branche : `state` et `required_state` (voir « La synthèse »), et `sha`, le
   commit qu'elle couvre. `null` quand il n'y a pas de commit à lire. Le détail par
@@ -391,8 +393,8 @@ Les réponses pèsent de 150 à 600 Ko, environ dix fois moins en gzip : le prov
 demande gzip.
 
 **La détection.** Trois détecteurs par dépôt suivi, interrogés en requêtes
-conditionnelles toutes les 10 s. Mesuré par un spike le 2026-11-12, sur quatre dépôts
-(NixOS/nixpkgs, home-assistant/core, microsoft/vscode, phvn-orga/nowcast), pendant
+conditionnelles toutes les 10 s au départ. Mesuré par un spike le 2026-11-12, sur
+quatre dépôts (NixOS/nixpkgs, home-assistant/core, microsoft/vscode, phvn-orga/nowcast), pendant
 7 minutes à partir de 13:38 UTC, environ 525 requêtes authentifiées :
 
 | Détecteur | Endpoint | Changement vu après son `updated_at` (médiane à p90) |
@@ -405,12 +407,33 @@ conditionnelles toutes les 10 s. Mesuré par un spike le 2026-11-12, sur quatre 
   changement.
 - **Le coût** est nul sur un dépôt calme. Sur un dépôt chargé, l'`ETag` change sur
   50 à 90 % des interrogations : environ 700 points par heure et par dépôt pour les
-  trois, 14 % du budget de 5 000 par heure. Un détecteur dont la plupart des
-  interrogations répondent `200` ralentit ; de combien n'est pas fixé.
-- **Un détecteur dit ce qui a bougé** : les runs, PR et issues dont `updated_at`
-  dépasse la lecture précédente. Le provider lit ensuite en détail les seules cibles
-  touchées : une PR par son numéro, la tête d'une branche, une issue par son numéro.
-  Les PR que l'API des issues mêle aux issues en sont retirées.
+  trois, 14 % du budget de 5 000 par heure. Sur nowcast, 40 s de fonctionnement
+  (une branche et les issues du dépôt, le 2026-11-13) ont coûté 10 points : un par
+  `200`, les 9 interrogations des détecteurs ayant répondu `304`.
+- **Un détecteur chargé ralentit.** Sa période part de 10 s. Une fois qu'il a 6
+  réponses à sa période actuelle, plus de 3 `200` la doublent (60 s au plus), 1 au
+  plus la divise par deux (10 s au moins), sinon la plus ancienne réponse sort du
+  compte. Un changement de période remet le compte à zéro : chaque période est
+  jugée sur ses propres réponses.
+- **Un détecteur dit ce qui a bougé** en comparant sa liste à la précédente : un
+  élément nouveau dans la liste, ou dont l'un de ces champs a changé. Sa première
+  réponse ne fait que poser cette référence et ne réveille rien.
+
+  | Détecteur | Champs comparés |
+  |---|---|
+  | pipelines | `updated_at`, `status`, `conclusion`, `head_sha` |
+  | PR | `updated_at`, `state`, le sha de la tête |
+  | issues | `updated_at`, `state` |
+
+  Un run ou une PR ne touche une branche que si son dépôt de tête est celui-ci. Le
+  provider lit ensuite en détail les seules cibles touchées : une PR par son numéro,
+  la tête d'une branche, une issue par son numéro. Les PR que l'API des issues mêle
+  aux issues en sont retirées.
+- **Un rafraîchissement fait d'abord interroger les détecteurs** dont la cible
+  dépend, en les attendant 5 s au plus, puis la cible se lit. Il ouvre leur fenêtre
+  rapide (toutes les 2 s pendant 30 s), et celle de la cible elle-même (une lecture
+  toutes les 2 s pendant 30 s), qui rattrape une tête que l'API ne montre pas
+  encore.
 - **La progression d'une CI se lit encore sur le commit.** Le `updated_at` d'un run
   ne bouge pas quand ses jobs se terminent, et sur un dépôt chargé un run en cours
   sort des 20 premiers de `actions/runs` en 4 minutes environ. Tant qu'une CI
@@ -500,12 +523,18 @@ Le reste passe par GraphQL, seul à le donner :
 **Rythme** : la machine à rythme, avec CI attendue 2 s pendant 30 s puis 5 s, CI en
 cours 5 s, fenêtre rapide 2 s, normal 60 s. Une lecture qui ne change rien est
 gratuite, d'où le rythme rapide ; `gh run watch` interroge toutes les 3 s. Les
-détecteurs remplacent le rythme normal pour ce qu'ils couvrent : une PR, une issue ou
-la liste des issues n'est relue que quand un détecteur la montre. Le rythme normal ne
-sert plus qu'à ce qu'aucun détecteur ne voit : la tête d'une branche sans PR, qui
-avance sans CI, les contrôles obligatoires et la file d'une base. Après un
-rafraîchissement ciblé qui n'a rien montré de neuf, la fenêtre rapide s'applique aux
-détecteurs de la portée. Les limites secondaires (débit par minute) n'ont pas été
+détecteurs font lire ce qu'ils voient bouger, et les cibles gardent un rythme de
+sûreté pour ce qu'ils manqueraient :
+
+- une branche ou une PR se relit toutes les 60 s, toutes les 5 s tant que sa CI
+  tourne ;
+- les cibles d'issues se relisent toutes les 5 min après une lecture réussie, au
+  rythme normal (60 s) après un échec ;
+- un détecteur sans jeton attend le rythme normal avant de réessayer, `gh auth
+  token` redemandé plus tôt n'en donnant pas davantage.
+
+Les contrôles obligatoires et la file d'une base, qu'aucun détecteur ne voit, se
+relisent au rythme normal. Les limites secondaires (débit par minute) n'ont pas été
 vérifiées sur des `304` : le provider ralentit sur un `403` ou un `429` qui les
 invoque, et respecte `Retry-After`. Une lecture partagée (les PR ouvertes d'un dépôt)
 suit la branche la plus rapide qui en dépend.
@@ -689,13 +718,18 @@ l'interpréter (`03-contrats.md`) :
 
 - **`remote`** est normalisé comme celui d'une clé. Un remote qu'aucun provider ne
   reconnaît ne rafraîchit rien.
-- **`types`** parmi `pr`, `pipelines` et `issues`, au moins un ; `issues` vise aussi
-  les flux `issue`.
+- **`types`** parmi `pr`, `pipelines` et `issues`, au moins un, toutes les sortes
+  s'il est absent ; `issues` vise aussi les flux `issue`.
 - **`number`**, facultatif, est le numéro d'une PR ou d'une issue que l'action a
-  touchée. Il compte parmi les cibles touchées, s'il nourrit un flux.
+  touchée. Il compte parmi les cibles touchées, s'il nourrit un flux. Il écarte une
+  cible seulement quand sa PR est connue et porte un autre numéro : une branche sans
+  PR ouverte connue se relit quand même (`gh pr create`, la base qui avance sur `gh
+  pr merge`). Quand la portée nomme aussi `pr` ou `pipelines`, le numéro ne
+  restreint que les cibles de branche et de PR, pas les issues.
 - **La brique interroge aussitôt les détecteurs** de ce dépôt pour ces sortes, puis
   lit les cibles touchées. Une portée qu'aucun flux ne suit ne coûte rien. Seuls les
   flux dont le détail a changé sont publiés.
+- **Une portée illisible** est journalisée et ignorée.
 - **Sans portée, rien ne change** : chaque flux de la brique, ou de la sorte nommée,
   reçoit un `refresh` et se relit.
 
