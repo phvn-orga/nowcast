@@ -21,38 +21,28 @@
 //! compared with. Statuses and policy evaluations of a PR are in none of
 //! these lists: a PR target keeps reading them at its own pace.
 //!
-//! A detector polls every [`PERIOD`](crate::tools::throttle::PERIOD), about
-//! 3 TSTU per 5-minute window for a project at the costs measured (the
-//! budget is 200), slower when its answers keep changing ([`Throttle`]), at
-//! [`SLOWEST`] at least while the budget left is under half of it, and not
-//! before a `Retry-After`. A target's `refresh` has the detectors it depends
-//! on poll at once and opens their fast window: they poll at the provider's
-//! window pace for [`WINDOW_FOR`]. After a failed poll, a detector waits the
-//! provider's normal pace, unless a `refresh` asks it to poll.
+//! A detector polls as the shared registry has it ([`crate::tools::detect`]):
+//! every [`PERIOD`](crate::tools::throttle::PERIOD), about 3 TSTU per
+//! 5-minute window for a project at the costs measured (the budget is 200),
+//! slower when something keeps moving, at
+//! [`SLOWEST`](crate::tools::throttle::SLOWEST) at least while the budget
+//! left is under half of it, and not before a `Retry-After`.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::oneshot;
-use tokio::task::AbortHandle;
-use tokio::time::Instant;
 
 use super::{
     BUDGET, Context, HEADERS, Names, RHYTHM, VERSION, decode, header_number, limited, token,
 };
+use crate::tools::detect::{self, Detector, Polled};
 use crate::tools::http::{self, encode};
-use crate::tools::pace::WINDOW_FOR;
-use crate::tools::throttle::{SLOWEST, Throttle};
+use crate::tools::pace::Rhythm;
 
-/// How long a `refresh` waits for its detectors before the target reads
-/// anyway, on a slow or unreachable forge.
-const ASKED_FOR: Duration = Duration::from_secs(5);
 /// The active PRs of a project one poll reads.
 const PULLS: usize = 500;
 /// The completed builds of a project one poll reads.
@@ -381,233 +371,69 @@ fn budget_low(headers: &HeaderMap) -> bool {
 }
 
 /// The projects detected, shared by every target of the provider.
-#[derive(Clone, Default)]
-pub struct Detection {
-    projects: Arc<Mutex<HashMap<String, Weak<Project>>>>,
+pub type Detection = detect::Detection<Project>;
+/// A target's registration, and what its detectors send it.
+pub type Detected = detect::Detected<Project>;
+
+/// Registers a target of the project of `names` about `interest`: the
+/// detectors it depends on run while it stays registered.
+pub fn watch(
+    detection: &Detection,
+    context: &Context,
+    names: &Names,
+    interest: Interest,
+) -> Detected {
+    let project = || Project {
+        context: context.clone(),
+        names: Names {
+            repo: String::new(),
+            ..names.clone()
+        },
+    };
+    detection.watch(names.tracker(), project, interest)
 }
 
-impl Detection {
-    /// Registers a target of the project of `names` about `interest`: the
-    /// detectors it depends on run while it stays registered.
-    pub fn watch(&self, context: &Context, names: &Names, interest: Interest) -> Detected {
-        let key = names.tracker();
-        let project = {
-            let mut projects = self.projects.lock().unwrap();
-            projects.retain(|_, project| project.strong_count() > 0);
-            if let Some(project) = projects.get(&key).and_then(Weak::upgrade) {
-                project
-            } else {
-                let project = Arc::new(Project {
-                    context: context.clone(),
-                    names: Names {
-                        repo: String::new(),
-                        ..names.clone()
-                    },
-                    state: Mutex::default(),
-                });
-                projects.insert(key, Arc::downgrade(&project));
-                project
-            }
-        };
-        let (wake, wakes) = unbounded_channel();
-        let id = project.add(interest, wake);
-        Detected {
-            watcher: Watcher { project, id },
-            wakes,
-        }
-    }
-
-    /// The projects detected and their detectors running, for tests.
-    #[cfg(test)]
-    pub fn running(&self) -> Vec<(String, usize)> {
-        let projects = self.projects.lock().unwrap();
-        let mut running: Vec<(String, usize)> = projects
-            .iter()
-            .filter_map(|(key, project)| {
-                let project = project.upgrade()?;
-                let count = project.state.lock().unwrap().detectors.len();
-                Some((key.clone(), count))
-            })
-            .collect();
-        running.sort();
-        running
-    }
-}
-
-/// One project detected, held by the targets registered on it.
+/// One project detected: what its detectors share.
 pub struct Project {
     context: Context,
     /// The organisation and the project, without a repository.
     names: Names,
-    state: Mutex<State>,
 }
 
-#[derive(Default)]
-struct State {
-    last_id: u64,
-    /// Each target registered, and where to wake it.
-    watchers: HashMap<u64, (Interest, UnboundedSender<()>)>,
-    detectors: HashMap<Key, Running>,
-}
+impl detect::Scope for Project {
+    type Interest = Interest;
+    type Key = Key;
+    type Moved = Moved;
+    type Detector = ProjectDetector;
 
-/// A detector's task, stopped when dropped.
-struct Running {
-    task: AbortHandle,
-    /// Asks for a poll now, answered once done.
-    asks: UnboundedSender<oneshot::Sender<()>>,
-}
+    const RHYTHM: Rhythm = RHYTHM;
 
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.task.abort();
+    fn keys(interest: &Interest) -> Vec<Key> {
+        interest
+            .kinds
+            .iter()
+            .map(|kind| key(*kind, interest))
+            .collect()
     }
-}
 
-impl Project {
-    /// Registers a target, starting the detectors it needs that no other
-    /// target started.
-    fn add(self: &Arc<Self>, interest: Interest, wake: UnboundedSender<()>) -> u64 {
-        let mut state = self.state.lock().unwrap();
-        state.last_id += 1;
-        let id = state.last_id;
-        for kind in interest.kinds {
-            let key = key(*kind, &interest);
-            if let Entry::Vacant(vacant) = state.detectors.entry(key) {
-                let (asks, asked) = unbounded_channel();
-                let detector = Detector::new(self, *kind, &vacant.key().1);
-                let task = tokio::spawn(detector.run(asked)).abort_handle();
-                vacant.insert(Running { task, asks });
-            }
+    fn touches(moved: &Moved, interest: &Interest) -> bool {
+        moved.touches(interest)
+    }
+
+    fn detector(&self, (kind, repo): &Key) -> ProjectDetector {
+        ProjectDetector {
+            kind: *kind,
+            context: self.context.clone(),
+            names: Names {
+                repo: repo.clone(),
+                ..self.names.clone()
+            },
+            last: None,
+            pushes: Pushes::default(),
+            revisions: Revisions::default(),
+            low: false,
+            costed: false,
         }
-        state.watchers.insert(id, (interest, wake));
-        id
-    }
-
-    /// Unregisters target `id`, stopping the detectors no target needs.
-    fn remove(&self, id: u64) {
-        let mut state = self.state.lock().unwrap();
-        state.watchers.remove(&id);
-        let State {
-            watchers,
-            detectors,
-            ..
-        } = &mut *state;
-        detectors.retain(|k, _| {
-            watchers
-                .values()
-                .any(|(i, _)| i.kinds.iter().any(|kind| key(*kind, i) == *k))
-        });
-    }
-
-    /// Wakes the targets one of `moved` touches.
-    fn wake(&self, moved: &[Moved]) {
-        let state = self.state.lock().unwrap();
-        for (interest, wake) in state.watchers.values() {
-            if moved.iter().any(|m| m.touches(interest)) {
-                let _ = wake.send(());
-            }
-        }
-    }
-}
-
-/// A target's registration; dropping it unregisters the target.
-pub struct Watcher {
-    project: Arc<Project>,
-    id: u64,
-}
-
-impl Watcher {
-    /// Updates what the target is about.
-    pub fn learn(&self, update: impl FnOnce(&mut Interest)) {
-        let mut state = self.project.state.lock().unwrap();
-        if let Some((interest, _)) = state.watchers.get_mut(&self.id) {
-            update(interest);
-        }
-    }
-
-    /// Has the detectors the target depends on poll now, opening their fast
-    /// window, and returns once they did, could not, or [`ASKED_FOR`] passed.
-    pub async fn poll_now(&self) {
-        let answers: Vec<oneshot::Receiver<()>> = {
-            let state = self.project.state.lock().unwrap();
-            let Some((interest, _)) = state.watchers.get(&self.id) else {
-                return;
-            };
-            interest
-                .kinds
-                .iter()
-                .filter_map(|kind| state.detectors.get(&key(*kind, interest)))
-                .map(|running| {
-                    let (answer, answered) = oneshot::channel();
-                    let _ = running.asks.send(answer);
-                    answered
-                })
-                .collect()
-        };
-        let all = async {
-            for answered in answers {
-                let _ = answered.await;
-            }
-        };
-        let _ = tokio::time::timeout(ASKED_FOR, all).await;
-    }
-}
-
-impl Drop for Watcher {
-    fn drop(&mut self) {
-        self.project.remove(self.id);
-    }
-}
-
-/// A target's registration, and what its detectors send it.
-pub struct Detected {
-    pub watcher: Watcher,
-    wakes: UnboundedReceiver<()>,
-}
-
-impl Detected {
-    /// Waits until `deadline`, for a `refresh`, or for a detector to say the
-    /// target moved; what piled up counts as one. A `refresh` calls
-    /// `refreshed`, and has the target's detectors poll first: what they
-    /// wake is the reading that follows. A rate limit (`limited`) holds the
-    /// wait whatever comes. `false` once the core is gone.
-    pub async fn wait(
-        &mut self,
-        deadline: Instant,
-        refreshes: &mut UnboundedReceiver<()>,
-        limited: bool,
-        mut refreshed_now: impl FnMut(),
-    ) -> bool {
-        let mut refreshed = false;
-        loop {
-            // A pending `refresh` wins over a wake or the deadline, for its
-            // detectors to poll before the reading.
-            tokio::select! {
-                biased;
-                refresh = refreshes.recv() => {
-                    if refresh.is_none() {
-                        return false;
-                    }
-                    while refreshes.try_recv().is_ok() {}
-                    refreshed = true;
-                    refreshed_now();
-                    if !limited {
-                        break;
-                    }
-                }
-                Some(()) = self.wakes.recv() => {
-                    if !limited {
-                        break;
-                    }
-                }
-                () = tokio::time::sleep_until(deadline) => break,
-            }
-        }
-        if refreshed {
-            self.watcher.poll_now().await;
-        }
-        while self.wakes.try_recv().is_ok() {}
-        true
     }
 }
 
@@ -637,9 +463,8 @@ struct Revisions {
     as_of: Option<String>,
 }
 
-/// One detector of a project.
-struct Detector {
-    project: Weak<Project>,
+/// One detector of a project: what it polls, and where it stands.
+pub struct ProjectDetector {
     kind: Kind,
     context: Context,
     /// The project, and the repository of a pushes detector.
@@ -648,113 +473,20 @@ struct Detector {
     last: Option<Value>,
     pushes: Pushes,
     revisions: Revisions,
-    throttle: Throttle,
-    /// Until when a `refresh` keeps the pace fast.
-    window_until: Option<Instant>,
     /// Whether the last poll's answers said the budget runs low.
     low: bool,
     /// Whether the cost of a poll was logged, once per detector.
     costed: bool,
-    /// Whether the last poll failed: a lasting failure is logged once, and
-    /// the next poll waits the normal pace.
-    failing: bool,
-    /// Whether a `401` dropped the token since the last poll that answered:
-    /// the next `401`s keep the token asked since, which asking again would
-    /// not change.
-    dropped: bool,
 }
 
-impl Detector {
-    fn new(project: &Arc<Project>, kind: Kind, repo: &str) -> Self {
-        Self {
-            project: Arc::downgrade(project),
-            kind,
-            context: project.context.clone(),
-            names: Names {
-                repo: repo.to_owned(),
-                ..project.names.clone()
-            },
-            last: None,
-            pushes: Pushes::default(),
-            revisions: Revisions::default(),
-            throttle: Throttle::default(),
-            window_until: None,
-            low: false,
-            costed: false,
-            failing: false,
-            dropped: false,
-        }
-    }
+impl detect::Detector for ProjectDetector {
+    type Moved = Moved;
 
-    /// Polls, wakes what moved, waits for its period or to be asked, and
-    /// again. Those who asked are answered once the poll that follows is
-    /// done; while it cannot poll (a rate limit, no token), at once.
-    async fn run(mut self, mut asked: UnboundedReceiver<oneshot::Sender<()>>) {
-        let mut waiting: Vec<oneshot::Sender<()>> = Vec::new();
-        loop {
-            let limited = self.poll().await;
-            for answer in waiting.drain(..) {
-                let _ = answer.send(());
-            }
-            let now = Instant::now();
-            let deadline = now + limited.unwrap_or_else(|| self.period(now));
-            loop {
-                tokio::select! {
-                    () = tokio::time::sleep_until(deadline) => break,
-                    answer = asked.recv() => {
-                        let Some(answer) = answer else {
-                            return;
-                        };
-                        self.window_until = Some(Instant::now() + WINDOW_FOR);
-                        if limited.is_some() {
-                            let _ = answer.send(());
-                            continue;
-                        }
-                        waiting.push(answer);
-                        while let Ok(answer) = asked.try_recv() {
-                            waiting.push(answer);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    /// The normal pace after a failed poll; else the window pace after a
-    /// `refresh`, else the throttle's; at [`SLOWEST`] at least while the
-    /// budget runs low.
-    fn period(&self, now: Instant) -> Duration {
-        if self.failing {
-            return RHYTHM.normal;
-        }
-        let period = if self.window_until.is_some_and(|until| now < until) {
-            RHYTHM.window
-        } else {
-            self.throttle.period()
-        };
-        if self.low {
-            period.max(SLOWEST)
-        } else {
-            period
-        }
-    }
-
-    /// Where the detector reads, for the log.
-    fn at(&self) -> String {
-        let at = if self.kind == Kind::Pushes {
-            self.names.id()
-        } else {
-            self.names.tracker()
-        };
-        format!("{at} {} detector", self.kind.name())
-    }
-
-    /// One poll, and how long to wait when it cannot poll: what a rate
-    /// limit asks, or the normal pace without a token.
-    async fn poll(&mut self) -> Option<Duration> {
+    /// What moved since the last poll; a change for the throttle is
+    /// something that moved.
+    async fn poll(&mut self) -> Polled<Moved> {
         let Some(token) = token(&self.context).await else {
-            return Some(RHYTHM.normal);
+            return Polled::NoToken;
         };
         self.low = false;
         let polled = match self.kind {
@@ -764,24 +496,34 @@ impl Detector {
             Kind::WorkItems => self.poll_work_items(&token).await,
         };
         match polled {
-            Ok(moved) => {
-                self.failing = false;
-                self.dropped = false;
-                // The first answer only sets what the next are compared with.
-                if let Some(moved) = moved {
-                    self.throttle.answered(!moved.is_empty());
-                    if !moved.is_empty()
-                        && let Some(project) = self.project.upgrade()
-                    {
-                        project.wake(&moved);
-                    }
-                }
-                None
-            }
-            Err(failure) => self.failed(failure).await,
+            Ok(None) => Polled::First,
+            Ok(Some(moved)) => Polled::Answered {
+                changed: !moved.is_empty(),
+                moved,
+            },
+            Err(failure) => Polled::Failed(failure),
         }
     }
 
+    async fn drop_token(&mut self) {
+        *self.context.token.lock().await = None;
+    }
+
+    fn budget_low(&self) -> bool {
+        self.low
+    }
+
+    fn at(&self) -> String {
+        let at = if self.kind == Kind::Pushes {
+            self.names.id()
+        } else {
+            self.names.tracker()
+        };
+        format!("{at} {} detector", self.kind.name())
+    }
+}
+
+impl ProjectDetector {
     /// GETs `path` of the API, noting what its answer says of the budget.
     async fn get(&mut self, token: &str, path: &str) -> Result<Arc<Value>, http::Failure> {
         let url = format!("{}{path}", self.context.api);
@@ -791,7 +533,7 @@ impl Detector {
         Ok(body)
     }
 
-    /// POSTs `body` to `path` of the API, as [`Detector::get`].
+    /// POSTs `body` to `path` of the API, as [`ProjectDetector::get`].
     async fn post(
         &mut self,
         token: &str,
@@ -1014,35 +756,22 @@ impl Detector {
             .collect();
         Ok((!first).then_some(moved))
     }
-
-    /// A failed poll, and how long a rate limit asks to wait. A refused
-    /// token (`401`) is forgotten, as by a target, once until a poll
-    /// answers; a `403` keeps it.
-    async fn failed(&mut self, failure: http::Failure) -> Option<Duration> {
-        if failure == http::Failure::Unauthorized && !std::mem::replace(&mut self.dropped, true) {
-            *self.context.token.lock().await = None;
-        }
-        if !std::mem::replace(&mut self.failing, true) {
-            let why = match &failure {
-                http::Failure::Unreachable(why) => format!("unreachable: {why}"),
-                http::Failure::Unreadable(why) => why.clone(),
-                other => format!("{other:?}"),
-            };
-            crate::log(format_args!("{}: {why}", self.at()));
-        }
-        match failure {
-            http::Failure::Limited(wait) => Some(wait.unwrap_or(RHYTHM.normal)),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::time::Instant;
+
     use super::*;
     use crate::credentials::Stamp;
     use crate::testing::Server;
-    use crate::tools::throttle::PERIOD;
+    use crate::tools::detect::testing::{watched, woken};
+    use crate::tools::detect::{Poller, Watched};
+    use crate::tools::pace::WINDOW_FOR;
+    use crate::tools::throttle::{PERIOD, SLOWEST};
 
     fn pull(repo: &str, number: u64, branch: &str, vote: i64) -> Value {
         json!({ "repository": { "name": repo }, "pullRequestId": number, "status": "active",
@@ -1178,37 +907,16 @@ mod tests {
     async fn project(
         server: &Server,
         interests: Vec<Interest>,
-    ) -> (Arc<Project>, Vec<UnboundedReceiver<()>>) {
-        let project = Arc::new(Project {
+    ) -> (Arc<Watched<Project>>, Vec<UnboundedReceiver<()>>) {
+        let project = Project {
             context: context(server).await,
             names: Names {
                 org: "o".into(),
                 project: "p".into(),
                 repo: String::new(),
             },
-            state: Mutex::default(),
-        });
-        let mut wakes = Vec::new();
-        let mut state = project.state.lock().unwrap();
-        for (id, interest) in interests.into_iter().enumerate() {
-            let (wake, woken) = unbounded_channel();
-            state.watchers.insert(id as u64, (interest, wake));
-            wakes.push(woken);
-        }
-        drop(state);
-        (project, wakes)
-    }
-
-    /// Which targets were woken since the last call.
-    fn woken(wakes: &mut [UnboundedReceiver<()>]) -> Vec<usize> {
-        let mut woken = Vec::new();
-        for (i, wake) in wakes.iter_mut().enumerate() {
-            if wake.try_recv().is_ok() {
-                woken.push(i);
-            }
-            while wake.try_recv().is_ok() {}
-        }
-        woken
+        };
+        watched(project, interests)
     }
 
     fn interests() -> Vec<Interest> {
@@ -1307,7 +1015,7 @@ mod tests {
             let version = Arc::new(Mutex::new(0));
             let server = lists(version.clone(), vec![before, after]).await;
             let (project, mut wakes) = project(&server, interests()).await;
-            let mut detector = Detector::new(&project, kind, "r");
+            let mut detector = Poller::new(&project, &(kind, "r".into()));
             assert_eq!(detector.poll().await, None);
             assert!(woken(&mut wakes).is_empty(), "{kind:?}: the first answer");
             assert_eq!(detector.poll().await, None);
@@ -1341,7 +1049,7 @@ mod tests {
         ];
         let server = lists(version.clone(), bodies).await;
         let (project, mut wakes) = project(&server, interests()).await;
-        let mut detector = Detector::new(&project, Kind::Pushes, "r");
+        let mut detector = Poller::new(&project, &(Kind::Pushes, "r".into()));
         detector.poll().await;
         assert!(woken(&mut wakes).is_empty(), "the first answer");
         *version.lock().unwrap() = 1;
@@ -1382,7 +1090,7 @@ mod tests {
         })
         .await;
         let (project, mut wakes) = project(&server, interests()).await;
-        let mut detector = Detector::new(&project, Kind::WorkItems, "");
+        let mut detector = Poller::new(&project, &(Kind::WorkItems, "".into()));
         detector.poll().await;
         assert!(
             woken(&mut wakes).is_empty(),
@@ -1421,15 +1129,15 @@ mod tests {
         })
         .await;
         let (project, mut wakes) = project(&server, interests()).await;
-        let mut detector = Detector::new(&project, Kind::WorkItems, "");
+        let mut detector = Poller::new(&project, &(Kind::WorkItems, "".into()));
         detector.poll().await;
         detector.poll().await;
         assert!(detector.failing);
         assert!(woken(&mut wakes).is_empty(), "the poll failed");
-        assert_eq!(detector.revisions.watermark.as_deref(), Some("w0"));
+        assert_eq!(detector.detector.revisions.watermark.as_deref(), Some("w0"));
         detector.poll().await;
         assert_eq!(woken(&mut wakes), [3, 4]);
-        assert_eq!(detector.revisions.watermark.as_deref(), Some("w2"));
+        assert_eq!(detector.detector.revisions.watermark.as_deref(), Some("w2"));
     }
 
     /// A feed that is not there gives way to WIQL on the changed date, from
@@ -1449,9 +1157,9 @@ mod tests {
         })
         .await;
         let (project, mut wakes) = project(&server, interests()).await;
-        let mut detector = Detector::new(&project, Kind::WorkItems, "");
+        let mut detector = Poller::new(&project, &(Kind::WorkItems, "".into()));
         assert_eq!(detector.poll().await, None);
-        assert!(detector.revisions.wiql);
+        assert!(detector.detector.revisions.wiql);
         assert!(
             woken(&mut wakes).is_empty(),
             "WIQL's first answer sets the start"
@@ -1476,19 +1184,19 @@ mod tests {
     async fn a_token_refused_everywhere_keeps_the_feed() {
         let server = Server::start(|_| (403, vec![], String::new())).await;
         let (forbidden, _) = project(&server, vec![]).await;
-        let mut detector = Detector::new(&forbidden, Kind::WorkItems, "");
+        let mut detector = Poller::new(&forbidden, &(Kind::WorkItems, "".into()));
         assert_eq!(detector.poll().await, None);
-        assert!(!detector.revisions.wiql);
+        assert!(!detector.detector.revisions.wiql);
         assert!(detector.failing);
-        assert!(forbidden.context.token.lock().await.is_some());
+        assert!(forbidden.scope.context.token.lock().await.is_some());
         assert_eq!(server.requests().len(), 2, "the feed, then WIQL");
         let server = Server::start(|_| (401, vec![], String::new())).await;
         let (refused, _) = project(&server, vec![]).await;
-        let mut detector = Detector::new(&refused, Kind::WorkItems, "");
+        let mut detector = Poller::new(&refused, &(Kind::WorkItems, "".into()));
         assert_eq!(detector.poll().await, None);
-        assert!(!detector.revisions.wiql);
+        assert!(!detector.detector.revisions.wiql);
         assert_eq!(server.requests().len(), 1, "the feed only");
-        assert!(refused.context.token.lock().await.is_none());
+        assert!(refused.scope.context.token.lock().await.is_none());
     }
 
     /// A failed poll has the detector wait the normal pace, window open or
@@ -1509,24 +1217,24 @@ mod tests {
         let (project, _) = project(&server, vec![]).await;
         let now = Instant::now();
         for kind in [Kind::Pulls, Kind::Builds] {
-            let mut detector = Detector::new(&project, kind, "");
+            let mut detector = Poller::new(&project, &(kind, "".into()));
             detector.window_until = Some(now + WINDOW_FOR);
             assert_eq!(detector.period(now), RHYTHM.window);
             assert_eq!(detector.poll().await, None);
             assert_eq!(detector.period(now), RHYTHM.normal, "{kind:?}");
-            let token = project.context.token.lock().await;
+            let token = project.scope.context.token.lock().await;
             assert!(token.is_some(), "{kind:?} keeps the token");
         }
-        let mut pushes = Detector::new(&project, Kind::Pushes, "r");
+        let mut pushes = Poller::new(&project, &(Kind::Pushes, "r".into()));
         assert_eq!(pushes.poll().await, None);
         assert_eq!(pushes.period(now), RHYTHM.normal);
         assert!(
-            project.context.token.lock().await.is_none(),
+            project.scope.context.token.lock().await.is_none(),
             "a 401 drops it"
         );
-        *project.context.token.lock().await = Some(("t2".into(), None, Stamp::default()));
+        *project.scope.context.token.lock().await = Some(("t2".into(), None, Stamp::default()));
         assert_eq!(pushes.poll().await, None);
-        let token = project.context.token.lock().await;
+        let token = project.scope.context.token.lock().await;
         assert!(token.is_some(), "the next 401 keeps it");
     }
 
@@ -1550,7 +1258,7 @@ mod tests {
         })
         .await;
         let (project, _) = project(&server, vec![]).await;
-        let mut detector = Detector::new(&project, Kind::Pulls, "");
+        let mut detector = Poller::new(&project, &(Kind::Pulls, "".into()));
         let now = Instant::now();
         assert_eq!(detector.poll().await, None);
         assert_eq!(detector.period(now), SLOWEST);

@@ -13,34 +13,24 @@
 //! detail. The first answer only sets what the next ones are compared with.
 //!
 //! A detector polls every [`PERIOD`](crate::tools::throttle::PERIOD),
-//! slower on a busy repository ([`Throttle`]). A target's `refresh` has the
-//! detectors it depends on poll at once and opens their fast window: they
-//! poll at the provider's window pace for [`WINDOW_FOR`], a change seen on
-//! the forge after an action taking from 5 to 24 s to show in these lists.
-//! After a failed poll, a detector waits the provider's normal pace, unless
-//! a `refresh` asks it to poll.
+//! slower on a busy repository, as the shared registry does
+//! ([`crate::tools::detect`]): a `200` counts as a change for its throttle.
+//! A target's `refresh` opens the fast window of the detectors it depends
+//! on: a change made on the forge takes from 5 to 24 s to show in these
+//! lists.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::oneshot;
-use tokio::task::AbortHandle;
-use tokio::time::Instant;
 
 use super::issues::Accounts;
 use super::read::{HEADERS, is_repo};
 use super::{RHYTHM, Tokens, owner_token};
 use crate::credentials::Credentials;
-use crate::tools::http::{self, Http};
-use crate::tools::pace::WINDOW_FOR;
-use crate::tools::throttle::Throttle;
-
-/// How long a `refresh` waits for its detectors before the target reads
-/// anyway, on a slow or unreachable forge.
-const ASKED_FOR: Duration = Duration::from_secs(5);
+use crate::tools::detect::{self, Polled};
+use crate::tools::http::Http;
+use crate::tools::pace::Rhythm;
 
 /// What a detector polls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -234,321 +224,82 @@ pub struct Access {
 }
 
 /// The repositories detected, shared by every target of the provider.
-#[derive(Clone, Default)]
-pub struct Detection {
-    repos: Arc<Mutex<HashMap<String, Weak<Repository>>>>,
+pub type Detection = detect::Detection<Repository>;
+/// A target's registration, and what its detectors send it.
+pub type Detected = detect::Detected<Repository>;
+
+/// Registers a target of `owner/name` about `interest`: the detectors it
+/// depends on run while it stays registered.
+pub fn watch(
+    detection: &Detection,
+    access: &Access,
+    owner: &str,
+    name: &str,
+    interest: Interest,
+) -> Detected {
+    let key = format!("{owner}/{name}").to_ascii_lowercase();
+    let repository = || Repository {
+        access: access.clone(),
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    };
+    detection.watch(key, repository, interest)
 }
 
-impl Detection {
-    /// Registers a target of `owner/name` about `interest`: the detectors it
-    /// depends on run while it stays registered.
-    pub fn watch(&self, access: &Access, owner: &str, name: &str, interest: Interest) -> Detected {
-        let key = format!("{owner}/{name}").to_ascii_lowercase();
-        let repo = {
-            let mut repos = self.repos.lock().unwrap();
-            repos.retain(|_, repo| repo.strong_count() > 0);
-            if let Some(repo) = repos.get(&key).and_then(Weak::upgrade) {
-                repo
-            } else {
-                let repo = Arc::new(Repository {
-                    access: access.clone(),
-                    owner: owner.to_owned(),
-                    name: name.to_owned(),
-                    state: Mutex::default(),
-                });
-                repos.insert(key, Arc::downgrade(&repo));
-                repo
-            }
-        };
-        let (wake, wakes) = unbounded_channel();
-        let id = repo.add(interest, wake);
-        Detected {
-            watcher: Watcher { repo, id },
-            wakes,
-        }
-    }
-
-    /// The repositories detected and their detectors running, for tests.
-    #[cfg(test)]
-    pub fn running(&self) -> Vec<(String, usize)> {
-        let repos = self.repos.lock().unwrap();
-        let mut running: Vec<(String, usize)> = repos
-            .iter()
-            .filter_map(|(key, repo)| {
-                let repo = repo.upgrade()?;
-                let count = repo.state.lock().unwrap().detectors.len();
-                Some((key.clone(), count))
-            })
-            .collect();
-        running.sort();
-        running
-    }
-}
-
-/// One repository detected, held by the targets registered on it.
+/// One repository detected: what its detectors share.
 pub struct Repository {
     access: Access,
     owner: String,
     name: String,
-    state: Mutex<State>,
 }
 
-#[derive(Default)]
-struct State {
-    last_id: u64,
-    /// Each target registered, and where to wake it.
-    watchers: HashMap<u64, (Interest, UnboundedSender<()>)>,
-    detectors: HashMap<Kind, Running>,
-}
+impl detect::Scope for Repository {
+    type Interest = Interest;
+    type Key = Kind;
+    type Moved = Moved;
+    type Detector = RepoDetector;
 
-/// A detector's task, stopped when dropped.
-struct Running {
-    task: AbortHandle,
-    /// Asks for a poll now, answered once done.
-    asks: UnboundedSender<oneshot::Sender<()>>,
-}
+    const RHYTHM: Rhythm = RHYTHM;
 
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-impl Repository {
-    /// Registers a target, starting the detectors it needs that no other
-    /// target started.
-    fn add(self: &Arc<Self>, interest: Interest, wake: UnboundedSender<()>) -> u64 {
-        let mut state = self.state.lock().unwrap();
-        state.last_id += 1;
-        let id = state.last_id;
-        for kind in interest.kinds {
-            if !state.detectors.contains_key(kind) {
-                let (asks, asked) = unbounded_channel();
-                let detector = Detector::new(self, *kind);
-                let task = tokio::spawn(detector.run(asked)).abort_handle();
-                state.detectors.insert(*kind, Running { task, asks });
-            }
-        }
-        state.watchers.insert(id, (interest, wake));
-        id
+    fn keys(interest: &Interest) -> Vec<Kind> {
+        interest.kinds.to_vec()
     }
 
-    /// Unregisters target `id`, stopping the detectors no target needs.
-    fn remove(&self, id: u64) {
-        let mut state = self.state.lock().unwrap();
-        state.watchers.remove(&id);
-        let State {
-            watchers,
-            detectors,
-            ..
-        } = &mut *state;
-        detectors.retain(|kind, _| watchers.values().any(|(i, _)| i.kinds.contains(kind)));
+    fn touches(moved: &Moved, interest: &Interest) -> bool {
+        moved.touches(interest)
     }
 
-    /// Wakes the targets one of `moved` touches.
-    fn wake(&self, moved: &[Moved]) {
-        let state = self.state.lock().unwrap();
-        for (interest, wake) in state.watchers.values() {
-            if moved.iter().any(|m| m.touches(interest)) {
-                let _ = wake.send(());
-            }
+    fn detector(&self, kind: &Kind) -> RepoDetector {
+        RepoDetector {
+            kind: *kind,
+            access: self.access.clone(),
+            owner: self.owner.clone(),
+            name: self.name.clone(),
+            last: None,
         }
     }
 }
 
-/// A target's registration; dropping it unregisters the target.
-pub struct Watcher {
-    repo: Arc<Repository>,
-    id: u64,
-}
-
-impl Watcher {
-    /// Updates what the target is about.
-    pub fn learn(&self, update: impl FnOnce(&mut Interest)) {
-        let mut state = self.repo.state.lock().unwrap();
-        if let Some((interest, _)) = state.watchers.get_mut(&self.id) {
-            update(interest);
-        }
-    }
-
-    /// Has the detectors the target depends on poll now, opening their fast
-    /// window, and returns once they did, could not, or [`ASKED_FOR`] passed.
-    pub async fn poll_now(&self) {
-        let answers: Vec<oneshot::Receiver<()>> = {
-            let state = self.repo.state.lock().unwrap();
-            let kinds = state
-                .watchers
-                .get(&self.id)
-                .map_or(&[][..], |(i, _)| i.kinds);
-            kinds
-                .iter()
-                .filter_map(|kind| state.detectors.get(kind))
-                .map(|running| {
-                    let (answer, answered) = oneshot::channel();
-                    let _ = running.asks.send(answer);
-                    answered
-                })
-                .collect()
-        };
-        let all = async {
-            for answered in answers {
-                let _ = answered.await;
-            }
-        };
-        let _ = tokio::time::timeout(ASKED_FOR, all).await;
-    }
-}
-
-impl Drop for Watcher {
-    fn drop(&mut self) {
-        self.repo.remove(self.id);
-    }
-}
-
-/// A target's registration, and what its detectors send it.
-pub struct Detected {
-    pub watcher: Watcher,
-    wakes: UnboundedReceiver<()>,
-}
-
-impl Detected {
-    /// Waits until `deadline`, for a `refresh`, or for a detector to say the
-    /// target moved; what piled up counts as one. A `refresh` calls
-    /// `refreshed`, and has the target's detectors poll first: what they
-    /// wake is the reading that follows. A rate limit (`limited`) holds the
-    /// wait whatever comes. `false` once the core is gone.
-    pub async fn wait(
-        &mut self,
-        deadline: Instant,
-        refreshes: &mut UnboundedReceiver<()>,
-        limited: bool,
-        mut refreshed_now: impl FnMut(),
-    ) -> bool {
-        let mut refreshed = false;
-        loop {
-            // A pending `refresh` wins over a wake or the deadline, for its
-            // detectors to poll before the reading.
-            tokio::select! {
-                biased;
-                refresh = refreshes.recv() => {
-                    if refresh.is_none() {
-                        return false;
-                    }
-                    while refreshes.try_recv().is_ok() {}
-                    refreshed = true;
-                    refreshed_now();
-                    if !limited {
-                        break;
-                    }
-                }
-                Some(()) = self.wakes.recv() => {
-                    if !limited {
-                        break;
-                    }
-                }
-                () = tokio::time::sleep_until(deadline) => break,
-            }
-        }
-        if refreshed {
-            self.watcher.poll_now().await;
-        }
-        while self.wakes.try_recv().is_ok() {}
-        true
-    }
-}
-
-/// One detector of a repository.
-struct Detector {
-    repo: Weak<Repository>,
+/// One detector of a repository: the list it polls, and the last read.
+pub struct RepoDetector {
     kind: Kind,
     access: Access,
     owner: String,
     name: String,
-    /// The last list read.
     last: Option<Arc<Value>>,
-    throttle: Throttle,
-    /// Until when a `refresh` keeps the pace fast.
-    window_until: Option<Instant>,
-    /// Whether the last poll failed: a lasting failure is logged once, and
-    /// the next poll waits the normal pace.
-    failing: bool,
-    /// Whether a `401` dropped the token since the last poll that answered:
-    /// the next `401`s keep the token asked since, which asking again would
-    /// not change.
-    dropped: bool,
 }
 
-impl Detector {
-    fn new(repo: &Arc<Repository>, kind: Kind) -> Self {
-        Self {
-            repo: Arc::downgrade(repo),
-            kind,
-            access: repo.access.clone(),
-            owner: repo.owner.clone(),
-            name: repo.name.clone(),
-            last: None,
-            throttle: Throttle::default(),
-            window_until: None,
-            failing: false,
-            dropped: false,
-        }
-    }
+impl detect::Detector for RepoDetector {
+    type Moved = Moved;
 
-    /// Polls, wakes what moved, waits for its period or to be asked, and
-    /// again. Those who asked are answered once the poll that follows is
-    /// done; while it cannot poll (a rate limit, no token), at once.
-    async fn run(mut self, mut asked: UnboundedReceiver<oneshot::Sender<()>>) {
-        let mut waiting: Vec<oneshot::Sender<()>> = Vec::new();
-        loop {
-            let limited = self.poll().await;
-            for answer in waiting.drain(..) {
-                let _ = answer.send(());
-            }
-            let now = Instant::now();
-            let deadline = now + limited.unwrap_or_else(|| self.period(now));
-            loop {
-                tokio::select! {
-                    () = tokio::time::sleep_until(deadline) => break,
-                    answer = asked.recv() => {
-                        let Some(answer) = answer else {
-                            return;
-                        };
-                        self.window_until = Some(Instant::now() + WINDOW_FOR);
-                        if limited.is_some() {
-                            let _ = answer.send(());
-                            continue;
-                        }
-                        waiting.push(answer);
-                        while let Ok(answer) = asked.try_recv() {
-                            waiting.push(answer);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    /// The normal pace after a failed poll; else the window pace after a
-    /// `refresh`, else the throttle's.
-    fn period(&self, now: Instant) -> Duration {
-        if self.failing {
-            RHYTHM.normal
-        } else if self.window_until.is_some_and(|until| now < until) {
-            RHYTHM.window
-        } else {
-            self.throttle.period()
-        }
-    }
-
-    /// One poll, and how long to wait when it cannot poll: what a rate
-    /// limit asks, or the normal pace without a token, which asking its
-    /// source again sooner (`gh auth token`) would not bring.
-    async fn poll(&mut self) -> Option<Duration> {
+    /// A `304` changed nothing; a `200` compares the list with the last
+    /// one. Without a token, the detector waits: asking its source again
+    /// sooner (`gh auth token`) would not bring one.
+    async fn poll(&mut self) -> Polled<Moved> {
         let a = &self.access;
         let Some(token) = owner_token(&a.tokens, &a.accounts, &a.credentials, &self.owner).await
         else {
-            return Some(RHYTHM.normal);
+            return Polled::NoToken;
         };
         let url = format!(
             "{}/repos/{}/{}/{}",
@@ -557,61 +308,42 @@ impl Detector {
             self.name,
             self.kind.path()
         );
-        match a.http.get_changed(&url, &token, HEADERS).await {
-            Ok((body, changed)) => {
-                self.failing = false;
-                self.dropped = false;
-                if changed {
-                    self.saw(body);
-                } else {
-                    self.throttle.answered(false);
-                }
-                None
-            }
-            Err(failure) => self.failed(failure),
-        }
-    }
-
-    /// A new list: what moved since the last one wakes what it touches.
-    fn saw(&mut self, body: Arc<Value>) {
-        if let Some(before) = &self.last {
-            self.throttle.answered(true);
-            let repo = format!("{}/{}", self.owner, self.name);
-            let moved = moved(self.kind, before, &body, &repo);
-            if !moved.is_empty()
-                && let Some(repo) = self.repo.upgrade()
-            {
-                repo.wake(&moved);
-            }
-        }
-        self.last = Some(body);
-    }
-
-    /// A failed poll, and how long a rate limit asks to wait. A refused
-    /// token (`401`) is forgotten, as by a target, once until a poll
-    /// answers; a `403` keeps it.
-    fn failed(&mut self, failure: http::Failure) -> Option<Duration> {
-        if failure == http::Failure::Unauthorized && !std::mem::replace(&mut self.dropped, true) {
-            let mut tokens = self.access.tokens.lock().unwrap();
-            tokens.by_owner.remove(&self.owner);
-        }
-        if !std::mem::replace(&mut self.failing, true) {
-            let why = match &failure {
-                http::Failure::Unreachable(why) => format!("unreachable: {why}"),
-                http::Failure::Unreadable(why) => why.clone(),
-                other => format!("{other:?}"),
+        let (body, changed) = match a.http.get_changed(&url, &token, HEADERS).await {
+            Ok(answer) => answer,
+            Err(failure) => return Polled::Failed(failure),
+        };
+        if !changed {
+            return Polled::Answered {
+                changed: false,
+                moved: Vec::new(),
             };
-            crate::log(format_args!(
-                "github.com/{}/{} {} detector: {why}",
-                self.owner,
-                self.name,
-                self.kind.name()
-            ));
         }
-        match failure {
-            http::Failure::Limited(wait) => Some(wait.unwrap_or(RHYTHM.normal)),
-            _ => None,
-        }
+        let polled = match &self.last {
+            Some(before) => {
+                let repo = format!("{}/{}", self.owner, self.name);
+                Polled::Answered {
+                    changed: true,
+                    moved: moved(self.kind, before, &body, &repo),
+                }
+            }
+            None => Polled::First,
+        };
+        self.last = Some(body);
+        polled
+    }
+
+    async fn drop_token(&mut self) {
+        let mut tokens = self.access.tokens.lock().unwrap();
+        tokens.by_owner.remove(&self.owner);
+    }
+
+    fn at(&self) -> String {
+        format!(
+            "github.com/{}/{} {} detector",
+            self.owner,
+            self.name,
+            self.kind.name()
+        )
     }
 }
 
@@ -619,8 +351,17 @@ impl Detector {
 mod tests {
     use serde_json::json;
 
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::time::Instant;
+
     use super::*;
     use crate::testing::Server;
+    use crate::tools::detect::testing::{watched, woken};
+    use crate::tools::detect::{Poller, Watched};
+    use crate::tools::pace::WINDOW_FOR;
 
     fn run(id: u64, updated: &str, branch: &str, repo: &str, sha: &str, prs: &[u64]) -> Value {
         let prs: Vec<Value> = prs.iter().map(|n| json!({ "number": n })).collect();
@@ -737,34 +478,13 @@ mod tests {
     fn repository(
         server: &Server,
         interests: Vec<Interest>,
-    ) -> (Arc<Repository>, Vec<UnboundedReceiver<()>>) {
-        let repo = Arc::new(Repository {
+    ) -> (Arc<Watched<Repository>>, Vec<UnboundedReceiver<()>>) {
+        let repository = Repository {
             access: access(server),
             owner: "o".into(),
             name: "r".into(),
-            state: Mutex::default(),
-        });
-        let mut wakes = Vec::new();
-        let mut state = repo.state.lock().unwrap();
-        for (id, interest) in interests.into_iter().enumerate() {
-            let (wake, woken) = unbounded_channel();
-            state.watchers.insert(id as u64, (interest, wake));
-            wakes.push(woken);
-        }
-        drop(state);
-        (repo, wakes)
-    }
-
-    /// Which targets were woken since the last call.
-    fn woken(wakes: &mut [UnboundedReceiver<()>]) -> Vec<usize> {
-        let mut woken = Vec::new();
-        for (i, wake) in wakes.iter_mut().enumerate() {
-            if wake.try_recv().is_ok() {
-                woken.push(i);
-            }
-            while wake.try_recv().is_ok() {}
-        }
-        woken
+        };
+        watched(repository, interests)
     }
 
     fn interests() -> Vec<Interest> {
@@ -858,7 +578,7 @@ mod tests {
             let version = Arc::new(Mutex::new(0));
             let server = lists(version.clone(), vec![before, after]).await;
             let (repo, mut wakes) = repository(&server, interests());
-            let mut detector = Detector::new(&repo, kind);
+            let mut detector = Poller::new(&repo, &kind);
             assert_eq!(detector.poll().await, None);
             assert!(woken(&mut wakes).is_empty(), "{kind:?}: the first answer");
             assert_eq!(detector.poll().await, None);
@@ -887,12 +607,12 @@ mod tests {
         })
         .await;
         let (repo, _) = repository(&server, vec![]);
-        let mut runs = Detector::new(&repo, Kind::Runs);
+        let mut runs = Poller::new(&repo, &Kind::Runs);
         assert_eq!(runs.poll().await, Some(Duration::from_secs(300)));
         assert!(runs.failing);
-        let mut pulls = Detector::new(&repo, Kind::Pulls);
+        let mut pulls = Poller::new(&repo, &Kind::Pulls);
         assert_eq!(pulls.poll().await, None);
-        assert!(repo.access.tokens.lock().unwrap().by_owner.is_empty());
+        assert!(repo.scope.access.tokens.lock().unwrap().by_owner.is_empty());
         if std::env::var(super::super::TOKEN_VAR).is_err() {
             assert_eq!(pulls.poll().await, Some(RHYTHM.normal));
         }
@@ -915,7 +635,8 @@ mod tests {
         .await;
         let (repo, _) = repository(&server, vec![]);
         let token = || {
-            repo.access
+            repo.scope
+                .access
                 .tokens
                 .lock()
                 .unwrap()
@@ -925,18 +646,19 @@ mod tests {
         };
         let now = Instant::now();
         for kind in [Kind::Runs, Kind::Pulls] {
-            let mut detector = Detector::new(&repo, kind);
+            let mut detector = Poller::new(&repo, &kind);
             detector.window_until = Some(now + WINDOW_FOR);
             assert_eq!(detector.period(now), RHYTHM.window);
             assert_eq!(detector.poll().await, None);
             assert_eq!(detector.period(now), RHYTHM.normal, "{kind:?}");
             assert_eq!(token().as_deref(), Some("t"), "{kind:?} keeps the token");
         }
-        let mut issues = Detector::new(&repo, Kind::Issues);
+        let mut issues = Poller::new(&repo, &Kind::Issues);
         assert_eq!(issues.poll().await, None);
         assert_eq!(issues.period(now), RHYTHM.normal);
         assert_eq!(token(), None, "a 401 drops the token");
-        repo.access
+        repo.scope
+            .access
             .tokens
             .lock()
             .unwrap()

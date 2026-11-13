@@ -103,7 +103,7 @@ impl GitHub {
             tokens: self.tokens.clone(),
             accounts: self.accounts.clone(),
         };
-        self.detection.watch(&access, owner, name, interest)
+        detect::watch(&self.detection, &access, owner, name, interest)
     }
 
     /// Follows the open issues of `repo`, or its issue `number`.
