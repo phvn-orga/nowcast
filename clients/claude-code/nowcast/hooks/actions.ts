@@ -993,27 +993,35 @@ const NUMBER_PARAMS = [
   'id',
 ]
 
+/** A positive integer, given as a number or as its digits. */
+function positive(value: unknown): number | undefined {
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
 /**
- * The forge action of a successful call to the MCP tool `tool`
+ * The forge actions of a successful call to the MCP tool `tool`
  * (`mcp__<server>__<name>`), when its server is GitHub's or Azure DevOps'
  * and the tool writes: its types from the tool's name, the repository and
- * number from its parameters, else from the pages `output` names.
+ * number from its parameters, else from the pages `output` names. A batch
+ * update of Azure DevOps work items gives one action per item.
  */
-export function mcpAction(
+export function mcpActions(
   tool: string,
   params: Record<string, unknown>,
   dir: string | undefined,
   output: string,
-): ForgeAction | null {
+): ForgeAction[] {
   const split = tool.lastIndexOf('__')
-  if (!tool.startsWith('mcp__') || split <= 4) return null
+  if (!tool.startsWith('mcp__') || split <= 4) return []
   const server = tool.slice(5, split).toLowerCase()
   const github = server.includes('github')
   const azure = /azure|devops|(^|[_-])ado([_-]|$)/.test(server)
-  if (!github && !azure) return null
+  if (!github && !azure) return []
   const words = nameWords(tool.slice(split + 2))
   const has = (...wanted: string[]) => wanted.some(word => words.includes(word))
-  if (has(...READ_WORDS) || !has(...WRITE_WORDS)) return null
+  if (has(...READ_WORDS) || !has(...WRITE_WORDS)) return []
   const joined = words.join('')
   const pr = joined.includes('pullrequest') || has('pr', 'prs')
   const issue = has('issue', 'issues', 'wit', 'subissue') || joined.includes('workitem')
@@ -1022,15 +1030,13 @@ export function mcpAction(
     (has('run', 'rerun') && !pr && !issue)
   const push = has('file', 'files', 'push', 'commit', 'branch')
   const types = ordered([...(pr || pipeline || push ? PR : []), ...(issue || (pr && has('merge')) ? ISSUES : [])])
-  if (types.length === 0) return null
+  if (types.length === 0) return []
   const text = (key: string) =>
     typeof params[key] === 'string' && params[key] !== '' ? (params[key] as string) : undefined
   let number: number | undefined
   for (const key of NUMBER_PARAMS) {
-    const value = params[key]
-    const parsed =
-      typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN
-    if (Number.isInteger(parsed) && parsed > 0 && (key !== 'id' || pr || issue)) {
+    const parsed = positive(params[key])
+    if (parsed !== undefined && (key !== 'id' || pr || issue)) {
       number = parsed
       break
     }
@@ -1047,7 +1053,7 @@ export function mcpAction(
         target = { remote: printed.remote }
       }
     }
-    return number === undefined ? { types, target } : { types, target, number }
+    return [number === undefined ? { types, target } : { types, target, number }]
   }
   const names: AzureNames = {}
   const org = text('organization') ?? text('org')
@@ -1059,8 +1065,21 @@ export function mcpAction(
   if (project !== undefined) names.project = project
   const repo = text('repositoryId') ?? text('repository') ?? text('repositoryName') ?? text('repo')
   if (repo !== undefined) names.repo = repo
+  // `wit_work_item_write` with `action: update_batch` names its items in
+  // `batchUpdates[].id`, several fields of one item apart.
+  const batch = number === undefined && issue ? batchIds(params.batchUpdates) : []
+  if (batch.length > 0) return batch.map(id => azureTarget(types, names, dir, id))
   if (number === undefined) number = printedAzure(output, pr)
-  return azureTarget(types, names, dir, number)
+  return [azureTarget(types, names, dir, number)]
+}
+
+/** The distinct ids of a batch's updates, in their order. */
+function batchIds(updates: unknown): number[] {
+  if (!Array.isArray(updates)) return []
+  const ids = updates.map(update =>
+    typeof update === 'object' && update !== null ? positive((update as { id?: unknown }).id) : undefined,
+  )
+  return [...new Set(ids.filter(id => id !== undefined))]
 }
 
 /** The number of an Azure DevOps PR or work item page named in `text`, or of the PR its JSON gives. */

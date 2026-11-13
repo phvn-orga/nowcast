@@ -3,7 +3,7 @@
 // tools, without the engine.
 
 import { expect, test } from 'claude-code/testing'
-import { azureNames, branchMoves, commandActions, mcpAction, resolveDir, simpleCommands } from '../hooks/actions'
+import { azureNames, branchMoves, commandActions, mcpActions, resolveDir, simpleCommands } from '../hooks/actions'
 import { azure } from '../hooks/forge'
 
 const CWD = '/lab/repo'
@@ -260,63 +260,83 @@ test('an Azure DevOps remote is completed from the directory, a work item by its
 })
 
 test('MCP tools of GitHub and Azure DevOps servers that write are classified by name', () => {
-  const mcp = (tool: string, params: Record<string, unknown> = {}, output = '') => mcpAction(tool, params, CWD, output)
-  expect(mcp('mcp__github__merge_pull_request', { owner: 'o', repo: 'r', pull_number: 4 })).toEqual({
-    types: MERGE,
-    target: { remote: GH },
-    number: 4,
-  })
+  const mcp = (tool: string, params: Record<string, unknown> = {}, output = '') => mcpActions(tool, params, CWD, output)
+  expect(mcp('mcp__github__merge_pull_request', { owner: 'o', repo: 'r', pull_number: 4 })).toEqual([
+    {
+      types: MERGE,
+      target: { remote: GH },
+      number: 4,
+    },
+  ])
   expect(
     mcp(
       'mcp__claude_ai_GitHub__create_pull_request',
       { owner: 'o', repo: 'r' },
       '{"html_url":"https://github.com/o/r/pull/9"}',
     ),
-  ).toEqual({
-    types: PR,
-    target: { remote: GH },
-    number: 9,
-  })
-  expect(mcp('mcp__github__add_issue_comment', { owner: 'o', repo: 'r', issue_number: '3' })).toEqual({
-    types: ['issues'],
-    target: { remote: GH },
-    number: 3,
-  })
-  expect(mcp('mcp__github__issue_write', { method: 'create' })).toEqual({ types: ['issues'], target: { dir: CWD } })
-  expect(mcp('mcp__github__push_files', { owner: 'o', repo: 'r', branch: 'b' })).toEqual({
-    types: PR,
-    target: { remote: GH },
-  })
-  expect(mcp('mcp__github__rerun_workflow_run', { owner: 'o', repo: 'r', run_id: 5 })).toEqual({
-    types: PR,
-    target: { remote: GH },
-  })
+  ).toEqual([
+    {
+      types: PR,
+      target: { remote: GH },
+      number: 9,
+    },
+  ])
+  expect(mcp('mcp__github__add_issue_comment', { owner: 'o', repo: 'r', issue_number: '3' })).toEqual([
+    {
+      types: ['issues'],
+      target: { remote: GH },
+      number: 3,
+    },
+  ])
+  expect(mcp('mcp__github__issue_write', { method: 'create' })).toEqual([{ types: ['issues'], target: { dir: CWD } }])
+  expect(mcp('mcp__github__push_files', { owner: 'o', repo: 'r', branch: 'b' })).toEqual([
+    {
+      types: PR,
+      target: { remote: GH },
+    },
+  ])
+  expect(mcp('mcp__github__rerun_workflow_run', { owner: 'o', repo: 'r', run_id: 5 })).toEqual([
+    {
+      types: PR,
+      target: { remote: GH },
+    },
+  ])
   expect(
     mcp('mcp__azure-devops__repo_update_pull_request', { project: 'proj', repositoryId: 'repo', pullRequestId: 6 }),
-  ).toEqual({
-    types: PR,
-    target: { dir: CWD, azure: { project: 'proj', repo: 'repo' } },
-    number: 6,
-  })
-  expect(mcp('mcp__ado__wit_add_work_item_comment', { project: 'proj', workItemId: 8 })).toEqual({
-    types: ['issues'],
-    target: { dir: CWD, azure: { project: 'proj' } },
-    number: 8,
-  })
-  expect(mcp('mcp__ado__wit_update_work_item', { id: 9 })).toEqual({
-    types: ['issues'],
-    target: { dir: CWD, azure: {} },
-    number: 9,
-  })
-  expect(mcp('mcp__ado__repo_create_pull_request', { project: 'proj' }, '{"pullRequestId": 15}')).toEqual({
-    types: PR,
-    target: { dir: CWD, azure: { project: 'proj' } },
-    number: 15,
-  })
-  expect(mcp('mcp__ado__pipelines_run_pipeline', { project: 'proj', pipelineId: 2 })).toEqual({
-    types: PR,
-    target: { dir: CWD, azure: { project: 'proj' } },
-  })
+  ).toEqual([
+    {
+      types: PR,
+      target: { dir: CWD, azure: { project: 'proj', repo: 'repo' } },
+      number: 6,
+    },
+  ])
+  expect(mcp('mcp__ado__wit_add_work_item_comment', { project: 'proj', workItemId: 8 })).toEqual([
+    {
+      types: ['issues'],
+      target: { dir: CWD, azure: { project: 'proj' } },
+      number: 8,
+    },
+  ])
+  expect(mcp('mcp__ado__wit_update_work_item', { id: 9 })).toEqual([
+    {
+      types: ['issues'],
+      target: { dir: CWD, azure: {} },
+      number: 9,
+    },
+  ])
+  expect(mcp('mcp__ado__repo_create_pull_request', { project: 'proj' }, '{"pullRequestId": 15}')).toEqual([
+    {
+      types: PR,
+      target: { dir: CWD, azure: { project: 'proj' } },
+      number: 15,
+    },
+  ])
+  expect(mcp('mcp__ado__pipelines_run_pipeline', { project: 'proj', pipelineId: 2 })).toEqual([
+    {
+      types: PR,
+      target: { dir: CWD, azure: { project: 'proj' } },
+    },
+  ])
   for (const tool of [
     'mcp__github__get_pull_request',
     'mcp__github__list_issues',
@@ -328,8 +348,55 @@ test('MCP tools of GitHub and Azure DevOps servers that write are classified by 
     'mcp__claude_ai_Todoist__add-tasks',
     'Bash',
   ]) {
-    expect([tool, mcp(tool, { owner: 'o', repo: 'r' })]).toEqual([tool, null])
+    expect([tool, mcp(tool, { owner: 'o', repo: 'r' })]).toEqual([tool, []])
   }
+})
+
+test('the grouped writes of the Azure DevOps MCP server take their number from their parameters', () => {
+  const mcp = (tool: string, params: Record<string, unknown>, output = '') =>
+    mcpActions(`mcp__ado__${tool}`, { project: 'proj', ...params }, CWD, output)
+  const repo = { project: 'proj', repo: 'repo' }
+  const pr = (number: number) => [{ types: PR, target: { dir: CWD, azure: repo }, number }]
+  const item = (number: number) => ({ types: ['issues'], target: { dir: CWD, azure: { project: 'proj' } }, number })
+  const branch = { repositoryId: 'repo', branchName: 'feat' }
+  expect(
+    mcp(
+      'repo_pull_request_write',
+      { action: 'create', repositoryId: 'repo', sourceRefName: 'refs/heads/feat', targetRefName: 'refs/heads/main' },
+      '{"pullRequestId": 21}',
+    ),
+  ).toEqual(pr(21))
+  expect(
+    mcp('repo_pull_request_write', { action: 'update', repositoryId: 'repo', pullRequestId: 21, autoComplete: true }),
+  ).toEqual(pr(21))
+  expect(
+    mcp('repo_pull_request_write', { action: 'vote', repositoryId: 'repo', pullRequestId: '21', vote: 'Approved' }),
+  ).toEqual(pr(21))
+  expect(
+    mcp('repo_pull_request_thread_write', { action: 'reply', repositoryId: 'repo', pullRequestId: 21, threadId: 3 }),
+  ).toEqual(pr(21))
+  for (const [tool, params] of [
+    ['repo_create_branch', branch],
+    ['repo_file_write', { ...branch, action: 'update', path: '/a.ts', content: '', commitMessage: 'm' }],
+    ['pipelines_write', { action: 'run_pipeline', pipelineId: 2 }],
+    ['pipelines_write', { action: 'update_build_stage', buildId: 7, stageName: 'build', updateType: 'retry' }],
+  ] as const) {
+    const azure = 'repositoryId' in params ? repo : { project: 'proj' }
+    expect([tool, mcp(tool, params)]).toEqual([tool, [{ types: PR, target: { dir: CWD, azure } }]])
+  }
+  expect(mcp('wit_work_item_write', { action: 'create', workItemType: 'Task', fields: [] })).toEqual([
+    { types: ['issues'], target: { dir: CWD, azure: { project: 'proj' } } },
+  ])
+  expect(mcp('wit_work_item_write', { action: 'update', id: 9, updates: [] })).toEqual([item(9)])
+  expect(mcp('wit_work_item_comment_write', { action: 'add', workItemId: 8, text: 't' })).toEqual([item(8)])
+  expect(mcp('wit_work_item_comment_write', { action: 'update', workItemId: 8, commentId: 2, text: 't' })).toEqual([
+    item(8),
+  ])
+  // A batch update names its items in `batchUpdates[].id`: a scope for each.
+  const field = (id: unknown) => ({ op: 'Replace', id, path: '/fields/System.State', value: 'Done' })
+  expect(
+    mcp('wit_work_item_write', { action: 'update_batch', batchUpdates: [field(4), field('5'), field(4), field(0)] }),
+  ).toEqual([item(4), item(5)])
 })
 
 test('the commands that may move a branch name the directory they ran in', () => {

@@ -22,7 +22,7 @@ import {
   azureNames,
   azureRemote,
   commandActions,
-  mcpAction,
+  mcpActions,
   ordered,
   resolveDir,
 } from './actions'
@@ -72,8 +72,7 @@ export function registerForge(on: On): void {
       actions = commandActions(e.command, cwd, stdout, stderr)
     } else {
       const output = `${result.text ?? ''}\n${typeof value === 'string' ? value : JSON.stringify(value ?? null)}`
-      const found = mcpAction(e.tool, e as unknown as Record<string, unknown>, cwd, output)
-      actions = found === null ? [] : [found]
+      actions = mcpActions(e.tool, e as unknown as Record<string, unknown>, cwd, output)
     }
     if (actions.length > 0) {
       // The tool's answer waits for nothing.
