@@ -3,13 +3,21 @@
 //! its number, through the REST API ([`read`], [`timeline`]) at the pace of
 //! [`RHYTHM`]. Work items belong to the project, not to the repository: the
 //! tracker is the project, whose open work items, and one work item, are
-//! followed at the normal pace ([`issues`]). Azure DevOps gives no `ETag` and counts every request
-//! against a budget: the core publishes only what changed, and a reading
-//! whose answer asks to slow down is a rate limit ([`slow_down`]). The token
+//! followed too ([`issues`]).
+//!
+//! The detectors of each project and repository ([`detect`]) see what moved
+//! there and wake the targets it touches, which then read in detail. A
+//! branch still reads at the normal pace what no detector sees (the
+//! statuses and policy evaluations of its PR), faster while a CI is
+//! expected or runs; the work items at a slow safety pace. Azure DevOps
+//! gives no `ETag` and counts every request against a budget: the core
+//! publishes only what changed, and a reading whose answer asks to slow
+//! down is a rate limit ([`slow_down`]). The token
 //! comes from the source the user chose, `az` or a personal access token
 //! ([`token`]); [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and
 //! the token, for tests.
 
+mod detect;
 mod issues;
 mod read;
 mod timeline;
@@ -27,8 +35,9 @@ use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::State;
 use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http, encode};
-use crate::tools::pace::{Pace, Rhythm, wait_or_refresh};
+use crate::tools::pace::{Pace, Rhythm};
 use crate::tools::remote;
+use detect::{Detected, Detection, Interest};
 use issues::Tracker;
 
 /// Azure DevOps' REST API, the organisation first in each path.
@@ -90,6 +99,7 @@ struct Context {
 
 pub struct Azure {
     context: Context,
+    detection: Detection,
 }
 
 impl Azure {
@@ -106,18 +116,28 @@ impl Azure {
                 accounts: issues::Accounts::default(),
                 kinds: issues::Kinds::default(),
             },
+            detection: Detection::default(),
         }
     }
 
     /// Follows the open work items of the project of `repo`, or its work
     /// item `number`.
     fn follow_tracker(&self, repo: &Repo, number: Option<u64>, updates: Updates) -> Watch {
+        let names = Names::of(repo);
+        let interest = Interest {
+            kinds: detect::TRACKER,
+            repo: names.repo.clone(),
+            issue: number,
+            tracker: number.is_none(),
+            ..Interest::default()
+        };
+        let detected = self.detection.watch(&self.context, &names, interest);
         let tracker = Tracker {
             context: self.context.clone(),
-            names: Names::of(repo),
+            names,
             number,
         };
-        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes, detected))
     }
 }
 
@@ -132,13 +152,26 @@ impl Provider for Azure {
     }
 
     fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
+        let names = Names::of(repo);
+        let (branch, pr) = match &head {
+            Head::Branch(branch) => (Some(branch.clone()), None),
+            Head::Pr(number) => (None, Some(*number)),
+        };
+        let interest = Interest {
+            kinds: detect::BRANCH,
+            repo: names.repo.clone(),
+            branch,
+            pr,
+            ..Interest::default()
+        };
+        let detected = self.detection.watch(&self.context, &names, interest);
         let branch = Branch {
             context: self.context.clone(),
-            names: Names::of(repo),
+            names,
             head,
             memory: read::Memory::default(),
         };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes, detected))
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -494,16 +527,23 @@ struct Branch {
 }
 
 impl Branch {
-    /// Reads, sends what it read, waits as the pace says or for a
-    /// `refresh`, and again, until the core is gone. A rate limit is waited
-    /// out whatever the refreshes.
-    async fn follow(mut self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    /// Reads, sends what it read, waits as the pace says, for a detector
+    /// to say the branch moved, or for a `refresh`, and again, until the
+    /// core is gone. A `refresh` that comes during a reading is answered by
+    /// the next one. A rate limit is waited out whatever comes.
+    async fn follow(
+        mut self,
+        updates: Updates,
+        mut refreshes: UnboundedReceiver<()>,
+        mut detected: Detected,
+    ) {
         let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
             let (outcome, delay) = match outcome {
                 Ok(mut reading) => {
+                    self.learn(&detected, &reading);
                     let delay = paced(&mut pace, &mut reading, now);
                     (Ok(reading), delay)
                 }
@@ -517,10 +557,26 @@ impl Branch {
                 return;
             }
             let refreshed = || pace.refreshed(Instant::now());
-            if !wait_or_refresh(now + delay, &mut refreshes, wait.is_some(), refreshed).await {
+            if !detected
+                .wait(now + delay, &mut refreshes, wait.is_some(), refreshed)
+                .await
+            {
                 return;
             }
         }
+    }
+
+    /// Tells the detectors what `reading` found: the commit read, and the
+    /// branch's PR, or the PR's source branch when it is of this
+    /// repository.
+    fn learn(&self, detected: &Detected, reading: &BranchReading) {
+        detected.watcher.learn(|interest| {
+            interest.sha.clone_from(&reading.head_sha);
+            match &self.head {
+                Head::Branch(_) => interest.pr = reading.pr.as_ref().map(|p| p.number),
+                Head::Pr(_) => interest.branch.clone_from(&reading.branch),
+            }
+        });
     }
 
     /// One reading, and how long a rate limit asks to wait.
@@ -925,5 +981,166 @@ mod tests {
         };
         assert_eq!(reading.head_sha.as_deref(), Some("abc"));
         assert_eq!(reading.ci.unwrap().sha, "abc");
+    }
+
+    /// A project where every branch is at `abc`, without PR or CI, and the
+    /// lists the detectors poll are `pushes` for the pushes and empty for
+    /// the rest.
+    async fn quiet_project(pushes: Arc<Mutex<Value>>) -> Server {
+        Server::start(move |request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/refs?") {
+                let branch = line.split("heads%2f").nth(1).unwrap_or_default();
+                let branch = branch.split('&').next().unwrap_or_default();
+                json!({ "value": [{ "name": format!("refs/heads/{branch}"), "objectId": "abc" }] })
+            } else if line.contains("/pushes?") {
+                pushes.lock().unwrap().clone()
+            } else if line.contains("/workitemrevisions?") {
+                json!({ "values": [], "continuationToken": "w", "isLastBatch": true })
+            } else {
+                json!({ "value": [] })
+            };
+            (200, vec![], body.to_string())
+        })
+        .await
+    }
+
+    /// The requests whose first line holds `what`.
+    fn asked(server: &Server, what: &str) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|r| r.lines().next().unwrap_or_default().contains(what))
+            .count()
+    }
+
+    const PULLS: &str = "/o/p/_apis/git/pullrequests?searchcriteria.status=active&";
+    const ACTIVE: &str = "/o/p/_apis/build/builds?statusfilter=inprogress,notstarted&";
+    const DONE: &str = "/o/p/_apis/build/builds?queryorder=finishtimedescending&";
+
+    /// Yields, a few milliseconds at a time, until `done`; fails past a
+    /// second.
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("not reached");
+    }
+
+    async fn provider(server: &Server) -> Azure {
+        let azure = Azure::new(
+            Http::new().unwrap(),
+            server.base(),
+            credentials::testing::none(),
+        );
+        *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
+        azure
+    }
+
+    /// The targets of two repositories of one project share its PRs, builds
+    /// and work items detectors, each polled once at the start; each
+    /// repository has its pushes detector; the detectors stop with the last
+    /// target.
+    #[tokio::test]
+    async fn one_project_detector_serves_the_targets_of_its_repositories() {
+        let server = quiet_project(Arc::new(Mutex::new(json!({ "value": [] })))).await;
+        let azure = provider(&server).await;
+        let r = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
+        let s = azure.recognise("git@ssh.dev.azure.com:v3/o/p/s").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = azure.follow(&r, Head::Branch("feat".into()), Updates::new(1, tx.clone()));
+        let other = azure.follow(
+            &s,
+            Head::Branch("other".into()),
+            Updates::new(2, tx.clone()),
+        );
+        let issues = azure.follow_issues(&s, Updates::new(3, tx));
+        for _ in 0..3 {
+            let _ = rx.recv().await.unwrap();
+        }
+        let polled = |s: &Server| {
+            [
+                PULLS,
+                ACTIVE,
+                DONE,
+                "/repositories/r/pushes?",
+                "/repositories/s/pushes?",
+                "/workitemrevisions?",
+            ]
+            .map(|what| asked(s, what))
+        };
+        until(|| polled(&server).iter().all(|n| *n > 0)).await;
+        assert_eq!(polled(&server), [1; 6]);
+        let running = || azure.detection.running();
+        let project = |n| vec![("dev.azure.com/o/p".to_owned(), n)];
+        assert_eq!(running(), project(5));
+        // A target unregisters once its aborted task is dropped.
+        drop(issues);
+        until(|| running() == project(4)).await;
+        drop(other);
+        until(|| running() == project(3)).await;
+        drop(feat);
+        until(|| running().is_empty()).await;
+    }
+
+    /// A `refresh` has the detectors of the target's kinds poll before the
+    /// target reads again.
+    #[tokio::test]
+    async fn a_refresh_polls_the_detectors_of_its_kinds_first() {
+        let server = quiet_project(Arc::new(Mutex::new(json!({ "value": [] })))).await;
+        let azure = provider(&server).await;
+        let repo = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = azure.follow(&repo, Head::Branch("feat".into()), Updates::new(1, tx));
+        let _ = rx.recv().await.unwrap();
+        let polled = |s: &Server| [PULLS, ACTIVE, DONE, "/pushes?"].map(|what| asked(s, what));
+        until(|| polled(&server) == [1; 4]).await;
+        feat.refresh();
+        let _ = rx.recv().await.unwrap();
+        assert_eq!(polled(&server), [2; 4]);
+        let requests = server.requests();
+        let last = |what: &str| requests.iter().rposition(|r| r.contains(what)).unwrap();
+        for detector in [PULLS, DONE, "/pushes?"] {
+            assert!(last(detector) < last("/refs?filter"), "{detector}");
+        }
+    }
+
+    /// What a detector sees move wakes the target it touches, which reads
+    /// again without a `refresh`.
+    #[tokio::test]
+    async fn a_push_wakes_the_branch_it_updates() {
+        let pushes = Arc::new(Mutex::new(json!({ "value": [
+            { "pushId": 1, "date": "2026-11-13T10:00:00Z", "refUpdates": [] }
+        ] })));
+        let server = quiet_project(pushes.clone()).await;
+        let azure = provider(&server).await;
+        let repo = azure.recognise("git@ssh.dev.azure.com:v3/o/p/r").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = azure.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let other = azure.follow(&repo, Head::Branch("other".into()), Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        until(|| asked(&server, "/pushes?") == 1).await;
+        *pushes.lock().unwrap() = json!({ "value": [
+            { "pushId": 2, "date": "2026-11-13T10:00:05Z",
+              "refUpdates": [{ "name": "refs/heads/feat" }] },
+            { "pushId": 1, "date": "2026-11-13T10:00:00Z", "refUpdates": [] }
+        ] });
+        // The refresh of `other` has the detectors poll: the push they see
+        // wakes `feat`, which `other`'s refresh does not cover.
+        other.refresh();
+        let mut read = [rx.recv().await.unwrap().0, rx.recv().await.unwrap().0];
+        read.sort_unstable();
+        assert_eq!(read, [1, 2], "the refreshed target, and the one pushed");
+        assert_eq!(asked(&server, "/refs?filter=heads%2ffeat"), 2);
+        assert_eq!(asked(&server, "/refs?filter=heads%2fother"), 2);
+        drop(feat);
     }
 }

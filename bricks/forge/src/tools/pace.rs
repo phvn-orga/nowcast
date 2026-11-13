@@ -13,7 +13,6 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 /// How long a new head without pipeline counts as expecting a CI. Past it,
@@ -97,32 +96,6 @@ impl Pace {
             rhythm.window
         } else {
             rhythm.normal
-        }
-    }
-}
-
-/// Waits until `deadline`, or for a `refresh`, which ends the wait unless a
-/// rate limit holds it (`limited`); refreshes that piled up count as one,
-/// each calling `refreshed`. `false` once the core is gone.
-pub async fn wait_or_refresh(
-    deadline: Instant,
-    refreshes: &mut UnboundedReceiver<()>,
-    limited: bool,
-    mut refreshed: impl FnMut(),
-) -> bool {
-    loop {
-        tokio::select! {
-            () = tokio::time::sleep_until(deadline) => return true,
-            refresh = refreshes.recv() => {
-                if refresh.is_none() {
-                    return false;
-                }
-                while refreshes.try_recv().is_ok() {}
-                refreshed();
-                if !limited {
-                    return true;
-                }
-            }
         }
     }
 }

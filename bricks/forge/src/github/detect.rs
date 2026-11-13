@@ -12,11 +12,11 @@
 //! wakes the targets it touches ([`Moved::touches`]), which then read in
 //! detail. The first answer only sets what the next ones are compared with.
 //!
-//! A detector polls every [`PERIOD`], slower on a busy repository
-//! ([`Throttle`]). A target's `refresh` has the detectors it depends on poll
-//! at once and opens their fast window: they poll at the provider's window
-//! pace for [`WINDOW_FOR`], a change seen on the forge after an action
-//! taking from 5 to 24 s to show in these lists.
+//! A detector polls every [`PERIOD`](crate::tools::throttle::PERIOD),
+//! slower on a busy repository ([`Throttle`]). A target's `refresh` has the
+//! detectors it depends on poll at once and opens their fast window: they
+//! poll at the provider's window pace for [`WINDOW_FOR`], a change seen on
+//! the forge after an action taking from 5 to 24 s to show in these lists.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -34,13 +34,8 @@ use super::{RHYTHM, Tokens, owner_token};
 use crate::credentials::Credentials;
 use crate::tools::http::{self, Http};
 use crate::tools::pace::WINDOW_FOR;
+use crate::tools::throttle::Throttle;
 
-/// How often a detector polls a calm repository.
-pub const PERIOD: Duration = Duration::from_secs(10);
-/// How often, at the slowest, a detector polls a busy one.
-pub const SLOWEST: Duration = Duration::from_secs(60);
-/// The polls the slowdown rule looks back on.
-const LOOKBACK: usize = 6;
 /// How long a `refresh` waits for its detectors before the target reads
 /// anyway, on a slow or unreachable forge.
 const ASKED_FOR: Duration = Duration::from_secs(5);
@@ -224,56 +219,6 @@ fn describe(kind: Kind, item: &Value, repo: &str) -> Option<Moved> {
         }
         Kind::Issues => Moved::Issue(item["number"].as_u64()?),
     })
-}
-
-/// How often a detector polls. It starts at [`PERIOD`]. Once it has
-/// [`LOOKBACK`] answers at a period: when more than half were a `200`,
-/// the period doubles, up to [`SLOWEST`]; when one at most was, it halves,
-/// down to [`PERIOD`]. A change of period starts the count again, so that
-/// each period is judged on answers at that period; otherwise the oldest
-/// answer leaves the count.
-#[derive(Debug)]
-pub struct Throttle {
-    period: Duration,
-    /// Whether each answer since the period was set was a `200`.
-    recent: Vec<bool>,
-}
-
-impl Default for Throttle {
-    fn default() -> Self {
-        Self {
-            period: PERIOD,
-            recent: Vec::new(),
-        }
-    }
-}
-
-impl Throttle {
-    /// An answer, `changed` for a `200`.
-    pub fn answered(&mut self, changed: bool) {
-        self.recent.push(changed);
-        if self.recent.len() < LOOKBACK {
-            return;
-        }
-        let changes = self.recent.iter().filter(|c| **c).count();
-        let period = if changes > LOOKBACK / 2 {
-            (self.period * 2).min(SLOWEST)
-        } else if changes <= 1 {
-            (self.period / 2).max(PERIOD)
-        } else {
-            self.period
-        };
-        if period == self.period {
-            self.recent.remove(0);
-        } else {
-            self.period = period;
-            self.recent.clear();
-        }
-    }
-
-    pub const fn period(&self) -> Duration {
-        self.period
-    }
 }
 
 /// What a detector needs to read.
@@ -664,30 +609,6 @@ mod tests {
     use super::*;
     use crate::testing::Server;
 
-    #[test]
-    fn a_busy_detector_slows_down_and_speeds_back_up_when_it_settles() {
-        let mut throttle = Throttle::default();
-        let feed = |throttle: &mut Throttle, answers: &[bool]| {
-            for changed in answers {
-                throttle.answered(*changed);
-            }
-            throttle.period()
-        };
-        let busy = [true, true, false, true, true, false];
-        assert_eq!(feed(&mut throttle, &busy[..5]), PERIOD, "not enough yet");
-        assert_eq!(feed(&mut throttle, &busy[5..]), PERIOD * 2, "4 of 6");
-        assert_eq!(feed(&mut throttle, &busy), PERIOD * 4);
-        assert_eq!(feed(&mut throttle, &busy), SLOWEST);
-        assert_eq!(feed(&mut throttle, &busy), SLOWEST, "no slower");
-        let half = [true, false, true, false, true, false];
-        assert_eq!(feed(&mut throttle, &half), SLOWEST, "half is not most");
-        let calm = [false, false, true, false, false, false];
-        assert_eq!(feed(&mut throttle, &calm), SLOWEST / 2);
-        assert_eq!(feed(&mut throttle, &calm), SLOWEST / 4);
-        assert_eq!(feed(&mut throttle, &calm), PERIOD);
-        assert_eq!(feed(&mut throttle, &calm), PERIOD, "no faster");
-    }
-
     fn run(id: u64, updated: &str, branch: &str, repo: &str, sha: &str, prs: &[u64]) -> Value {
         let prs: Vec<Value> = prs.iter().map(|n| json!({ "number": n })).collect();
         json!({ "id": id, "updated_at": updated, "status": "completed", "conclusion": "success",
@@ -936,7 +857,7 @@ mod tests {
             assert!(woken(&mut wakes).is_empty(), "{kind:?}: a 304 after");
             let path = format!("/repos/o/r/{} ", kind.path());
             assert!(server.requests().iter().all(|r| r.contains(&path)));
-            assert_eq!(detector.throttle.recent, [false, true, false]);
+            assert_eq!(detector.throttle.recent(), [false, true, false]);
         }
     }
 
