@@ -63,7 +63,16 @@
           "repo": { "type": "string", "description": "The common git directory, the same for every worktree of a repository." },
           "branch": { "type": ["string", "null"], "description": "The branch at the last write; null on a detached HEAD." },
           "remote": { "type": ["string", "null"], "description": "The origin remote's URL as git has it." },
-          "written_at": { "type": "string", "description": "The last write in it, RFC 3339." }
+          "written_at": { "type": "string", "description": "The last write in it, RFC 3339." },
+          "forge": {
+            "type": ["object", "null"],
+            "description": "Where git push sends the branch, the forge brick's pr and pipelines key; null on a detached HEAD or without a push remote. Absent from an older mod.",
+            "required": ["remote", "branch"],
+            "properties": {
+              "remote": { "type": "string", "description": "The push remote's URL." },
+              "branch": { "type": "string", "description": "The branch's name on that remote." }
+            }
+          }
         }
       }
     }

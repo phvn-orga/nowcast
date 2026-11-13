@@ -96,6 +96,12 @@ export function unsubscribeFor($: $, owner: string, name: unknown): Promise<Nowc
   })
 }
 
+/** The names of the subscriptions kept for `owner`. */
+export function heldBy(owner: string): string[] {
+  const prefix = `${owner}/`
+  return [...entries.keys()].filter(id => id.startsWith(prefix)).map(id => id.slice(prefix.length))
+}
+
 /**
  * The stream opened, after an outage or with a `watch` started again: the
  * service may have restarted and forgotten. What waits is tried now, what

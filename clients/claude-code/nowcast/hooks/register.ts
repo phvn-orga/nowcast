@@ -7,9 +7,10 @@
 
 import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastStream } from '../types'
+import { followForge } from './branches'
 import { CLI, STUB, checkService, history, input, last, refresh, refreshBrick, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
-import { registerForge } from './forge'
+import { refreshForge, registerForge } from './forge'
 import { registerMeasures } from './measures'
 import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
@@ -53,6 +54,7 @@ export const register: Register = on => {
   on('nowcast.unsubscribe', async ($, e, next) => ({ value: await unsubscribeFor($, next.origin.plugin, e.name) }))
   on('nowcast.refresh', async ($, e) => ({ value: await refresh($, e.flow) }))
   on('nowcast.refreshBrick', async ($, e) => ({ value: await refreshBrick($, e.brick, e.kind, e.scope) }))
+  on('nowcast.refreshForge', async ($, e) => ({ value: await refreshForge($, e) }))
   on('nowcast.input', async ($, e) => ({ value: await input($, e.flow, e.detail) }))
   on('nowcast.last', async ($, e) => {
     const value = await last($, e.flow)
@@ -78,7 +80,11 @@ export const register: Register = on => {
   // new id, with no `session.start`: the new id shows once the end is done.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
-    if (e.reason === 'clear' || e.reason === 'resume') awaitNewId($, e.sessionId, 0)
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      // The worktrees start over, and the forge flows followed for them go.
+      followForge($, [])
+      awaitNewId($, e.sessionId, 0)
+    }
     return ended
   })
 

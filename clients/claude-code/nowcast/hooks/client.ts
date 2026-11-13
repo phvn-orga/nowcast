@@ -46,6 +46,7 @@ export const STUB: Nowcast = {
   unsubscribe: unavailable,
   refresh: unavailable,
   refreshBrick: unavailable,
+  refreshForge: unavailable,
   input: unavailable,
   last: unavailable,
   history: unavailable,

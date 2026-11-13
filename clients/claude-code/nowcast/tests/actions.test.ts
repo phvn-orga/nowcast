@@ -3,7 +3,7 @@
 // tools, without the engine.
 
 import { expect, test } from 'claude-code/testing'
-import { azureNames, commandActions, mcpAction, resolveDir, simpleCommands } from '../hooks/actions'
+import { azureNames, branchMoves, commandActions, mcpAction, resolveDir, simpleCommands } from '../hooks/actions'
 import { azure } from '../hooks/forge'
 
 const CWD = '/lab/repo'
@@ -330,4 +330,18 @@ test('MCP tools of GitHub and Azure DevOps servers that write are classified by 
   ]) {
     expect([tool, mcp(tool, { owner: 'o', repo: 'r' })]).toEqual([tool, null])
   }
+})
+
+test('the commands that may move a branch name the directory they ran in', () => {
+  const moves = (command: string) => branchMoves(command, CWD)
+  expect(moves('git status && git log && git branch new && git push origin HEAD && gh pr view 3')).toEqual([])
+  expect(moves('git switch -c x')).toEqual([CWD])
+  expect(moves('cd ../other && git checkout main')).toEqual(['/lab/other'])
+  expect(moves('git -C /w branch -m new')).toEqual(['/w'])
+  expect(moves('git branch --set-upstream-to=origin/x')).toEqual([CWD])
+  expect(moves('git commit -m x && git push -u origin HEAD')).toEqual([CWD])
+  expect(moves('gh -R o/r pr checkout 12')).toEqual([CWD])
+  // Any worktree: `git worktree`, or a directory the shell expands.
+  expect(moves('git worktree add ../x -b x')).toEqual([undefined])
+  expect(moves('cd "$DIR" && git switch x')).toEqual([undefined])
 })

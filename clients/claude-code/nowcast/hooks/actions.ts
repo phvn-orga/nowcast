@@ -1,9 +1,10 @@
 // The forge actions an agent's tool call may have taken (`06-brique-forge.md`
 // on the design branch, "Ce que reconnaît le client"): a shell command
 // (`git push`, `gh`, `az`, a REST call with `curl` or `http`) or an MCP tool
-// of a GitHub or Azure DevOps server. Pure functions, read without touching
-// the engine: `forge.ts` resolves what they leave to the working directory
-// and sends the refreshes.
+// of a GitHub or Azure DevOps server; and the commands that may move a
+// worktree's branch, for `worktrees.ts`. Pure functions, read without
+// touching the engine: `forge.ts` resolves what they leave to the working
+// directory and sends the refreshes.
 
 /** What a scoped refresh of the forge brick names. */
 export type ForgeType = 'pr' | 'pipelines' | 'issues'
@@ -266,18 +267,7 @@ export function commandActions(
 ): ForgeAction[] {
   if (!MAY_ACT.test(command)) return []
   const actions: ForgeAction[] = []
-  // The directory each subshell moved to; a subshell starts in the one around it.
-  const dirs = new Map<string, string | undefined>([['', cwd]])
-  const dirOf = (group: string): string | undefined =>
-    dirs.has(group) ? dirs.get(group) : dirOf(group.slice(0, group.lastIndexOf('/')))
-  for (const { words, depth, group } of simpleCommands(command)) {
-    const args = argv(words)
-    const program = basename(args[0] ?? '')
-    const dir = dirOf(group)
-    if (program === 'cd' || program === 'pushd' || program === 'popd') {
-      if (depth === 0) dirs.set(group, program === 'popd' ? undefined : resolveDir(dir, args[1]))
-      continue
-    }
+  for (const { program, args, dir } of programs(command, cwd)) {
     const found =
       program === 'git'
         ? gitAction(args.slice(1), dir)
@@ -293,6 +283,68 @@ export function commandActions(
     if (found !== null) actions.push(found)
   }
   return actions
+}
+
+/** The programs of a command line run in `cwd`, each with its arguments and the directory it runs in. */
+function* programs(command: string, cwd: string | undefined) {
+  // The directory each subshell moved to; a subshell starts in the one around it.
+  const dirs = new Map<string, string | undefined>([['', cwd]])
+  const dirOf = (group: string): string | undefined =>
+    dirs.has(group) ? dirs.get(group) : dirOf(group.slice(0, group.lastIndexOf('/')))
+  for (const { words, depth, group } of simpleCommands(command)) {
+    const args = argv(words)
+    const program = basename(args[0] ?? '')
+    const dir = dirOf(group)
+    if (program === 'cd' || program === 'pushd' || program === 'popd') {
+      if (depth === 0) dirs.set(group, program === 'popd' ? undefined : resolveDir(dir, args[1]))
+      continue
+    }
+    yield { program, args, dir }
+  }
+}
+
+/** The `git branch` options that rename the branch or change its upstream. */
+const BRANCH_MOVES = ['-m', '-M', '--move', '-u', '--set-upstream-to', '--unset-upstream']
+
+/**
+ * The directories of a command line run in `cwd` where the branch, or where
+ * `git push` sends it, may have changed (`02-clients.md` on the design
+ * branch): `git switch`, `git checkout`, `git branch -m`, `git push -u`, `gh
+ * pr checkout`. A `cd` moves them as for `commandActions`. Undefined stands
+ * for any worktree: a directory not to be followed, or `git worktree`, which
+ * adds, moves and removes others.
+ */
+export function branchMoves(command: string, cwd: string | undefined): Array<string | undefined> {
+  if (!MAY_ACT.test(command)) return []
+  const moved: Array<string | undefined> = []
+  for (const { program, args, dir } of programs(command, cwd)) {
+    if (program === 'gh') {
+      const words: string[] = []
+      for (let i = 1; i < args.length; i++) {
+        const arg = args[i] as string
+        if (arg === '-R' || arg === '--repo') i++
+        else if (!arg.startsWith('-')) words.push(arg)
+      }
+      if (words[0] === 'pr' && words[1] === 'checkout') moved.push(dir)
+      continue
+    }
+    if (program !== 'git') continue
+    let at = 1
+    let where = dir
+    while (at < args.length && (args[at] as string).startsWith('-')) {
+      const option = args[at] as string
+      if (option === '-C') where = resolveDir(where, args[at + 1])
+      at += GIT_VALUED.includes(option) ? 2 : 1
+    }
+    const rest = args.slice(at + 1)
+    const named = (options: string[]) => rest.some(arg => options.some(o => arg === o || arg.startsWith(`${o}=`)))
+    const sub = args[at]
+    if (sub === 'worktree') moved.push(undefined)
+    else if (sub === 'switch' || sub === 'checkout') moved.push(where)
+    else if (sub === 'branch' && named(BRANCH_MOVES)) moved.push(where)
+    else if (sub === 'push' && named(['-u', '--set-upstream'])) moved.push(where)
+  }
+  return moved
 }
 
 /** Where a directory's remote is: the directory itself, or nowhere when not known. */

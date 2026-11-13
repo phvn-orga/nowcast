@@ -5,6 +5,9 @@
 // of the repository they touched. A repository not to be found refreshes
 // every flow of the kinds concerned instead, as before scopes.
 //
+// Other mods ask for refreshes in the same terms (`refreshForge`), sent in
+// the same queue.
+//
 // The brick is optional: once the service answers `unknown_brick`, nothing
 // more is sent for the session. A service or brick that does not take a
 // scope (an older one) gets the refresh by kind, then on for the session.
@@ -19,12 +22,13 @@ import {
   azureNames,
   azureRemote,
   commandActions,
-  isUrl,
   mcpAction,
   ordered,
+  resolveDir,
 } from './actions'
 import { refreshBrick } from './client'
-import { git } from './worktrees'
+import { git, pushUrl } from './worktrees'
+import type { NowcastDone, NowcastFailure, NowcastForgeRefresh } from '../types'
 
 type $ = EngineInterface
 
@@ -35,6 +39,14 @@ const SCOPE_REFUSED = new Set(['invalid_request', 'scope_not_accepted', 'invalid
 const KINDS: Record<ForgeType, string[]> = { pr: ['pr'], pipelines: ['pipelines'], issues: ['issues', 'issue'] }
 
 const MAY_SERVER = /github|azure|devops|ado/i
+const ALL_TYPES: ForgeType[] = ['pr', 'pipelines', 'issues']
+/** What a refresh answers once the service said the brick is not enabled. */
+const NOT_ENABLED: NowcastFailure = {
+  ok: false,
+  status: null,
+  code: 'unknown_brick',
+  message: 'the forge brick is not enabled',
+}
 
 /** The session the brick is not enabled for; the session whose service refuses scopes. */
 let off: string | undefined
@@ -66,17 +78,24 @@ export function registerForge(on: On): void {
     if (actions.length > 0) {
       // The tool's answer waits for nothing.
       queue = queue
-        .then(() => refreshFor($, actions))
+        .then(async () => {
+          await refreshFor($, actions)
+        })
         .catch(error => $.ui.log(`nowcast: cannot refresh the forge: ${message(error)}`, { to: 'debug' }))
     }
     return result
   })
 }
 
-/** Sends the refreshes `actions` call for: one per repository and number, else one per kind. */
-export async function refreshFor($: $, actions: ForgeAction[]): Promise<void> {
+/**
+ * Sends the refreshes `actions` call for: one per repository and number, else
+ * one per kind. Answers the last failure, `unknown_brick` when the brick is
+ * not enabled; null when every refresh went out.
+ */
+export async function refreshFor($: $, actions: ForgeAction[]): Promise<NowcastFailure | null> {
   const session = await $.session.id()
-  if (off === session) return
+  if (off === session) return NOT_ENABLED
+  let failed: NowcastFailure | null = null
   const scopes = new Map<string, { remote: string; types: Set<ForgeType>; number?: number }>()
   const kinds = new Set<string>()
   for (const action of actions) {
@@ -101,10 +120,11 @@ export async function refreshFor($: $, actions: ForgeAction[]): Promise<void> {
       if (answer.ok) continue
       if (answer.code === 'unknown_brick') {
         off = session
-        return
+        return answer
       }
       if (!SCOPE_REFUSED.has(answer.code)) {
         $.ui.log(`nowcast: the forge refresh failed: ${answer.message}`, { to: 'debug' })
+        failed = answer
         continue
       }
       scopeless = session
@@ -116,10 +136,51 @@ export async function refreshFor($: $, actions: ForgeAction[]): Promise<void> {
     if (answer.ok) continue
     if (answer.code === 'unknown_brick') {
       off = session
-      return
+      return answer
     }
     $.ui.log(`nowcast: the forge refresh of ${kind} failed: ${answer.message}`, { to: 'debug' })
+    failed = answer
   }
+  return failed
+}
+
+/**
+ * `$.nowcast.refreshForge`: a refresh asked in neutral terms, queued with
+ * the agent's actions and sent as they are.
+ */
+export function refreshForge($: $, asked: NowcastForgeRefresh): Promise<NowcastDone | NowcastFailure> {
+  const request: Partial<Record<keyof NowcastForgeRefresh, unknown>> = isObject(asked) ? asked : {}
+  const { remote, cwd, types, number } = request
+  const known = new Set<unknown>(ALL_TYPES)
+  const why =
+    remote !== undefined && (typeof remote !== 'string' || remote === '')
+      ? 'remote must be a non-empty string'
+      : cwd !== undefined && (typeof cwd !== 'string' || cwd === '')
+        ? 'cwd must be a non-empty string'
+        : types !== undefined && (!Array.isArray(types) || types.length === 0 || !types.every(t => known.has(t)))
+          ? `types must list some of ${ALL_TYPES.join(', ')}`
+          : number !== undefined && !(Number.isInteger(number) && (number as number) > 0)
+            ? 'number must be a positive integer'
+            : null
+  if (why !== null) return Promise.resolve({ ok: false, status: null, code: 'invalid_request', message: why })
+  const run = queue.then(async () => {
+    const here = await $.session.cwd().catch(() => undefined)
+    const dir = cwd === undefined ? here : resolveDir(here, cwd as string)
+    const target: Target = remote !== undefined ? { remote: remote as string } : dir === undefined ? null : { dir }
+    const action: ForgeAction = {
+      types: types === undefined ? ALL_TYPES : ordered(types as ForgeType[]),
+      target,
+      ...(number === undefined ? {} : { number: number as number }),
+    }
+    return (await refreshFor($, [action])) ?? { ok: true as const }
+  })
+  queue = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run.catch(
+    (error): NowcastFailure => ({ ok: false, status: null, code: 'unavailable', message: message(error) }),
+  )
 }
 
 /** The remote of a target, as git or the names give it; null when not to be found. */
@@ -152,24 +213,6 @@ export function azure(given: AzureNames, here: Required<AzureNames> | null, type
   if (org === undefined || project === undefined) return null
   const repo = given.repo ?? fromHere('repo') ?? (types.every(type => type === 'issues') ? project : undefined)
   return repo === undefined ? null : azureRemote(org, project, repo)
-}
-
-/**
- * The push URL of the remote `git push` sends `dir`'s branch to: its
- * `pushRemote`, else `remote.pushDefault`, else its upstream's remote, else
- * `origin` (`02-clients.md` on the design branch).
- */
-async function pushUrl($: $, dir: string): Promise<string | null> {
-  const branch = await git($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
-  const config = (key: string) => git($, dir, ['config', '--get', key])
-  const name =
-    (branch === null ? null : await config(`branch.${branch}.pushRemote`)) ??
-    (await config('remote.pushDefault')) ??
-    (branch === null ? null : await config(`branch.${branch}.remote`)) ??
-    'origin'
-  // A remote may be given as its URL.
-  if (isUrl(name)) return name
-  return git($, dir, ['remote', 'get-url', '--push', name])
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

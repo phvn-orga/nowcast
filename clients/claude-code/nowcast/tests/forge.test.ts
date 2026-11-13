@@ -4,7 +4,7 @@
 
 import type { HttpResponse, On } from 'claude-code'
 import { type Engine, expect, test } from 'claude-code/testing'
-import { type Request, START, type World, world } from './world'
+import { type Request, START, type World, call, caller, world } from './world'
 
 const REPO = '/lab/repo'
 const REFRESH = 'http://nowcast/v1/bricks/forge/refresh'
@@ -127,4 +127,47 @@ test('without the forge brick, nothing more is sent in the session', async ($, o
   await bash($, 'git push')
 
   expect(await refreshes(w)).toEqual([{ scope: { remote: 'git@github.com:me/r.git', types: ['pr', 'pipelines'] } }])
+})
+
+const plugins = { plugins: [caller] }
+
+test('refreshForge sends a scope in the same terms, from a remote or a directory', plugins, async ($, on) => {
+  const w = world(on, { git: repository, answer: serving(() => ({ status: 202 })) })
+  tools(on)
+  await $.session.start(START)
+
+  const answers = [
+    await call($, 'refreshForge', { remote: 'https://github.com/o/r', types: ['issues'], number: 52 }),
+    // The session's directory, every type.
+    await call($, 'refreshForge', {}),
+    await call($, 'refreshForge', { cwd: '.', types: ['pipelines', 'pr'] }),
+    // Not a repository: every flow of the kinds.
+    await call($, 'refreshForge', { cwd: '/elsewhere', types: ['issues'] }),
+  ]
+
+  expect(answers).toEqual([{ ok: true }, { ok: true }, { ok: true }, { ok: true }])
+  expect(await refreshes(w)).toEqual([
+    { scope: { remote: 'https://github.com/o/r', types: ['issues'], number: 52 } },
+    { scope: { remote: 'git@github.com:me/r.git', types: ['pr', 'pipelines', 'issues'] } },
+    { scope: { remote: 'git@github.com:me/r.git', types: ['pr', 'pipelines'] } },
+    { kind: 'issues' },
+    { kind: 'issue' },
+  ])
+})
+
+test('refreshForge refuses a malformed request, and says when the brick is not enabled', plugins, async ($, on) => {
+  const w = world(on, { git: repository, answer: serving(() => refused(404, 'unknown_brick')) })
+  tools(on)
+  await $.session.start(START)
+
+  const malformed = [{ types: ['nope'] }, { types: [] }, { number: 0 }, { remote: '' }, { cwd: 3 }]
+  for (const request of malformed) {
+    expect(await call($, 'refreshForge', request)).toMatchObject({ ok: false, code: 'invalid_request' })
+  }
+  expect(await refreshes(w)).toEqual([])
+
+  expect(await call($, 'refreshForge', { types: ['pr'] })).toMatchObject({ ok: false, code: 'unknown_brick' })
+  // Asked no more in the session.
+  expect(await call($, 'refreshForge', { types: ['pr'] })).toMatchObject({ ok: false, code: 'unknown_brick' })
+  expect((await refreshes(w)).length).toBe(1)
 })
