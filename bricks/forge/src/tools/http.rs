@@ -27,8 +27,11 @@ const CACHE_MAX: usize = 4096;
 /// Why a request gave no body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// `401`, or `403` without a rate limit: the token was refused.
+    /// `401`, or a sign-in page: the token was refused.
     Unauthorized,
+    /// `403` without a rate limit: the token was accepted but denied this
+    /// resource.
+    Forbidden,
     /// `404`, or `410`: gone, such as a deleted issue.
     NotFound,
     /// A rate limit, with how long to wait when the forge says.
@@ -207,7 +210,7 @@ async fn json(response: Response) -> Result<Value, Failure> {
             return Err(match limit(response.headers()) {
                 Some(wait) => Failure::Limited(wait),
                 None if status == StatusCode::TOO_MANY_REQUESTS => Failure::Limited(None),
-                None => Failure::Unauthorized,
+                None => Failure::Forbidden,
             });
         }
         s if !s.is_success() => {
@@ -374,7 +377,7 @@ mod tests {
             get("/limited").await,
             Err(Failure::Limited(Some(Duration::from_secs(7))))
         );
-        assert_eq!(get("/forbidden").await, Err(Failure::Unauthorized));
+        assert_eq!(get("/forbidden").await, Err(Failure::Forbidden));
         assert!(matches!(get("/other").await, Err(Failure::Unreadable(_))));
         assert!(matches!(
             http.get("http://127.0.0.1:9/", "t", &[]).await,

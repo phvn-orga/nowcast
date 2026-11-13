@@ -337,7 +337,8 @@ async fn owner_token(
 
 /// What `failure`, in a reading of `at` with `owner`'s token, says in
 /// `source.status`, and how long a rate limit asks to wait. A refused token
-/// is forgotten: the next reading asks its source again.
+/// (`401`) is forgotten: the next reading asks its source again. A `403`
+/// reads as unauthorized too, but keeps the token, accepted elsewhere.
 fn failed(
     tokens: &Tokens,
     owner: &str,
@@ -349,6 +350,7 @@ fn failed(
             tokens.lock().unwrap().by_owner.remove(owner);
             (Failure::Unauthorized, None)
         }
+        http::Failure::Forbidden => (Failure::Unauthorized, None),
         http::Failure::NotFound => (Failure::NotFound, None),
         http::Failure::Limited(wait) => (Failure::RateLimited, Some(wait.unwrap_or(RHYTHM.normal))),
         http::Failure::Unreadable(why) => {

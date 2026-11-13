@@ -27,7 +27,8 @@
 //! [`SLOWEST`] at least while the budget left is under half of it, and not
 //! before a `Retry-After`. A target's `refresh` has the detectors it depends
 //! on poll at once and opens their fast window: they poll at the provider's
-//! window pace for [`WINDOW_FOR`].
+//! window pace for [`WINDOW_FOR`]. After a failed poll, a detector waits the
+//! provider's normal pace, unless a `refresh` asks it to poll.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -69,6 +70,11 @@ const KNOWN_MAX: usize = 10_000;
 const CHANGED_MAX: usize = 200;
 /// The share of the budget under which a detector polls at [`SLOWEST`].
 const LOW_BUDGET: f64 = 0.5;
+/// How long before the last push seen a pushes poll starts: whether the
+/// server takes `fromDate` as inclusive, or to the second only, no push
+/// after it is missed. The pushes up to the last one seen are left out by
+/// their `pushId`.
+const PUSHES_MARGIN: Duration = Duration::from_secs(60);
 
 /// What a detector polls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -606,12 +612,12 @@ impl Detected {
 }
 
 /// Where a pushes detector stands: the last push seen, and its date, which
-/// the next poll starts from.
+/// the next poll starts from, a margin before.
 #[derive(Default)]
 struct Pushes {
     started: bool,
     last: Option<u64>,
-    since: Option<String>,
+    since: Option<jiff::Timestamp>,
 }
 
 /// Where a work items detector stands.
@@ -649,8 +655,13 @@ struct Detector {
     low: bool,
     /// Whether the cost of a poll was logged, once per detector.
     costed: bool,
-    /// Whether the last poll failed: a lasting failure is logged once.
+    /// Whether the last poll failed: a lasting failure is logged once, and
+    /// the next poll waits the normal pace.
     failing: bool,
+    /// Whether a `401` dropped the token since the last poll that answered:
+    /// the next `401`s keep the token asked since, which asking again would
+    /// not change.
+    dropped: bool,
 }
 
 impl Detector {
@@ -671,6 +682,7 @@ impl Detector {
             low: false,
             costed: false,
             failing: false,
+            dropped: false,
         }
     }
 
@@ -709,9 +721,13 @@ impl Detector {
         }
     }
 
-    /// The window pace after a `refresh`, else the throttle's; at
-    /// [`SLOWEST`] at least while the budget runs low.
+    /// The normal pace after a failed poll; else the window pace after a
+    /// `refresh`, else the throttle's; at [`SLOWEST`] at least while the
+    /// budget runs low.
     fn period(&self, now: Instant) -> Duration {
+        if self.failing {
+            return RHYTHM.normal;
+        }
         let period = if self.window_until.is_some_and(|until| now < until) {
             RHYTHM.window
         } else {
@@ -750,6 +766,7 @@ impl Detector {
         match polled {
             Ok(moved) => {
                 self.failing = false;
+                self.dropped = false;
                 // The first answer only sets what the next are compared with.
                 if let Some(moved) = moved {
                     self.throttle.answered(!moved.is_empty());
@@ -847,16 +864,20 @@ impl Detector {
     }
 
     /// The refs the repository's pushes updated since the last push seen.
-    /// The first poll reads the last push only; the next read from its
-    /// date, the server's, and keep the pushes after it.
+    /// The first poll reads the last push only; the next read from
+    /// [`PUSHES_MARGIN`] before its date, the server's, in whole seconds,
+    /// and keep the pushes after it.
     // https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pushes/list?view=azure-devops-rest-7.1
     async fn poll_pushes(&mut self, token: &str) -> Result<Option<Vec<Moved>>, http::Failure> {
         let repo_api = self.names.repo_api();
         let path = match &self.pushes.since {
-            Some(since) => format!(
-                "{repo_api}/pushes?searchCriteria.fromDate={}&searchCriteria.includeRefUpdates=true&{VERSION}",
-                encode(since)
-            ),
+            Some(since) => {
+                let from = (*since - PUSHES_MARGIN).strftime("%Y-%m-%dT%H:%M:%SZ");
+                format!(
+                    "{repo_api}/pushes?searchCriteria.fromDate={}&searchCriteria.includeRefUpdates=true&{VERSION}",
+                    encode(&from.to_string())
+                )
+            }
             None => {
                 format!("{repo_api}/pushes?$top=1&searchCriteria.includeRefUpdates=true&{VERSION}")
             }
@@ -869,7 +890,7 @@ impl Detector {
                 && self.pushes.last.is_none_or(|last| id > last)
             {
                 self.pushes.last = Some(id);
-                self.pushes.since = push["date"].as_str().map(str::to_owned);
+                self.pushes.since = push["date"].as_str().and_then(|d| d.parse().ok());
             }
         }
         Ok(started.then_some(moved))
@@ -879,7 +900,8 @@ impl Detector {
     /// changed what the contract shows. The feed's watermark is the
     /// server's; the first poll starts from now. A poll that fails keeps
     /// nothing of its batches: the next reads them again. A feed refused
-    /// (`404`, or `403` while WIQL answers) gives way to WIQL for good.
+    /// (`404`, or `403` while WIQL answers) gives way to WIQL for good; a
+    /// `401` is the token's, not the feed's.
     // https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/reporting-work-item-revisions/read-reporting-revisions-get?view=azure-devops-rest-7.1
     async fn poll_work_items(&mut self, token: &str) -> Result<Option<Vec<Moved>>, http::Failure> {
         if self.revisions.wiql {
@@ -905,7 +927,7 @@ impl Detector {
             let started_at = now();
             let batch = match self.get(token, &path).await {
                 Ok(batch) => batch,
-                Err(failure @ (http::Failure::NotFound | http::Failure::Unauthorized))
+                Err(failure @ (http::Failure::NotFound | http::Failure::Forbidden))
                     if first && page == 0 =>
                 {
                     return self.refused(token, failure).await;
@@ -994,9 +1016,10 @@ impl Detector {
     }
 
     /// A failed poll, and how long a rate limit asks to wait. A refused
-    /// token is forgotten, as by a target.
+    /// token (`401`) is forgotten, as by a target, once until a poll
+    /// answers; a `403` keeps it.
     async fn failed(&mut self, failure: http::Failure) -> Option<Duration> {
-        if failure == http::Failure::Unauthorized {
+        if failure == http::Failure::Unauthorized && !std::mem::replace(&mut self.dropped, true) {
             *self.context.token.lock().await = None;
         }
         if !std::mem::replace(&mut self.failing, true) {
@@ -1298,21 +1321,34 @@ mod tests {
         }
     }
 
-    /// Pushes are read from the date of the last one seen, the server's.
+    /// Pushes are read from a minute before the date of the last one seen,
+    /// the server's, in whole seconds, and only those after it count: a push
+    /// in the same second as the last one is still seen, and once only.
     #[tokio::test]
-    async fn pushes_are_read_from_the_last_seen() {
+    async fn pushes_are_read_from_a_margin_before_the_last_seen() {
+        let at = |id, date: &str| {
+            let mut push = push(id, &["refs/heads/other"]);
+            push["date"] = json!(date);
+            push
+        };
         let version = Arc::new(Mutex::new(0));
         let bodies = vec![
-            list(vec![push(10, &[])]),
-            list(vec![push(11, &["refs/heads/feat"]), push(10, &[])]),
+            list(vec![at(10, "2026-11-13T10:00:10.2Z")]),
+            list(vec![
+                at(11, "2026-11-13T10:00:10.8Z"),
+                at(10, "2026-11-13T10:00:10.2Z"),
+            ]),
         ];
         let server = lists(version.clone(), bodies).await;
-        let (project, _) = project(&server, vec![]).await;
+        let (project, mut wakes) = project(&server, interests()).await;
         let mut detector = Detector::new(&project, Kind::Pushes, "r");
         detector.poll().await;
+        assert!(woken(&mut wakes).is_empty(), "the first answer");
         *version.lock().unwrap() = 1;
         detector.poll().await;
+        assert_eq!(woken(&mut wakes), [1], "the push in the same second");
         detector.poll().await;
+        assert!(woken(&mut wakes).is_empty(), "pushes already seen");
         let requests = server.requests();
         let paths: Vec<&str> = requests
             .iter()
@@ -1321,9 +1357,9 @@ mod tests {
         assert!(paths[0].contains(
             "/o/p/_apis/git/repositories/r/pushes?$top=1&searchcriteria.includerefupdates=true&"
         ));
-        assert!(paths[1].contains("pushes?searchcriteria.fromdate=2026-11-13t10%3a00%3a10z&"));
+        assert!(paths[1].contains("pushes?searchcriteria.fromdate=2026-11-13t09%3a59%3a10z&"));
         assert!(paths[1].contains("&searchcriteria.includerefupdates=true&"));
-        assert!(paths[2].contains("searchcriteria.fromdate=2026-11-13t10%3a00%3a11z&"));
+        assert!(paths[2].contains("searchcriteria.fromdate=2026-11-13t09%3a59%3a10z&"));
     }
 
     /// The revisions feed starts from now, reads its batches up to the last,
@@ -1434,17 +1470,64 @@ mod tests {
         assert!(last.contains("[system.changeddate] > '2026-11-13t10:00:10.5z'"));
     }
 
-    /// A feed refused along with WIQL is the token's refusal: the feed is
-    /// kept.
+    /// A feed refused along with WIQL (`403`) is the token's refusal: the
+    /// feed is kept, and so is the token. A `401` does not try WIQL.
     #[tokio::test]
     async fn a_token_refused_everywhere_keeps_the_feed() {
         let server = Server::start(|_| (403, vec![], String::new())).await;
-        let (project, _) = project(&server, vec![]).await;
-        let mut detector = Detector::new(&project, Kind::WorkItems, "");
+        let (forbidden, _) = project(&server, vec![]).await;
+        let mut detector = Detector::new(&forbidden, Kind::WorkItems, "");
         assert_eq!(detector.poll().await, None);
         assert!(!detector.revisions.wiql);
         assert!(detector.failing);
-        assert!(project.context.token.lock().await.is_none());
+        assert!(forbidden.context.token.lock().await.is_some());
+        assert_eq!(server.requests().len(), 2, "the feed, then WIQL");
+        let server = Server::start(|_| (401, vec![], String::new())).await;
+        let (refused, _) = project(&server, vec![]).await;
+        let mut detector = Detector::new(&refused, Kind::WorkItems, "");
+        assert_eq!(detector.poll().await, None);
+        assert!(!detector.revisions.wiql);
+        assert_eq!(server.requests().len(), 1, "the feed only");
+        assert!(refused.context.token.lock().await.is_none());
+    }
+
+    /// A failed poll has the detector wait the normal pace, window open or
+    /// not; only a `401` drops the token, once until a poll answers.
+    #[tokio::test]
+    async fn a_failed_poll_waits_the_normal_pace_and_only_a_401_drops_the_token() {
+        let server = Server::start(|request| {
+            let status = if request.contains("/pullrequests?") {
+                403
+            } else if request.contains("/builds?") {
+                404
+            } else {
+                401
+            };
+            (status, vec![], String::new())
+        })
+        .await;
+        let (project, _) = project(&server, vec![]).await;
+        let now = Instant::now();
+        for kind in [Kind::Pulls, Kind::Builds] {
+            let mut detector = Detector::new(&project, kind, "");
+            detector.window_until = Some(now + WINDOW_FOR);
+            assert_eq!(detector.period(now), RHYTHM.window);
+            assert_eq!(detector.poll().await, None);
+            assert_eq!(detector.period(now), RHYTHM.normal, "{kind:?}");
+            let token = project.context.token.lock().await;
+            assert!(token.is_some(), "{kind:?} keeps the token");
+        }
+        let mut pushes = Detector::new(&project, Kind::Pushes, "r");
+        assert_eq!(pushes.poll().await, None);
+        assert_eq!(pushes.period(now), RHYTHM.normal);
+        assert!(
+            project.context.token.lock().await.is_none(),
+            "a 401 drops it"
+        );
+        *project.context.token.lock().await = Some(("t2".into(), None, Stamp::default()));
+        assert_eq!(pushes.poll().await, None);
+        let token = project.context.token.lock().await;
+        assert!(token.is_some(), "the next 401 keeps it");
     }
 
     /// A budget under half its size slows the detector to the slowest pace,

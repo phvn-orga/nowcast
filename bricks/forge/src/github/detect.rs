@@ -17,6 +17,8 @@
 //! detectors it depends on poll at once and opens their fast window: they
 //! poll at the provider's window pace for [`WINDOW_FOR`], a change seen on
 //! the forge after an action taking from 5 to 24 s to show in these lists.
+//! After a failed poll, a detector waits the provider's normal pace, unless
+//! a `refresh` asks it to poll.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -467,8 +469,13 @@ struct Detector {
     throttle: Throttle,
     /// Until when a `refresh` keeps the pace fast.
     window_until: Option<Instant>,
-    /// Whether the last poll failed: a lasting failure is logged once.
+    /// Whether the last poll failed: a lasting failure is logged once, and
+    /// the next poll waits the normal pace.
     failing: bool,
+    /// Whether a `401` dropped the token since the last poll that answered:
+    /// the next `401`s keep the token asked since, which asking again would
+    /// not change.
+    dropped: bool,
 }
 
 impl Detector {
@@ -483,6 +490,7 @@ impl Detector {
             throttle: Throttle::default(),
             window_until: None,
             failing: false,
+            dropped: false,
         }
     }
 
@@ -521,9 +529,12 @@ impl Detector {
         }
     }
 
-    /// The window pace after a `refresh`, else the throttle's.
+    /// The normal pace after a failed poll; else the window pace after a
+    /// `refresh`, else the throttle's.
     fn period(&self, now: Instant) -> Duration {
-        if self.window_until.is_some_and(|until| now < until) {
+        if self.failing {
+            RHYTHM.normal
+        } else if self.window_until.is_some_and(|until| now < until) {
             RHYTHM.window
         } else {
             self.throttle.period()
@@ -549,6 +560,7 @@ impl Detector {
         match a.http.get_changed(&url, &token, HEADERS).await {
             Ok((body, changed)) => {
                 self.failing = false;
+                self.dropped = false;
                 if changed {
                     self.saw(body);
                 } else {
@@ -576,9 +588,10 @@ impl Detector {
     }
 
     /// A failed poll, and how long a rate limit asks to wait. A refused
-    /// token is forgotten, as by a target.
+    /// token (`401`) is forgotten, as by a target, once until a poll
+    /// answers; a `403` keeps it.
     fn failed(&mut self, failure: http::Failure) -> Option<Duration> {
-        if failure == http::Failure::Unauthorized {
+        if failure == http::Failure::Unauthorized && !std::mem::replace(&mut self.dropped, true) {
             let mut tokens = self.access.tokens.lock().unwrap();
             tokens.by_owner.remove(&self.owner);
         }
@@ -883,5 +896,53 @@ mod tests {
         if std::env::var(super::super::TOKEN_VAR).is_err() {
             assert_eq!(pulls.poll().await, Some(RHYTHM.normal));
         }
+    }
+
+    /// A failed poll has the detector wait the normal pace, window open or
+    /// not; only a `401` drops the token, once until a poll answers.
+    #[tokio::test]
+    async fn a_failed_poll_waits_the_normal_pace_and_only_a_401_drops_the_token() {
+        let server = Server::start(|request| {
+            let status = if request.contains("/actions/") {
+                403
+            } else if request.contains("/pulls?") {
+                404
+            } else {
+                401
+            };
+            (status, vec![], String::new())
+        })
+        .await;
+        let (repo, _) = repository(&server, vec![]);
+        let token = || {
+            repo.access
+                .tokens
+                .lock()
+                .unwrap()
+                .by_owner
+                .get("o")
+                .cloned()
+        };
+        let now = Instant::now();
+        for kind in [Kind::Runs, Kind::Pulls] {
+            let mut detector = Detector::new(&repo, kind);
+            detector.window_until = Some(now + WINDOW_FOR);
+            assert_eq!(detector.period(now), RHYTHM.window);
+            assert_eq!(detector.poll().await, None);
+            assert_eq!(detector.period(now), RHYTHM.normal, "{kind:?}");
+            assert_eq!(token().as_deref(), Some("t"), "{kind:?} keeps the token");
+        }
+        let mut issues = Detector::new(&repo, Kind::Issues);
+        assert_eq!(issues.poll().await, None);
+        assert_eq!(issues.period(now), RHYTHM.normal);
+        assert_eq!(token(), None, "a 401 drops the token");
+        repo.access
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t2".into());
+        assert_eq!(issues.poll().await, None);
+        assert_eq!(token().as_deref(), Some("t2"), "the next 401 keeps it");
     }
 }

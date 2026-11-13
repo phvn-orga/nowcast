@@ -496,8 +496,9 @@ fn header_number(headers: &HeaderMap, name: &str) -> Option<f64> {
 }
 
 /// What `failure`, in a reading of `at`, says in `source.status`, and how
-/// long a rate limit asks to wait. A refused token is forgotten: the next
-/// reading asks its source again.
+/// long a rate limit asks to wait. A refused token (`401`) is forgotten:
+/// the next reading asks its source again. A `403` reads as unauthorized
+/// too, but keeps the token, accepted elsewhere.
 async fn failed(
     context: &Context,
     at: &str,
@@ -508,6 +509,7 @@ async fn failed(
             *context.token.lock().await = None;
             (Failure::Unauthorized, None)
         }
+        http::Failure::Forbidden => (Failure::Unauthorized, None),
         http::Failure::NotFound => (Failure::NotFound, None),
         http::Failure::Limited(wait) => (Failure::RateLimited, Some(wait.unwrap_or(RHYTHM.normal))),
         http::Failure::Unreadable(why) => {
