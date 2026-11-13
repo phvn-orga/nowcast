@@ -423,7 +423,10 @@ fn build_policy(e: &Value, blocking: bool) -> BuildPolicy {
 
 /// A policy evaluation's state. A `queued` one that waits for a person
 /// (expired, or queued by hand only) is `waiting`: nothing runs until
-/// someone queues the build.
+/// someone queues the build. An `approved` one passes even when its build
+/// tested an older merge commit (`context.buildIsNotCurrent`): Azure DevOps
+/// holds the policy satisfied until its `validDuration` runs out, then
+/// expires it.
 fn evaluation_state(status: Option<&str>, waits: bool) -> State {
     match status {
         Some("queued") if waits => State::Waiting,
@@ -852,6 +855,19 @@ mod tests {
         assert_eq!(policies.builds[0].name, "CI");
         assert_eq!(policies.builds[1].name, "build 12");
         assert!(policies.statuses.is_empty(), "a reviewer policy is no CI");
+    }
+
+    /// A build approved on an older merge commit, still within the
+    /// policy's valid duration, satisfies the policy as Azure DevOps holds
+    /// it: the policy passes, on the build it designates.
+    #[test]
+    fn a_policy_approved_on_an_older_merge_commit_passes() {
+        let evaluations = json!({ "value": [
+            evaluation("e1", "approved",
+                json!({ "buildId": 5, "buildIsNotCurrent": true, "isExpired": false }), true),
+        ]});
+        let policy = &policies(&evaluations).builds[0];
+        assert_eq!((policy.state, policy.build), (State::Pass, Some(5)));
     }
 
     fn status(id: u64, name: &str, state: &str, iteration: Option<u64>) -> Value {
