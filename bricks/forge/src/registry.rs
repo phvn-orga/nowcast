@@ -233,17 +233,20 @@ impl Scope {
     /// `number`; `issues` covers the tracker's open issues, and its issues
     /// but those whose number is another than `number`. A branch whose
     /// open PR is unknown stays covered: the action may have opened it.
+    /// Beside `pr` or `pipelines`, `number` is a PR's, and the issues stay
+    /// covered whatever their number: merging a PR may close any of them.
     fn covers(&self, repo: &Repo, (scope, subject): &TargetKey, target: &Target) -> bool {
         let other = |known: Option<u64>| self.number.zip(known).is_some_and(|(n, k)| n != k);
+        let branches = self.names("pr") || self.names("pipelines");
         match subject {
             Subject::Branch(_) | Subject::Pr(_) => {
-                *scope == repo.id
-                    && (self.names("pr") || self.names("pipelines"))
-                    && !other(target.pr_number())
+                *scope == repo.id && branches && !other(target.pr_number())
             }
             Subject::Issues => *scope == repo.tracker && self.names("issues"),
             Subject::Issue(number) => {
-                *scope == repo.tracker && self.names("issues") && !other(Some(*number))
+                *scope == repo.tracker
+                    && self.names("issues")
+                    && (branches || !other(Some(*number)))
             }
         }
     }
@@ -412,8 +415,12 @@ impl Core {
     /// forced: a scope is a hint, and only what changed is published. A
     /// scope no provider recognises, or that covers nothing, does nothing.
     pub fn refresh_scope(&mut self, scope: &[u8]) {
-        let Ok(scope) = serde_json::from_slice::<Scope>(scope) else {
-            return;
+        let scope = match serde_json::from_slice::<Scope>(scope) {
+            Ok(scope) => scope,
+            Err(e) => {
+                crate::log(format_args!("refresh-scope ignored: {e}"));
+                return;
+            }
         };
         let Some(repo) = self
             .providers
@@ -919,7 +926,8 @@ mod tests {
 
     /// A scope refreshes what it covers in its repository, its remote
     /// spelt any way: the kinds it names, and with a number, the PR or
-    /// issue of that number and the branches whose open PR is unknown.
+    /// issue of that number and the branches whose open PR is unknown;
+    /// beside a PR's kind, every issue.
     #[tokio::test]
     async fn a_scope_refreshes_the_targets_it_covers() {
         let (mut core, fake) = core();
@@ -967,6 +975,20 @@ mod tests {
             json!({ "remote": "https://forge/o/x", "types": ["issues"], "number": 52 }),
         ));
         assert_eq!(fake.refreshed().await, ["forge/o #52", "forge/o issues"]);
+        // A merged PR may close any issue.
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pr", "issues"], "number": 7 }),
+        ));
+        assert_eq!(
+            fake.refreshed().await,
+            [
+                "forge/o #52",
+                "forge/o #53",
+                "forge/o issues",
+                "forge/o/r feat",
+                "forge/o/r main"
+            ]
+        );
         core.refresh_scope(&scope(json!({ "remote": "https://forge/o/x" })));
         assert_eq!(
             fake.refreshed().await,
