@@ -2,7 +2,8 @@
 
 État au 2026-11-13 : conception refaite sous #52, implémentation dans #125 ;
 détection des changements, clés dynamiques et rafraîchissement ciblé conçus le
-2026-11-13, implémentés dans #132 (la détection sur GitHub seulement). Brique
+2026-11-13, implémentés dans #132 ; détecteurs Azure DevOps décidés le
+2026-11-13 d'après une revue sur un projet réel. Brique
 native (`01-briques.md`), qui remplace le premier jet décrit dans `00-cadrage.md`.
 
 La brique est organisée par usages : une PR, des pipelines, des issues. Chaque
@@ -341,7 +342,7 @@ contourné, pas plié pour elle.
 | Commit testé par un pipeline de PR | non donné par l'API REST | donné | `sha` : la tête quand il manque |
 | Statuts extérieurs | statuts de commit | statuts de PR | pipeline `external` |
 | Coût d'une lecture | gratuite quand rien ne change (`304`) | toujours comptée (TSTU) | rythme propre au provider |
-| Voir ce qui a bougé | trois listes par dépôt, en requêtes conditionnelles | comparaison du contenu, non vérifiée | détection propre au provider |
+| Voir ce qui a bougé | trois listes par dépôt, en requêtes conditionnelles | des listes par projet et par dépôt, contenu comparé | détection propre au provider |
 
 Un provider à venir ajoute sa colonne, pas un champ : une notion qu'une seule forge
 connaît prend une valeur neutre ailleurs, ou n'entre pas dans le contrat.
@@ -557,12 +558,15 @@ Par la CLI, le jeton expire : le provider en redemande un avant son échéance
 
 **Compte.** `account` vient de `/<organisation>/_apis/connectionData`, non documenté
 et sans `api-version` : `properties.Account.$value`, sinon `providerDisplayName`, en
-minuscules.
+minuscules. `properties.Account.$value` est l'adresse électronique du compte
+(vérifié le 2026-11-13 sur un projet réel).
 
 **Pas d'`ETag`** (`cache-control: no-store`) : le provider compare le contenu pour
 savoir ce qui a changé. Le budget est de 200 TSTU par fenêtre glissante de
-5 minutes. `X-RateLimit-Cost` n'accompagne pas toutes les réponses : absent sur la
-liste des PR, présent sur les builds, le timeline et WIQL (de 0,015 à 0,03). Les
+5 minutes. `X-RateLimit-Cost` n'accompagne pas toutes les réponses. Mesuré le
+2026-11-13 sur un projet réel : de 0,006 à 0,02 TSTU sur la liste des builds, 0,017
+sur WIQL, 0,013 sur le timeline, 0,006 sur les pushes ; aucun en-tête de coût sur la
+liste des PR, les refs, les statuts de PR et les évaluations de politique. Les
 en-têtes de budget (`X-RateLimit-Remaining`…) n'apparaissent que quand il s'épuise.
 Une lecture de branche fait environ 4 appels (mesuré le 2026-11-10 sur un projet
 réel).
@@ -584,9 +588,13 @@ réel).
 - **La PR** : `active`, `completed` et `abandoned` donnent `open`, `merged` et
   `closed` ; `isDraft` donne `draft`. La complétion automatique se lit sur
   `autoCompleteSetBy` (qui l'a demandée) et `completionOptions.mergeStrategy`.
+  `lastMergeSourceCommit` était présent sur les 28 PR actives d'un projet réel le
+  2026-11-13. Une PR se lit par le dépôt de son remote : lue par un autre dépôt du
+  même projet, elle répond `404` `TF401180` (vérifié le même jour), si bien qu'une
+  clé `{remote, pr}` ne mêle pas les dépôts.
 - **La CI d'une PR est celle de ses politiques de build et de statut.** Une
-  politique de build (type `0609b952-1397-4640-95ec-e00a01b2c241`, vérifié le
-  2026-11-10) désigne un pipeline (`settings.buildDefinitionId`), et
+  politique de build (type `0609b952-1397-4640-95ec-e00a01b2c241`, vérifié les
+  2026-11-10 et 2026-11-13) désigne un pipeline (`settings.buildDefinitionId`), et
   `configuration.isBlocking` dit s'il est obligatoire : tous les jobs du pipeline le
   sont alors, ou aucun. Le build retenu est celui
   que l'évaluation désigne (`context.buildId`), celui qu'Azure DevOps montre sur la
@@ -596,7 +604,8 @@ réel).
   un pipeline `queued` sans job, le build suivant n'étant pas encore visible : la CI
   reste attendue. Une politique dont le filtre de chemins ne correspond pas est
   `notApplicable`, donc `skipped`. Une politique de statut (type
-  `cbdc66da-9728-4af8-aada-9a5a32e4a226`, non vérifié) qui ne s'applique pas ne
+  `cbdc66da-9728-4af8-aada-9a5a32e4a226`, non vérifié : aucune n'était configurée
+  sur le projet revu le 2026-11-13) qui ne s'applique pas ne
   bloque pas. Les autres politiques (relecteurs, commentaires, stratégie de merge)
   disent si la PR peut être mergée, pas si sa CI passe.
 - **Avec une PR active, les builds de la branche sur sa tête sont lus aussi**, et
@@ -608,8 +617,13 @@ réel).
   rythme resterait sur « CI en cours » indéfiniment. Comme une politique à
   déclenchement manuel, elle forme un pipeline `waiting` sans job, qui porte
   `required` ; les jobs de l'ancien build ne sont pas publiés.
+- **Une politique `approved` sur un build ancien reste `pass`.** Avec
+  `context.buildIsNotCurrent: true`, le build a tourné sur un commit de merge plus
+  ancien et vaut encore (`validDuration`) : Azure DevOps tient la politique pour
+  satisfaite, et elle est publiée `pass` (vu le 2026-11-13 sur un projet réel).
 - **Ce qu'un pipeline de PR a testé** : `sourceVersion` est le commit de merge de la
-  PR (`lastMergeCommit`), `ref` vaut `refs/pull/<id>/merge`.
+  PR (`lastMergeCommit`), `ref` vaut `refs/pull/<id>/merge`. Une PR en conflit
+  (`mergeStatus: conflicts`) n'a pas de `lastMergeCommit` (vu le 2026-11-13).
 - **`trigger`**, d'après `reason` : `individualCI` et `batchedCI` donnent `push`,
   `pullRequest` `pull_request`, `manual` `manual`, `schedule` `schedule`,
   `resourceTrigger` `downstream`, toute autre valeur `other`. `individualCI` et
@@ -624,8 +638,13 @@ réel).
   jobs ou d'étape garde l'identifiant du build.
 - **Les statuts de PR s'accumulent** : une entrée par envoi et par itération. Le
   provider garde le plus récent de chaque contexte (`context.genre`/`context.name`),
-  sur la dernière itération. Un statut dont le `targetUrl` désigne un build publié
-  (`codecoverage`) appartient à ce build : il ne forme pas de pipeline `external`.
+  sur la dernière itération. Un statut appartient à un pipeline publié, et ne forme
+  pas de pipeline `external`, quand son `targetUrl` désigne l'un de ses builds ou
+  quand son `context.genre` est le nom de sa définition, sans égard à la casse. Le
+  `targetUrl` seul ne suffit pas : sur un projet réel le 2026-11-13, le statut
+  `codecoverage` qu'un build pose (`createdBy` « Azure Pipelines Test Service »,
+  `pending` puis `notApplicable`) avait un `targetUrl` `null`, et pour `genre` le nom
+  de la définition en minuscules.
 - **Work items.** WIQL ne filtre pas sur les catégories d'état :
   `[System.StateCategory]` n'existe pas (`TF51005`), et `[System.State] NOT IN GROUP
   'Completed'` est accepté mais ne filtre rien, `IN GROUP` ne visant que les
@@ -658,24 +677,48 @@ réel).
 | `skipped` | `skipped` ; politique et statut `notApplicable` |
 | `unknown` | toute autre valeur |
 
-**La détection, non vérifiée.** Même principe qu'avec GitHub, autre mécanique, et
-rien n'a tourné : cette conception est écrite sans accès à Azure DevOps, et un spike
-tournera depuis une machine qui a accès à un projet réel (voir « À vérifier sur Azure
-DevOps (spike) »). Sans `ETag`, le provider compare le contenu, et chaque appel est
-compté : aux 0,015 à 0,03 TSTU mesurés sur les appels de liste, trois détecteurs
-interrogés toutes les 10 s coûteraient environ 3 TSTU par fenêtre de 5 minutes, sur
-200 (une estimation tirée de ces mesures). Les candidats :
+**La détection**, décidée d'après une revue en lecture seule d'un projet réel
+(19 dépôts, 2026-11-13), implémentée dans #132. Même principe qu'avec GitHub, autre
+mécanique : sans `ETag`, chaque détecteur compare sa réponse à la précédente, et
+chaque appel est compté. Aux coûts mesurés, interroger les détecteurs toutes les
+10 s coûte environ 3 TSTU par fenêtre de 5 minutes, sur 200 (une estimation). Le
+délai entre un changement et sa visibilité n'est pas mesuré ; `lastChangedDate`
+(builds) et `date` (pushes) donnent la référence pour le faire.
 
-- les PR actives listées par projet, un appel pour tous les dépôts du projet ;
-- les derniers builds du projet ;
-- une requête WIQL sur `System.ChangedDate` depuis la dernière lecture, qui ne rend
-  que les identifiants des work items changés.
+| Détecteur | Endpoint | Portée | Ce qui signale un changement |
+|---|---|---|---|
+| PR | `_apis/git/pullrequests` (les PR actives) | par projet | le contenu d'une PR, comparé |
+| pipelines | `build/builds?statusFilter=inProgress,notStarted`, puis `build/builds?queryOrder=finishTimeDescending&statusFilter=completed&$top=20` | par projet | `id`, `status`, `result`, `lastChangedDate`, comparés |
+| pushes | `git/repositories/<dépôt>/pushes?searchCriteria.fromDate=<t>&searchCriteria.includeRefUpdates=true` | par dépôt | chaque push depuis `<t>` |
+| work items | `wit/reporting/workitemrevisions?startDateTime=<t>&fields=…` | par projet | chaque révision depuis `<t>` |
+
+- **Les PR, un appel pour tout le projet** : 28 PR actives sur 7 dépôts, environ
+  84 Ko, gzip accepté. La liste porte les votes (`reviewers[].vote`),
+  `lastMergeSourceCommit`, `lastMergeCommit` (qui change quand la base avance),
+  `isDraft` et `autoCompleteSetBy`, mais ni date de mise à jour, ni statuts, ni
+  évaluations de politique : un statut posé par un outil extérieur ne se voit qu'à
+  la relecture de la PR au rythme normal.
+- **Les builds, deux appels par projet** : tous les builds actifs, et les 20
+  derniers terminés. La liste ne se trie pas par dernier changement (`queueTime`,
+  `startTime`, `finishTime` seulement), et un `queryOrder` inconnu est ignoré avec un
+  `200`. Contrairement à GitHub, un long build ne peut pas sortir de la liste. Chaque
+  build donne sa cible : `repository.name`, `sourceBranch` (`refs/heads/<branche>`
+  ou `refs/pull/<n>/merge`) et `triggerInfo`, qui ne porte que `pr.number` et
+  `pr.isFork`.
+- **Les pushes voient chaque branche qui bouge**, les mises à jour de
+  `refs/pull/<n>/merge` comprises (le commit de merge recalculé quand la base
+  avance). Ils couvrent la branche sans PR qui avance sans CI, que GitHub laisse au
+  rythme normal.
+- **Les work items par leurs révisions** : un flux incrémental dont le serveur tient
+  le repère (`continuationToken`, `isLastBatch`), qui rend les champs demandés
+  (`System.Id`, `System.State`, `System.AssignedTo`, `System.Title`,
+  `System.WorkItemType`) sans second appel et ne dépend pas de l'horloge locale. Son
+  coût n'apparaît pas dans les en-têtes : à mesurer à l'implémentation. À défaut,
+  WIQL sur `System.ChangedDate`, avec `wit/wiql?timePrecision=true` : une heure dans
+  la date répond `400` sans ce paramètre.
 
 La progression d'une CI se lit par le timeline de chaque build, par incréments avec
-`changeId`, comme aujourd'hui. Jusqu'au spike, le provider garde sa lecture par
-branche et comprend le rafraîchissement ciblé en relisant les flux de la portée :
-ceux du dépôt (du projet pour les issues), des sortes nommées, et du numéro quand il
-est donné. L'interface du mod central est ainsi la même pour les deux forges.
+`changeId`, comme aujourd'hui.
 
 **Rythme** : la machine à rythme, avec CI attendue 5 s pendant 30 s puis 10 s, CI en
 cours 10 s, fenêtre rapide 5 s, normal 120 s. Sur une PR, « CI attendue » n'a pas à
@@ -705,7 +748,7 @@ tête d'une branche, une issue par son numéro) et publie les flux dont le déta
 changé. Un flux `pr` ou `pipelines` dépend des détecteurs des PR et des pipelines de
 son dépôt, un flux `issues` ou `issue` de celui des issues de son suivi. Un détecteur
 n'existe que tant qu'un flux en dépend. La mécanique appartient au provider : mesurée
-sur GitHub, à vérifier sur Azure DevOps (voir « Les providers »).
+sur GitHub, observée sur un projet Azure DevOps réel (voir « Les providers »).
 
 ### Le rafraîchissement ciblé
 
@@ -755,6 +798,12 @@ d'un sous-agent, il en fait une portée :
   l'API, les paramètres de l'outil MCP. À défaut, c'est celui du répertoire de
   travail de la commande. Le numéro vient des mêmes sources. `gh` écrit une part
   de ses messages sur stderr : le mod lit les deux sorties.
+- **Le serveur MCP Azure DevOps regroupe ses écritures** dans
+  `repo_pull_request_write`, `wit_work_item_write` et `pipelines_write` (avec
+  `repo_pull_request_thread_write`, `wit_work_item_comment_write`,
+  `repo_create_branch` et `repo_file_write`), l'opération dans le paramètre
+  `action` (relevé le 2026-11-13). Une mise à jour par lot porte ses identifiants
+  dans `batchUpdates[].id`.
 - **Un work item Azure DevOps connu par son seul projet** prend pour remote le
   dépôt par défaut du projet, qui porte son nom : les work items appartiennent au
   projet, pas à un dépôt.
@@ -859,32 +908,17 @@ change.
 
 ## À vérifier sur Azure DevOps (spike)
 
-Le provider Azure DevOps est construit d'après cette conception sans avoir tourné sur
-un projet réel. Ces points sont à vérifier depuis une machine qui a accès à un tel
-projet, chacun avec sa date et ce qui a été observé.
+Une revue en lecture seule d'un projet réel (2026-11-13) a tranché la détection et
+confirmé une partie des lectures (voir « Azure DevOps »). Ce projet ne permettait
+pas de vérifier le reste, à reprendre sur un projet qui le montre :
 
-La détection :
-
-- si la liste des builds se trie par dernier changement, et pas seulement par heure
-  de mise en file ;
-- si la liste des PR reflète les votes et les statuts, ou s'il faut lire chaque PR
-  active ;
-- si les listes par projet (PR, builds) fonctionnent et couvrent tous les dépôts du
-  projet ;
-- le délai et le coût réel (`X-RateLimit-Cost`) de chaque détecteur ;
-- si une requête WIQL sur `System.ChangedDate` voit tous les changements d'un work
-  item (état, assignation, commentaires), et avec quel délai.
-
-Le provider tel que conçu :
-
-- les quatre sortes sur un vrai dépôt ;
+- l'enregistrement d'une approbation en attente : seuls `Checkpoint` et
+  `Checkpoint.ExtendsCheck` y apparaissaient, aucun `Checkpoint.Approval` ;
+- le type de la politique de statut, aucune n'étant configurée ;
 - les politiques expirées, et l'état d'une politique à déclenchement manuel ;
-- le filtre des work items ;
-- le type de la politique de statut ;
-- l'enregistrement d'une approbation en attente ;
-- le `targetUrl` d'un statut posé par un build ;
-- si une PR active peut manquer de `lastMergeSourceCommit` ;
-- le compte rendu par `connectionData`.
+- le délai de chaque détecteur ;
+- les quatre sortes lues par le provider sur un vrai dépôt, et le filtre des work
+  items.
 
 ## Sources
 
