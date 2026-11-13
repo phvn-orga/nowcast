@@ -95,8 +95,8 @@ export async function refreshBrick(
   kind?: string,
   scope?: Record<string, unknown>,
 ): Promise<NowcastDone | NowcastFailure> {
-  const fields = { ...(kind === undefined ? {} : { kind }), ...(scope === undefined ? {} : { scope }) }
-  const body = Object.keys(fields).length === 0 ? undefined : fields
+  // JSON leaves out the field that is undefined.
+  const body = kind === undefined && scope === undefined ? undefined : { kind, scope }
   return expect(await request($, 'POST', `/v1/bricks/${encodeURIComponent(brick)}/refresh`, body), 202, done)
 }
 
