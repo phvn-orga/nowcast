@@ -1,5 +1,5 @@
-//! The GitHub provider: recognises GitHub remotes and follows a branch
-//! through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
+//! The GitHub provider: recognises GitHub remotes and follows a branch, or
+//! a PR by its number, through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
 //! checks the base of its open PR requires ([`required`]) and the PR's
 //! entry in the base's merge queue ([`queue`]). A reading
 //! that changes nothing costs no rate limit (`304`), hence a fast pace while
@@ -23,7 +23,7 @@ use tokio::time::Instant;
 
 use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
-use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
 use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, wait_or_refresh};
 use crate::tools::remote;
@@ -97,6 +97,25 @@ impl GitHub {
         };
         Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
     }
+
+    /// Follows `head` of `repo`: a branch, or a PR by its number.
+    fn follow_head(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
+        let (owner, name) = owner_and_name(repo);
+        let branch = Branch {
+            http: self.http.clone(),
+            api: self.api.clone(),
+            credentials: self.credentials.clone(),
+            tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
+            required: self.required.clone(),
+            queues: self.queues.clone(),
+            memory: Memory::default(),
+            owner,
+            name,
+            head,
+        };
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+    }
 }
 
 /// The owner as the remote writes it, `gh` matching logins
@@ -121,21 +140,11 @@ impl Provider for GitHub {
     }
 
     fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
-        let (owner, name) = owner_and_name(repo);
-        let branch = Branch {
-            http: self.http.clone(),
-            api: self.api.clone(),
-            credentials: self.credentials.clone(),
-            tokens: self.tokens.clone(),
-            accounts: self.accounts.clone(),
-            required: self.required.clone(),
-            queues: self.queues.clone(),
-            memory: Memory::default(),
-            owner,
-            name,
-            branch: branch.to_owned(),
-        };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+        self.follow_head(repo, Head::Branch(branch.to_owned()), updates)
+    }
+
+    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch {
+        self.follow_head(repo, Head::Pr(number), updates)
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -147,7 +156,7 @@ impl Provider for GitHub {
     }
 }
 
-/// One branch followed.
+/// One branch followed, by its name or through a PR's number.
 struct Branch {
     http: Http,
     api: String,
@@ -159,7 +168,7 @@ struct Branch {
     memory: Memory,
     owner: String,
     name: String,
-    branch: String,
+    head: Head,
 }
 
 impl Branch {
@@ -219,15 +228,11 @@ impl Branch {
         else {
             return (Err(Failure::NoCredentials), None);
         };
-        let read = read::read(
-            &self.http,
-            &self.api,
-            &token,
-            &self.owner,
-            &self.name,
-            &self.branch,
-        )
-        .await;
+        let (http, api, owner, name) = (&self.http, &self.api, &self.owner, &self.name);
+        let read = match &self.head {
+            Head::Branch(branch) => read::read(http, api, &token, owner, name, branch).await,
+            Head::Pr(number) => read::read_pr(http, api, &token, owner, name, *number).await,
+        };
         let failure = match read {
             Ok(mut reading) => {
                 let names = self.mark_required(&token, &mut reading).await;
@@ -236,7 +241,7 @@ impl Branch {
             }
             Err(failure) => failure,
         };
-        let at = format!("github.com/{}/{}#{}", self.owner, self.name, self.branch);
+        let at = format!("github.com/{}/{}{}", self.owner, self.name, self.head);
         let (failure, wait) = failed(&self.tokens, &self.owner, &at, failure);
         (Err(failure), wait)
     }
@@ -615,7 +620,7 @@ mod tests {
             memory: Memory::default(),
             owner: owner.into(),
             name: "r".into(),
-            branch: "feat".into(),
+            head: Head::Branch("feat".into()),
         }
     }
 
@@ -1127,6 +1132,58 @@ mod tests {
         assert_eq!(asked(&server, "timelineitems"), 2);
         read_pr(&mut branch).await;
         assert_eq!(asked(&server, "timelineitems"), 2, "answered: not again");
+    }
+
+    /// A PR followed by its number is read whatever its state, with its
+    /// head branch and the CI of its head; a number that is no PR is not
+    /// found.
+    #[tokio::test]
+    async fn a_pr_is_followed_by_its_number() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/repos/o/r/pulls/7 ") {
+                json!({ "number": 7, "state": "closed", "draft": false, "html_url": "u",
+                    "merged_at": "t", "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } })
+            } else if line.contains("/actions/runs?head_sha=abc") {
+                json!({ "workflow_runs": [{ "id": 1, "name": "CI", "path": "ci.yml",
+                    "event": "pull_request", "check_suite_id": 10, "status": "completed",
+                    "conclusion": "success", "created_at": "t" }] })
+            } else if line.contains("/commits/abc/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/commits/abc/status") {
+                json!({ "statuses": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let mut branch = branch(&server, "o");
+        branch.head = Head::Pr(7);
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(reading.branch.as_deref(), Some("feat"));
+        assert_eq!(reading.head_sha.as_deref(), Some("abc"));
+        let pr = reading.pr.unwrap();
+        assert_eq!((pr.number, pr.state, pr.queue), (7, "merged", None));
+        let ci = reading.ci.unwrap();
+        assert_eq!(ci.sha, "abc");
+        let run = &ci.pipelines[0];
+        assert_eq!(run.git_ref.as_deref(), Some("refs/pull/7/merge"));
+        assert!(
+            !server.requests().iter().any(|r| r.contains("/pulls?")),
+            "no listing"
+        );
+        branch.head = Head::Pr(8);
+        assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
     }
 
     /// The provider follows a branch: its first reading reaches the core.

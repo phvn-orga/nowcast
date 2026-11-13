@@ -54,8 +54,8 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!(concat!(env!("OUT_DIR"), "/brick.toml")),
     ),
     (
-        "schemas/params-branch.json",
-        include_str!("../schemas/params-branch.json"),
+        "schemas/params-pr.json",
+        include_str!("../schemas/params-pr.json"),
     ),
     ("schemas/pr-v1.json", include_str!("../schemas/pr-v1.json")),
     (

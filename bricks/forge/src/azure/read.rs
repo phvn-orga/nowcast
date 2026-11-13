@@ -59,9 +59,39 @@ pub async fn read(
         }
     };
     Ok(BranchReading {
+        branch: None,
         head_sha,
         pr: found.map(|(pr, _)| pr),
         ci,
+    })
+}
+
+/// Reads PR `number` of the repository, whatever its state, its source
+/// branch, and the CI of its head as for a branch: that of the PR while it
+/// is active, else the builds of its head.
+pub async fn read_pr(
+    client: &Client<'_>,
+    names: &Names,
+    number: u64,
+    memory: &mut Memory,
+) -> Result<BranchReading, Failure> {
+    let path = format!("{}/pullrequests/{number}?{VERSION}", names.repo_api());
+    let raw = client.get(&path).await?;
+    let pr = pr_of(&raw, names)
+        .ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
+    let source = raw["sourceRefName"].as_str().unwrap_or_default();
+    let branch = source.strip_prefix("refs/heads/").unwrap_or(source);
+    let ci = if pr.is_open() {
+        pr_ci(client, names, branch, &pr, &raw, memory).await?
+    } else {
+        memory.iteration = None;
+        branch_ci(client, names, branch, &pr.head_sha).await?
+    };
+    Ok(BranchReading {
+        branch: Some(branch.to_owned()),
+        head_sha: Some(pr.head_sha.clone()),
+        pr: Some(pr),
+        ci: Some(ci),
     })
 }
 
@@ -846,7 +876,8 @@ mod tests {
         assert_eq!(missing, ["ci/e2e"]);
     }
 
-    /// A forge where `feat` has the active PR 7, whose blocking build
+    /// A forge where `feat` has the active PR 7, also read by its number,
+    /// whose blocking build
     /// policy designates build 40: two stages, `build` with the jobs `a`
     /// and `b`, `deploy` waiting for an approval. Build 41 of another
     /// definition tested the merge commit; build 39, an older merge commit.
@@ -857,6 +888,8 @@ mod tests {
             let line = request.lines().next().unwrap_or_default().to_owned();
             let body = if line.contains("/pullrequests?searchcriteria.status=active") {
                 json!({ "value": [raw_pr("active")] })
+            } else if line.contains("/repositories/r/pullrequests/7?api-version=7.1 ") {
+                raw_pr("active")
             } else if line.contains("/policy/evaluations?") {
                 let mut skipped = evaluation("e2", "notApplicable", json!({ "buildId": 38 }), true);
                 skipped["configuration"]["settings"]["buildDefinitionId"] = json!(15);
@@ -995,6 +1028,74 @@ mod tests {
             "no status"
         );
         assert!(!requests.iter().any(|r| r.contains("/builds/38")));
+    }
+
+    /// An active PR read by its number reads as its source branch: the
+    /// same PR and CI, its branch named, and no listing of the PRs.
+    #[tokio::test]
+    async fn an_active_pr_by_its_number_reads_as_its_branch() {
+        let server = forge().await;
+        let by_branch = read_feat(&context(&server)).await;
+        let context = context(&server);
+        let client = Client {
+            context: &context,
+            token: "t".into(),
+        };
+        let listings = server.requests().len();
+        let by_number = read_pr(&client, &names(), 7, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(by_number.branch.as_deref(), Some("feat"));
+        assert_eq!(
+            BranchReading {
+                branch: None,
+                ..by_number
+            },
+            by_branch
+        );
+        assert!(
+            !server.requests()[listings..]
+                .iter()
+                .any(|r| r.contains("/pullrequests?")),
+            "no listing"
+        );
+    }
+
+    /// A PR no longer active, read by its number, gives the builds of its
+    /// head; a number that is no PR is not found.
+    #[tokio::test]
+    async fn a_completed_pr_by_its_number_gives_the_builds_of_its_head() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pullrequests/7?") {
+                raw_pr("completed")
+            } else if line.contains("/build/builds?branchname=refs%2fheads%2ffeat") {
+                json!({ "value": [{ "id": 2, "status": "completed", "result": "succeeded",
+                    "reason": "individualCI", "definition": { "id": 1 }, "sourceVersion": "abc" }] })
+            } else if line.contains("/timeline") {
+                json!({ "changeId": 1, "records": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let context = context(&server);
+        let client = Client {
+            context: &context,
+            token: "t".into(),
+        };
+        let reading = read_pr(&client, &names(), 7, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(reading.branch.as_deref(), Some("feat"));
+        assert_eq!(reading.head_sha.as_deref(), Some("abc"));
+        assert_eq!(reading.pr.unwrap().state, "merged");
+        let ci = reading.ci.unwrap();
+        assert_eq!(ci.sha, "abc");
+        assert_eq!(ci.pipelines[0].id, "2");
+        let missing = read_pr(&client, &names(), 8, &mut Memory::default()).await;
+        assert_eq!(missing, Err(Failure::NotFound));
     }
 
     /// A queued evaluation that still names a completed build waits for

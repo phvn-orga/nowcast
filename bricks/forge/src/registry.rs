@@ -2,17 +2,22 @@
 //! publication. It knows no forge and no pace.
 //!
 //! - `pr {remote, branch}` publishes `forge.pr/v1`, flow
-//!   `pr/<repo>#<branch>`;
+//!   `pr/<repo>#<branch>`, and `pr {remote, pr}`, flow `pr/<repo>!<pr>`;
 //! - `pipelines {remote, branch}` publishes `forge.pipelines/v1`, flow
-//!   `pipelines/<repo>#<branch>`;
+//!   `pipelines/<repo>#<branch>`, and `pipelines {remote, pr}`, flow
+//!   `pipelines/<repo>!<pr>`;
 //! - `issues {remote}` publishes `forge.issues/v1`, flow `issues/<tracker>`;
 //! - `issue {remote, number}` publishes `forge.issue/v1`, flow
 //!   `issue/<tracker>#<number>`.
 //!
-//! A target is what a provider follows: a branch, a tracker's open issues,
-//! or one issue. Both kinds of one branch share a target: the provider
-//! follows the branch once and each reading serves both flows. A flow is
-//! published when its detail changed, and after a `refresh` in any case.
+//! A target is what a provider follows: a branch, a PR by its number, a
+//! tracker's open issues, or one issue. Both kinds of one branch, or of one
+//! PR, share a target: the provider follows it once and each reading serves
+//! both flows. A PR's number and its head branch are two targets, the
+//! subscription being accepted without asking the forge which branch that
+//! is; a provider shares their requests where it can (GitHub's conditional
+//! requests). A flow is published when its detail changed, and after a
+//! `refresh` in any case.
 
 use std::collections::HashMap;
 
@@ -70,10 +75,12 @@ impl Kind {
     /// The subject `params` name for this kind, or why they do not.
     fn subject(self, params: &Value) -> Result<Subject, &'static str> {
         match self {
-            Self::Pr | Self::Pipelines => params["branch"]
-                .as_str()
-                .map(|b| Subject::Branch(b.to_owned()))
-                .ok_or("remote and branch are required"),
+            Self::Pr | Self::Pipelines => match (params.get("branch"), params.get("pr")) {
+                (Some(branch), None) => branch.as_str().map(|b| Subject::Branch(b.to_owned())),
+                (None, Some(pr)) => pr.as_u64().filter(|n| *n > 0).map(Subject::Pr),
+                _ => None,
+            }
+            .ok_or("remote and either branch or a positive pr are required"),
             Self::Issues => Ok(Subject::Issues),
             Self::Issue => params["number"]
                 .as_u64()
@@ -88,17 +95,19 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Subject {
     Branch(String),
+    /// A PR by its number.
+    Pr(u64),
     /// The tracker's open issues.
     Issues,
     Issue(u64),
 }
 
 impl Subject {
-    /// What the subject belongs to: the repository for a branch, the
-    /// tracker for issues.
+    /// What the subject belongs to: the repository for a branch or a PR,
+    /// the tracker for issues.
     fn scope(&self, repo: &Repo) -> String {
         match self {
-            Self::Branch(_) => repo.id.clone(),
+            Self::Branch(_) | Self::Pr(_) => repo.id.clone(),
             Self::Issues | Self::Issue(_) => repo.tracker.clone(),
         }
     }
@@ -107,6 +116,7 @@ impl Subject {
     fn flow(&self, kind: Kind, scope: &str) -> String {
         match self {
             Self::Branch(branch) => format!("{}/{scope}#{branch}", kind.name()),
+            Self::Pr(number) => format!("{}/{scope}!{number}", kind.name()),
             Self::Issues => format!("{}/{scope}", kind.name()),
             Self::Issue(number) => format!("{}/{scope}#{number}", kind.name()),
         }
@@ -169,11 +179,13 @@ impl Target {
         }
     }
 
-    /// The branch's name, for a branch's target.
-    fn branch_name(&self) -> &str {
+    /// The branch's name, for a branch's target; for a PR's, its head
+    /// branch, `None` until a reading names it.
+    fn branch_name(&self) -> Option<&str> {
         match &self.subject {
-            Subject::Branch(branch) => branch,
-            _ => "",
+            Subject::Branch(branch) => Some(branch),
+            Subject::Pr(_) => self.branch().and_then(|r| r.branch.as_deref()),
+            _ => None,
         }
     }
 }
@@ -288,6 +300,7 @@ impl Core {
         let provider = &self.providers[index];
         let watch = match &key.1 {
             Subject::Branch(branch) => provider.follow(&repo, branch, updates),
+            Subject::Pr(number) => provider.follow_pr(&repo, *number, updates),
             Subject::Issues => provider.follow_issues(&repo, updates),
             Subject::Issue(number) => provider.follow_issue(&repo, *number, updates),
         };
@@ -533,6 +546,10 @@ mod tests {
             self.watch(&repo.id, branch.to_owned())
         }
 
+        fn follow_pr(&self, repo: &Repo, number: u64, _updates: Updates) -> Watch {
+            self.watch(&repo.id, format!("!{number}"))
+        }
+
         fn follow_issues(&self, repo: &Repo, _updates: Updates) -> Watch {
             self.watch(&repo.tracker, "issues".to_owned())
         }
@@ -558,6 +575,7 @@ mod tests {
         let mut ci = ci(vec![pipeline(state, vec![job("check", state, Some(true))])]);
         ci.sha = sha.into();
         Ok(Reading::Branch(Box::new(BranchReading {
+            branch: None,
             head_sha: Some(sha.into()),
             pr: Some(Pr {
                 number: 7,
@@ -725,6 +743,87 @@ mod tests {
         assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
     }
 
+    fn pr_params(remote: &str, number: u64) -> Vec<u8> {
+        json!({ "remote": remote, "pr": number })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// A PR's number is a key of its own, answered without the forge: both
+    /// kinds share its following, apart from that of its head branch, and
+    /// its head branch is published once a reading names it.
+    #[tokio::test]
+    async fn a_pr_number_is_a_key_of_its_own() {
+        let (mut core, fake) = core();
+        let flow = |out: Vec<BrickMessage>| match &out[..] {
+            [BrickMessage::Subscribed { flow, .. }] => flow.as_str().to_owned(),
+            other => panic!("{other:?}"),
+        };
+        let pr = core.subscribe(RequestId(1), "pr", &pr_params("https://forge/O/R", 7));
+        let pipelines = core.subscribe(
+            RequestId(2),
+            "pipelines",
+            &pr_params("https://forge/o/r", 7),
+        );
+        core.subscribe(RequestId(3), "pr", &params("https://forge/o/r"));
+        assert_eq!(flow(pr), "pr/forge/o/r!7");
+        assert_eq!(flow(pipelines), "pipelines/forge/o/r!7");
+        assert_eq!(
+            *fake.followed.lock().unwrap(),
+            [
+                ("forge/o/r".to_owned(), "!7".to_owned()),
+                ("forge/o/r".to_owned(), "feat".to_owned()),
+            ]
+        );
+        let out = published(&core.update(
+            1,
+            Err(Failure::Unreachable),
+            Timestamp::now(),
+            Instant::now(),
+        ));
+        let pr = &out.iter().find(|(f, _)| f.starts_with("pr/")).unwrap().1;
+        assert_eq!(
+            (&pr["branch"], &pr["head_sha"]),
+            (&Value::Null, &Value::Null)
+        );
+        let Ok(Reading::Branch(mut read)) = reading("a", State::Running) else {
+            unreachable!()
+        };
+        read.branch = Some("feat".into());
+        let out = published(&core.update(
+            1,
+            Ok(Reading::Branch(read)),
+            Timestamp::now(),
+            Instant::now(),
+        ));
+        assert_eq!(out.len(), 2);
+        for (flow, detail) in &out {
+            assert_eq!(detail["branch"], "feat", "{flow}");
+        }
+        let pr = &out.iter().find(|(f, _)| f.starts_with("pr/")).unwrap().1;
+        assert_eq!(
+            (&pr["head_sha"], &pr["pr"]["number"]),
+            (&json!("a"), &json!(7))
+        );
+    }
+
+    /// `pr` and `pipelines` take a branch or a positive PR number, not both.
+    #[tokio::test]
+    async fn a_pr_key_names_a_branch_or_a_number() {
+        let (mut core, _) = core();
+        for params in [
+            br#"{"remote":"https://forge/o/r"}"#.as_slice(),
+            br#"{"remote":"https://forge/o/r","branch":"feat","pr":7}"#,
+            br#"{"remote":"https://forge/o/r","pr":0}"#,
+            br#"{"remote":"https://forge/o/r","pr":"7"}"#,
+        ] {
+            match &core.subscribe(RequestId(1), "pipelines", params)[..] {
+                [BrickMessage::Error { code, .. }] => assert_eq!(code, "invalid_params"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_failure_keeps_the_last_reading() {
         let (mut core, _) = core();
@@ -751,6 +850,7 @@ mod tests {
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
         let t0 = Instant::now();
         let expected = Ok(Reading::Branch(Box::new(BranchReading {
+            branch: None,
             head_sha: Some("a".into()),
             pr: None,
             ci: Some(Ci {

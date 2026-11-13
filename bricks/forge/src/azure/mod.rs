@@ -1,6 +1,6 @@
 //! The Azure DevOps provider: recognises Azure DevOps remotes, the old
-//! `visualstudio.com` addresses included, and follows a branch through the
-//! REST API ([`read`], [`timeline`]) at the pace of [`RHYTHM`]. Work items
+//! `visualstudio.com` addresses included, and follows a branch, or a PR by
+//! its number, through the REST API ([`read`], [`timeline`]) at the pace of [`RHYTHM`]. Work items
 //! belong to the project, not to the repository: the tracker is the project,
 //! whose open work items, and one work item, are followed at the normal pace
 //! ([`issues`]). Azure DevOps gives no `ETag` and counts every request
@@ -25,7 +25,7 @@ use tokio::time::Instant;
 
 use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::State;
-use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http, encode};
 use crate::tools::pace::{Pace, Rhythm, wait_or_refresh};
 use crate::tools::remote;
@@ -119,6 +119,17 @@ impl Azure {
         };
         Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
     }
+
+    /// Follows `head` of `repo`: a branch, or a PR by its number.
+    fn follow_head(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
+        let branch = Branch {
+            context: self.context.clone(),
+            names: Names::of(repo),
+            head,
+            memory: read::Memory::default(),
+        };
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+    }
 }
 
 impl Provider for Azure {
@@ -132,13 +143,11 @@ impl Provider for Azure {
     }
 
     fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
-        let branch = Branch {
-            context: self.context.clone(),
-            names: Names::of(repo),
-            branch: branch.to_owned(),
-            memory: read::Memory::default(),
-        };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+        self.follow_head(repo, Head::Branch(branch.to_owned()), updates)
+    }
+
+    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch {
+        self.follow_head(repo, Head::Pr(number), updates)
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -485,11 +494,11 @@ async fn failed(
     }
 }
 
-/// One branch followed.
+/// One branch followed, by its name or through a PR's number.
 struct Branch {
     context: Context,
     names: Names,
-    branch: String,
+    head: Head,
     memory: read::Memory,
 }
 
@@ -532,10 +541,18 @@ impl Branch {
             context: &self.context,
             token,
         };
-        match read::read(&client, &self.names, &self.branch, &mut self.memory).await {
+        let read = match &self.head {
+            Head::Branch(branch) => {
+                read::read(&client, &self.names, branch, &mut self.memory).await
+            }
+            Head::Pr(number) => {
+                read::read_pr(&client, &self.names, *number, &mut self.memory).await
+            }
+        };
+        match read {
             Ok(reading) => (Ok(reading), None),
             Err(failure) => {
-                let at = format!("{}#{}", self.names.id(), self.branch);
+                let at = format!("{}{}", self.names.id(), self.head);
                 let (failure, wait) = failed(&self.context, &at, failure).await;
                 (Err(failure), wait)
             }
@@ -714,6 +731,7 @@ mod tests {
     fn the_policies_of_a_pr_say_whether_a_ci_is_expected() {
         let t0 = Instant::now();
         let reading = |head: &str, pr: bool, pipelines| BranchReading {
+            branch: None,
             head_sha: Some(head.into()),
             pr: pr.then(open_pr),
             ci: Some(Ci {
@@ -757,7 +775,7 @@ mod tests {
         let branch = |org: &str| Branch {
             context: azure.context.clone(),
             names: names(org, "p", "r").unwrap(),
-            branch: "feat".into(),
+            head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
         };
         *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
@@ -807,7 +825,7 @@ mod tests {
         let mut branch = Branch {
             context: azure.context.clone(),
             names: names("o", "p", "r").unwrap(),
-            branch: "feat".into(),
+            head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
         };
         let no_credentials = (Err(Failure::NoCredentials), None);
@@ -850,7 +868,7 @@ mod tests {
         let mut branch = Branch {
             context: azure.context.clone(),
             names: names("o", "p", "r").unwrap(),
-            branch: "feat".into(),
+            head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
         };
         fake.choose(Forge::Azure, Some(Source::Token), Some("good"));

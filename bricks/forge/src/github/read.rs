@@ -68,7 +68,34 @@ pub async fn read(
         ),
         None => None,
     };
-    Ok(BranchReading { head_sha, pr, ci })
+    Ok(BranchReading {
+        branch: None,
+        head_sha,
+        pr,
+        ci,
+    })
+}
+
+/// Reads PR `number` of `owner/name`, whatever its state, its head branch,
+/// and the CI of its head as for a branch.
+pub async fn read_pr(
+    http: &Http,
+    api: &str,
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u64,
+) -> Result<BranchReading, Failure> {
+    let url = format!("{api}/repos/{owner}/{name}/pulls/{number}");
+    let p = http.get(&url, token, HEADERS).await?;
+    let pr = pr_of(&p).ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
+    let ci = ci(http, api, token, owner, name, &pr.head_sha, Some(number)).await?;
+    Ok(BranchReading {
+        branch: p["head"]["ref"].as_str().map(str::to_owned),
+        head_sha: Some(pr.head_sha.clone()),
+        pr: Some(pr),
+        ci: Some(ci),
+    })
 }
 
 /// Reads the CI of commit `sha` in `owner/name`, which `pr`, when open,

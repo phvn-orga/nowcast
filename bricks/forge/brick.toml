@@ -17,13 +17,13 @@ command = ["nowcast", "brick", "forge"]
 command = ["nowcast", "brick", "forge", "configure"]
 
 [subscriptions.pr]
-description = "A branch's PR, open first, with the rollup of its CI."
-schema = "schemas/params-branch.json"
+description = "A branch's PR, open first, or a PR by its number, with the rollup of its CI."
+schema = "schemas/params-pr.json"
 publishes = "forge.pr/v1"
 
 [subscriptions.pipelines]
-description = "The pipelines that tested a branch's head, those of its PR included, with their jobs."
-schema = "schemas/params-branch.json"
+description = "The pipelines that tested the head of a branch, or of a PR by its number, those of its PR included, with their jobs."
+schema = "schemas/params-pr.json"
 publishes = "forge.pipelines/v1"
 
 [subscriptions.issues]

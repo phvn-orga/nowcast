@@ -1,6 +1,7 @@
 //! What a forge implements to be read by the brick. The core knows no forge:
 //! it asks each provider whether it recognises a remote, and has the one
-//! that does follow a branch, a tracker's open issues, or one issue. How and
+//! that does follow a branch, a PR by its number, a tracker's open issues,
+//! or one issue. How and
 //! when the provider reads (protocol, pace, quotas, cache) is its own
 //! business; what it hands back is the neutral model of [`crate::model`].
 
@@ -26,12 +27,35 @@ pub struct Repo {
     pub remote: String,
 }
 
-/// What one reading of a branch found.
+/// What a branch's following is keyed by: the branch's name, or the
+/// number of a PR, whose head branch it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Head {
+    Branch(String),
+    Pr(u64),
+}
+
+impl std::fmt::Display for Head {
+    /// `#<branch>` or `!<number>`, as the flow identifiers end.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Branch(branch) => write!(f, "#{branch}"),
+            Self::Pr(number) => write!(f, "!{number}"),
+        }
+    }
+}
+
+/// What one reading of a branch, or of a PR and its head branch, found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchReading {
+    /// The PR's head branch, for a PR followed by its number; `None` for a
+    /// branch followed by its name, which its key gives.
+    pub branch: Option<String>,
     /// The branch's head on the forge; `None` when the branch is not there.
+    /// For a PR followed by its number, the PR's head.
     pub head_sha: Option<String>,
-    /// The branch's PR, open first, else the latest.
+    /// The branch's PR, open first, else the latest. For a PR followed by
+    /// its number, that PR, whatever its state.
     pub pr: Option<Pr>,
     /// The CI of the open PR's head, or of the branch's head; `None` without
     /// a commit to read.
@@ -135,6 +159,14 @@ pub trait Provider: Send + Sync {
     /// recognised: every reading, a [`Reading::Branch`], goes to `updates`,
     /// until the returned [`Watch`] is dropped.
     fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch;
+
+    /// Starts following PR `number` of `repo`, a repository this provider
+    /// recognised, whatever its state: every reading, a
+    /// [`Reading::Branch`] naming the PR's head branch, with the CI of its
+    /// head read as for a branch, goes to `updates`, until the returned
+    /// [`Watch`] is dropped. A number that is no PR is
+    /// [`Failure::NotFound`].
+    fn follow_pr(&self, repo: &Repo, number: u64, updates: Updates) -> Watch;
 
     /// Starts following the open issues of the tracker of `repo`: every
     /// reading, a [`Reading::Issues`], goes to `updates`, until the returned
