@@ -97,13 +97,13 @@ pub enum Polled<M> {
 
 /// The scopes detected, shared by every target of the provider.
 pub struct Detection<S: Scope> {
-    scopes: Arc<Mutex<HashMap<String, Weak<Watched<S>>>>>,
+    scopes: Mutex<HashMap<String, Weak<Watched<S>>>>,
 }
 
 impl<S: Scope> Default for Detection<S> {
     fn default() -> Self {
         Self {
-            scopes: Arc::default(),
+            scopes: Mutex::default(),
         }
     }
 }
@@ -293,7 +293,7 @@ pub struct Detected<S: Scope> {
 impl<S: Scope> Detected<S> {
     /// Waits until `deadline`, for a `refresh`, or for a detector to say the
     /// target moved; what piled up counts as one. A `refresh` calls
-    /// `refreshed`, and has the target's detectors poll first: what they
+    /// `refreshed_now`, and has the target's detectors poll first: what they
     /// wake is the reading that follows. A rate limit (`limited`) holds the
     /// wait whatever comes. `false` once the core is gone.
     pub async fn wait(

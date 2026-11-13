@@ -58,7 +58,8 @@ const PAGES: usize = 5;
 const KNOWN_MAX: usize = 10_000;
 /// The work items a WIQL poll lists at most.
 const CHANGED_MAX: usize = 200;
-/// The share of the budget under which a detector polls at [`SLOWEST`].
+/// The share of the budget under which a detector polls at
+/// [`SLOWEST`](crate::tools::throttle::SLOWEST).
 const LOW_BUDGET: f64 = 0.5;
 /// How long before the last push seen a pushes poll starts: whether the
 /// server takes `fromDate` as inclusive, or to the second only, no push
@@ -106,7 +107,7 @@ fn key(kind: Kind, interest: &Interest) -> Key {
 }
 
 /// What a target is about, for a detector to tell whether an item touches
-/// it. A target updates it from its readings ([`Watcher::learn`]).
+/// it. A target updates it from its readings ([`detect::Watcher::learn`]).
 #[derive(Debug, Clone, Default)]
 pub struct Interest {
     /// The detectors the target depends on.

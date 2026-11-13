@@ -109,7 +109,7 @@ impl Kind {
 }
 
 /// What a target is about, for a detector to tell whether an item touches
-/// it. A target updates it from its readings ([`Watcher::learn`]).
+/// it. A target updates it from its readings ([`detect::Watcher::learn`]).
 #[derive(Debug, Clone, Default)]
 pub struct Interest {
     /// The detectors the target depends on.
