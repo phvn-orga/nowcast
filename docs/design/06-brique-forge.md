@@ -411,11 +411,15 @@ quatre dépôts (NixOS/nixpkgs, home-assistant/core, microsoft/vscode, phvn-orga
   trois, 14 % du budget de 5 000 par heure. Sur nowcast, 40 s de fonctionnement
   (une branche et les issues du dépôt, le 2026-11-13) ont coûté 10 points : un par
   `200`, les 9 interrogations des détecteurs ayant répondu `304`.
-- **Un détecteur chargé ralentit.** Sa période part de 10 s. Une fois qu'il a 6
-  réponses à sa période actuelle, plus de 3 `200` la doublent (60 s au plus), 1 au
-  plus la divise par deux (10 s au moins), sinon la plus ancienne réponse sort du
-  compte. Un changement de période remet le compte à zéro : chaque période est
-  jugée sur ses propres réponses.
+- **Un détecteur chargé ralentit**, par une règle commune aux deux forges. Sa
+  période part de 10 s. Une fois qu'il a 6 réponses à sa période actuelle, plus de
+  3 réponses changées (ici des `200`) la doublent (60 s au plus), 1 au plus la
+  divise par deux (10 s au moins), sinon la plus ancienne réponse sort du compte. Un
+  changement de période remet le compte à zéro : chaque période est jugée sur ses
+  propres réponses.
+- **Une détection qui échoue** (`401`, `403`, `404`, forge injoignable, réponse
+  illisible) attend le rythme normal du provider (60 s sur GitHub) avant la
+  suivante ; seul un `401` fait oublier le jeton. Il en va de même sur Azure DevOps.
 - **Un détecteur dit ce qui a bougé** en comparant sa liste à la précédente : un
   élément nouveau dans la liste, ou dont l'un de ces champs a changé. Sa première
   réponse ne fait que poser cette référence et ne réveille rien.
@@ -531,8 +535,9 @@ sûreté pour ce qu'ils manqueraient :
   tourne ;
 - les cibles d'issues se relisent toutes les 5 min après une lecture réussie, au
   rythme normal (60 s) après un échec ;
-- un détecteur sans jeton attend le rythme normal avant de réessayer, `gh auth
-  token` redemandé plus tôt n'en donnant pas davantage.
+- un détecteur sans jeton, ou dont l'interrogation a échoué, attend le rythme
+  normal avant de réessayer, `gh auth token` redemandé plus tôt n'en donnant pas
+  davantage.
 
 Les contrôles obligatoires et la file d'une base, qu'aucun détecteur ne voit, se
 relisent au rythme normal. Les limites secondaires (débit par minute) n'ont pas été
@@ -687,35 +692,48 @@ délai entre un changement et sa visibilité n'est pas mesuré ; `lastChangedDat
 
 | Détecteur | Endpoint | Portée | Ce qui signale un changement |
 |---|---|---|---|
-| PR | `_apis/git/pullrequests` (les PR actives) | par projet | le contenu d'une PR, comparé |
+| PR | `_apis/git/pullrequests?searchCriteria.status=active&$top=500` | par projet | le contenu d'une PR, comparé ; une PR qui quitte la liste |
 | pipelines | `build/builds?statusFilter=inProgress,notStarted`, puis `build/builds?queryOrder=finishTimeDescending&statusFilter=completed&$top=20` | par projet | `id`, `status`, `result`, `lastChangedDate`, comparés |
-| pushes | `git/repositories/<dépôt>/pushes?searchCriteria.fromDate=<t>&searchCriteria.includeRefUpdates=true` | par dépôt | chaque push depuis `<t>` |
-| work items | `wit/reporting/workitemrevisions?startDateTime=<t>&fields=…` | par projet | chaque révision depuis `<t>` |
+| pushes | `git/repositories/<dépôt>/pushes?searchCriteria.fromDate=<t>&searchCriteria.includeRefUpdates=true` | par dépôt | chaque push postérieur au dernier vu |
+| work items | `wit/reporting/workitemrevisions?startDateTime=<t>&fields=…`, puis par `continuationToken` | par projet | chaque révision depuis le repère |
 
 - **Les PR, un appel pour tout le projet** : 28 PR actives sur 7 dépôts, environ
   84 Ko, gzip accepté. La liste porte les votes (`reviewers[].vote`),
   `lastMergeSourceCommit`, `lastMergeCommit` (qui change quand la base avance),
   `isDraft` et `autoCompleteSetBy`, mais ni date de mise à jour, ni statuts, ni
   évaluations de politique : un statut posé par un outil extérieur ne se voit qu'à
-  la relecture de la PR au rythme normal.
+  la relecture de la PR au rythme normal. Une PR qui quitte la liste (complétée ou
+  abandonnée) réveille ses cibles.
 - **Les builds, deux appels par projet** : tous les builds actifs, et les 20
   derniers terminés. La liste ne se trie pas par dernier changement (`queueTime`,
   `startTime`, `finishTime` seulement), et un `queryOrder` inconnu est ignoré avec un
-  `200`. Contrairement à GitHub, un long build ne peut pas sortir de la liste. Chaque
-  build donne sa cible : `repository.name`, `sourceBranch` (`refs/heads/<branche>`
-  ou `refs/pull/<n>/merge`) et `triggerInfo`, qui ne porte que `pr.number` et
-  `pr.isFork`.
+  `200`. Contrairement à GitHub, un long build ne peut pas sortir de la liste. Un
+  build qui quitte les deux listes avant d'avoir été vu terminé réveille ses cibles.
+  Chaque build donne sa cible : `repository.name`, `sourceBranch`
+  (`refs/heads/<branche>` ou `refs/pull/<n>/merge`) et `triggerInfo`, qui ne porte
+  que `pr.number` et `pr.isFork`.
 - **Les pushes voient chaque branche qui bouge**, les mises à jour de
   `refs/pull/<n>/merge` comprises (le commit de merge recalculé quand la base
   avance). Ils couvrent la branche sans PR qui avance sans CI, que GitHub laisse au
-  rythme normal.
+  rythme normal. La première interrogation lit `$top=1`, le dernier push, qui sert
+  de référence. Les suivantes partent d'une minute avant la date de ce dernier push
+  et ne gardent que les pushes de `pushId` supérieur : la lecture tient que
+  `fromDate` soit inclusif ou arrondi au jour.
 - **Les work items par leurs révisions** : un flux incrémental dont le serveur tient
-  le repère (`continuationToken`, `isLastBatch`), qui rend les champs demandés
-  (`System.Id`, `System.State`, `System.AssignedTo`, `System.Title`,
-  `System.WorkItemType`) sans second appel et ne dépend pas de l'horloge locale. Son
-  coût n'apparaît pas dans les en-têtes : à mesurer à l'implémentation. À défaut,
-  WIQL sur `System.ChangedDate`, avec `wit/wiql?timePrecision=true` : une heure dans
-  la date répond `400` sans ce paramètre.
+  le repère, qui rend les champs demandés (`System.Id`, `System.State`,
+  `System.AssignedTo`, `System.Title`, `System.WorkItemType`) sans second appel. La
+  première interrogation part de `startDateTime` égal à maintenant (UTC, à la
+  seconde) ; ensuite, le repère est le `continuationToken` de la réponse, sinon
+  celui que porte son `nextLink`. Une interrogation lit 5 lots au plus, et ne garde
+  le repère et les révisions connues qu'une fois tous ses lots lus : une
+  interrogation interrompue relit les mêmes lots. Une révision qui ne change rien
+  de ce qui est montré (un commentaire) ne réveille rien.
+- **WIQL prend le relais pour de bon** quand le flux répond `404`, ou `403` si WIQL
+  répond : une requête sur `System.ChangedDate`, avec `wit/wiql?timePrecision=true`
+  (une heure dans la date répond `400` sans ce paramètre), qui repart du `asOf` de
+  sa dernière réponse.
+- **Le coût de chaque détecteur** est journalisé une fois, à sa première réponse :
+  son `X-RateLimit-Cost`, ou son absence.
 
 La progression d'une CI se lit par le timeline de chaque build, par incréments avec
 `changeId`, comme aujourd'hui.
@@ -724,8 +742,20 @@ La progression d'une CI se lit par le timeline de chaque build, par incréments 
 cours 10 s, fenêtre rapide 5 s, normal 120 s. Sur une PR, « CI attendue » n'a pas à
 être deviné : une évaluation de politique de build `queued`, non expirée, dit qu'un
 build va venir, et la fenêtre de 2 minutes ne sert que pour une branche sans PR.
-Chaque lecture est comptée, et le provider ralentit quand le budget restant baisse.
-Les work items se lisent au rythme normal.
+
+- Les détecteurs s'interrogent toutes les 10 s et ralentissent par la règle
+  commune aux deux forges (voir GitHub), une réponse changée étant ici une liste
+  qui diffère de la précédente. Un rafraîchissement ouvre leur fenêtre rapide (5 s
+  pendant 30 s) et les attend 5 s au plus. Tant que `X-RateLimit-Remaining` est
+  sous la moitié de `X-RateLimit-Limit`, ils ne s'interrogent pas plus souvent que
+  toutes les 60 s ; `Retry-After` et un budget sous 10 % gardent leur traitement
+  (voir « Limite »).
+- Une détection qui échoue attend le rythme normal (120 s), comme sur GitHub.
+- Une branche ou une PR se relit au rythme normal, plus vite tant qu'une CI est
+  attendue ou tourne.
+- Les cibles de work items se réveillent par le détecteur des work items, avec une
+  relecture de sûreté toutes les 5 minutes (2 minutes après un échec), comme sur
+  GitHub.
 
 ## Voir un changement
 
@@ -918,7 +948,15 @@ pas de vérifier le reste, à reprendre sur un projet qui le montre :
 - les politiques expirées, et l'état d'une politique à déclenchement manuel ;
 - le délai de chaque détecteur ;
 - les quatre sortes lues par le provider sur un vrai dépôt, et le filtre des work
-  items.
+  items ;
+- `fromDate` avec des fractions de seconde, et la façon dont il filtre ;
+- le flux des révisions avec `startDateTime` puis `continuationToken`, et son coût
+  mesuré ;
+- WIQL avec `timePrecision=true` et un `asOf` à fractions de seconde ;
+- que `statusFilter=inProgress,notStarted` et `$top=500` soient acceptés ;
+- qu'un vrai push, un build, un vote et une modification de work item ne
+  réveillent chacun que la cible touchée ;
+- le budget consommé sur 5 minutes avec quelques dépôts suivis.
 
 ## Sources
 
