@@ -1136,6 +1136,10 @@ mod tests {
                 json!({ "number": 7, "state": "closed", "draft": false, "html_url": "u",
                     "merged_at": "t", "base": { "ref": "main" },
                     "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } })
+            } else if line.contains("/repos/o/r/pulls/9 ") {
+                json!({ "number": 9, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "fork/r" } } })
             } else if line.contains("/actions/runs?head_sha=abc") {
                 json!({ "workflow_runs": [{ "id": 1, "name": "CI", "path": "ci.yml",
                     "event": "pull_request", "check_suite_id": 10, "status": "completed",
@@ -1175,6 +1179,14 @@ mod tests {
         );
         branch.head = Head::Pr(8);
         assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
+        branch.head = Head::Pr(9);
+        let (Ok(fork), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(
+            fork.branch, None,
+            "a fork's branch is not this repository's"
+        );
     }
 
     /// The provider follows a branch: its first reading reaches the core.

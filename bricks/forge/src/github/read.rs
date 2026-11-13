@@ -77,7 +77,8 @@ pub async fn read(
 }
 
 /// Reads PR `number` of `owner/name`, whatever its state, its head branch,
-/// and the CI of its head as for a branch.
+/// and the CI of its head as for a branch. A PR from a fork names no
+/// branch: its head branch is the fork's, not one of this repository.
 pub async fn read_pr(
     http: &Http,
     api: &str,
@@ -90,8 +91,13 @@ pub async fn read_pr(
     let p = http.get(&url, token, HEADERS).await?;
     let pr = pr_of(&p).ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
     let ci = ci(http, api, token, owner, name, &pr.head_sha, Some(number)).await?;
+    let own = p["head"]["repo"]["full_name"]
+        .as_str()
+        .is_some_and(|f| f.eq_ignore_ascii_case(&format!("{owner}/{name}")));
     Ok(BranchReading {
-        branch: p["head"]["ref"].as_str().map(str::to_owned),
+        branch: own
+            .then(|| p["head"]["ref"].as_str().map(str::to_owned))
+            .flatten(),
         head_sha: Some(pr.head_sha.clone()),
         pr: Some(pr),
         ci: Some(ci),

@@ -68,7 +68,8 @@ pub async fn read(
 
 /// Reads PR `number` of the repository, whatever its state, its source
 /// branch, and the CI of its head as for a branch: that of the PR while it
-/// is active, else the builds of its head.
+/// is active, else the builds of its head. A PR from a fork names no
+/// branch: its source branch is the fork's, not one of this repository.
 pub async fn read_pr(
     client: &Client<'_>,
     names: &Names,
@@ -88,7 +89,7 @@ pub async fn read_pr(
         branch_ci(client, names, branch, &pr.head_sha).await?
     };
     Ok(BranchReading {
-        branch: Some(branch.to_owned()),
+        branch: raw["forkSource"].is_null().then(|| branch.to_owned()),
         head_sha: Some(pr.head_sha.clone()),
         pr: Some(pr),
         ci: Some(ci),
@@ -1069,6 +1070,10 @@ mod tests {
             let line = request.lines().next().unwrap_or_default().to_owned();
             let body = if line.contains("/pullrequests/7?") {
                 raw_pr("completed")
+            } else if line.contains("/pullrequests/9?") {
+                let mut fork = raw_pr("completed");
+                fork["forkSource"] = json!({ "name": "refs/heads/feat" });
+                fork
             } else if line.contains("/build/builds?branchname=refs%2fheads%2ffeat") {
                 json!({ "value": [{ "id": 2, "status": "completed", "result": "succeeded",
                     "reason": "individualCI", "definition": { "id": 1 }, "sourceVersion": "abc" }] })
@@ -1096,6 +1101,13 @@ mod tests {
         assert_eq!(ci.pipelines[0].id, "2");
         let missing = read_pr(&client, &names(), 8, &mut Memory::default()).await;
         assert_eq!(missing, Err(Failure::NotFound));
+        let fork = read_pr(&client, &names(), 9, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.branch, None,
+            "a fork's branch is not this repository's"
+        );
     }
 
     /// A queued evaluation that still names a completed build waits for

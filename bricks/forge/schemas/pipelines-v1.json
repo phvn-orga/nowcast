@@ -43,7 +43,7 @@
   },
   "properties": {
     "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>, dev.azure.com/<organization>/<project>/<repository>." },
-    "branch": { "type": ["string", "null"], "description": "The branch; under a PR's number, its head branch, null until a reading names it." },
+    "branch": { "type": ["string", "null"], "description": "The branch; under a PR's number, its head branch, null until a reading names it, and null for a PR from a fork, whose head branch is not one of this repository." },
     "sha": { "type": ["string", "null"], "description": "The commit read: the open PR's head, else the branch's head; null without a commit, and the list is then empty." },
     "pr": { "type": ["integer", "null"], "description": "The open PR whose CI is read." },
     "state": { "enum": ["none", "waiting", "running", "pass", "fail"] },
