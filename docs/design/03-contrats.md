@@ -2,6 +2,7 @@
 
 État au 2026-11-07 : contrats décidés, délais fixés, arrêt du service à vide décrit,
 historique borné des flux ; entrée d'un flux et briques natives en premier jet.
+Rafraîchissement par portée ajouté le 2026-11-13, pas encore implémenté.
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -25,6 +26,7 @@ c'est le lien qui l'active qui porte le nom de la brique (section 2).
 | `[configure] command` | tableau de chaînes, facultatif | Commande qui configure la brique (ses identifiants, par exemple), lancée par l'outil dans le terminal de l'utilisateur (section 2). Résolue comme `[run] command`, sauf qu'un nom de programme sans `/` se cherche dans le `PATH` de l'utilisateur : `["nowcast", "brick", "forge", "configure"]` pour une brique native, n'importe quel script pour une autre. Elle tourne dans le répertoire du fichier de déclaration, sans les variables de `[run] env`. Ce qu'elle enregistre appartient à la brique ; le service ne le lit jamais. |
 | `[subscriptions.<sorte>]` | table, une par sorte d'abonnement | `description` ; `schema`, chemin du JSON Schema du contenu de l'abonnement (c'est la documentation de la clé) ; `publishes`, le type de donnée publié par ce flux ; `accepts`, facultatif, le type de l'entrée qu'un abonné peut y envoyer (section 3). Au moins l'un des deux. |
 | `[types."<type>"]` | table, une par type publié ou accepté | `schema`, chemin du JSON Schema du détail. Pour un type publié, il devient le `dataschema` des événements ; pour un type accepté, le service y valide chaque entrée. |
+| `[refresh] scope` | chaîne, facultatif | Chemin du JSON Schema d'une portée de rafraîchissement, que la brique interprète (section 3). Sans lui, la brique n'en reçoit aucune. Proposé, voir plus bas. |
 
 Chaque `publishes` et chaque `accepts` doit nommer un type déclaré dans `[types]`, et chaque `schema` doit
 mener à un fichier JSON lisible, sinon le fichier est refusé au chargement.
@@ -255,8 +257,20 @@ répond `201` :
   savoir s'il existe des flux. Sans flux, rien ne part, et une brique arrêtée n'est
   pas lancée pour cela. `404` `unknown_brick` si la brique n'est pas activée, `404`
   `unknown_kind` si elle ne déclare pas cette sorte, `400` `invalid_request` pour un
-  corps mal formé. Le protocole des briques ne change pas : une brique reçoit des
-  `refresh` ordinaires (section 4).
+  corps mal formé. Une brique reçoit alors des `refresh` ordinaires (section 4).
+- Le même endpoint accepte à la place `{"scope": {…}}`, une portée que la brique
+  interprète : la forge y lit un dépôt, des sortes et un numéro
+  (`06-brique-forge.md`, « Le rafraîchissement ciblé »). Le service ne l'interprète
+  pas : il la relaie en un seul message `refresh-scope` (section 4), et la brique
+  décide quels flux elle touche. Comme sans portée, rien ne part sans flux vivant de
+  la brique, et une brique arrêtée n'est pas lancée. `400` `invalid_request` pour un
+  corps qui porte à la fois `kind` et `scope`.
+  Proposé : le service valide la portée contre le schéma que la brique déclare
+  (`[refresh] scope`, section 1), `400` `invalid_scope` sinon, et `405`
+  `scope_not_accepted` pour une brique qui n'en déclare pas. Une brique ne répond
+  pas à un `refresh-scope` : sans cette validation, une portée mal formée serait
+  perdue sans que le client le sache. Une brique qui ne déclare pas de schéma ne
+  reçoit jamais ce message, si bien que le protocole garde sa version 1.
   Limite connue : une brique peut rattacher deux sortes au même flux (un alias de
   sorte, par exemple). Le service ne retient alors que la première sorte vue pour ce
   flux, et un `kind` qui vise l'autre ne le rafraîchit pas.
@@ -386,6 +400,7 @@ Du service vers la brique :
 | `subscribe` | `req`, `kind`, `params` (`bin` : les octets JSON du contenu) | `subscribed` {`req`, `flow`} ou `error` {`req`, `code`, `message`} |
 | `release` | `flow` | aucune : le dernier abonné du flux est parti |
 | `refresh` | `flow` | aucune : la brique republie quand elle a relu |
+| `refresh-scope` | `scope` (`bin` : les octets JSON) | aucune : la brique relit ce que la portée touche, et ne republie que ce qui a changé |
 | `input` | `flow`, `type`, `detail` (`bin` : les octets JSON) | aucune : une entrée d'un abonné, déjà validée contre le schéma de `type` |
 | `shutdown` | | aucune : la brique se termine |
 

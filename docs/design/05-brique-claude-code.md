@@ -297,7 +297,8 @@ Une session ancrée dans un worktree, souvent le principal sur `main`, peut écr
 dans d'autres par leur chemin sans jamais s'y déplacer. Un consommateur qui suit le
 répertoire de la session, comme une bande qui affiche la PR et la CI de sa branche,
 montre alors la mauvaise. Le mod central relève donc les worktrees où sa session
-écrit ; le consommateur choisit lesquels montrer et suivre.
+écrit, et suit leurs flux forge (`02-clients.md`) ; le consommateur choisit lesquels
+montrer.
 
 ### Ce qui compte
 
@@ -335,7 +336,7 @@ l'URL du remote `origin` de ce worktree : un `git checkout` fait depuis la derni
 | `path` | Racine du worktree |
 | `repo` | Répertoire git commun, le même pour tous les worktrees d'un dépôt |
 | `branch` | Branche courante, `null` en HEAD détaché |
-| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui : la clé `remote` de la brique forge |
+| `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Les clés forge viennent de la branche amont et de son remote, pas de lui (`02-clients.md`) |
 | `written_at` | Dernière écriture relevée dans ce worktree |
 
 - **Triée par écriture**, la plus récente d'abord.

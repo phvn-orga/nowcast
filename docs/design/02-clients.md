@@ -3,7 +3,9 @@
 État au 2026-11-08 : architecture des clients, format du flux et déclaration de
 session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
 et le rafraîchissement aussi en session interactive ; entrée d'un flux et mesures
-des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central.
+des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central ;
+rôles du mod central envers la brique forge et les mods d'affichage revus le
+2026-11-13.
 
 ## Décisions prises
 
@@ -16,8 +18,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   ne fait rien perdre dans la limite de cet historique, et au-delà le client en est
   averti (`flow-gap`). Un client ne fait que
   sept choses : déclarer sa session, s'abonner, se désabonner, lire son flux,
-  demander le rafraîchissement immédiat d'un flux ou de tous les flux d'une brique,
-  et envoyer une entrée sur un flux (voir `01-briques.md`). Le service n'exécute aucune action
+  demander le rafraîchissement immédiat d'un flux, de tous les flux d'une brique ou
+  d'une portée qu'elle interprète, et envoyer une entrée sur un flux (voir `01-briques.md`). Le service n'exécute aucune action
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
@@ -190,12 +192,29 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   en retient (`05-brique-claude-code.md`). Ce flux suit
   l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
   même nom, ce qui remplace l'abonnement à l'ancien.
-- **Le mod central rafraîchit la brique forge après une action de sa session** :
-  après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
-  `az repos pr`, `gh issue`, `az boards work-item`…), il demande le rafraîchissement de tous les flux de la sorte
-  concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
-  dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
-  Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
+- **L'affichage n'est jamais l'affaire du mod central.** Il porte la logique et sert
+  d'interface entre le service et les mods d'affichage, qui montrent ce qu'il tient.
+- **Le mod central rafraîchit la brique forge sur ce que fait son agent.** Il observe
+  les appels d'outils de son agent : `git push`, `gh pr|issue|run|workflow|api`,
+  `az repos|boards|pipelines`, les appels REST (`curl` vers l'API d'une forge) et
+  les outils des serveurs MCP GitHub et Azure DevOps. Il fait de chacun une portée
+  (`{remote, types, number}`), le dépôt tiré des arguments (`-R`, l'URL que `gh`
+  affiche, le chemin de l'API, les paramètres MCP) ou à défaut du répertoire de
+  travail, et demande le rafraîchissement de cette portée (`06-brique-forge.md`, « Ce
+  que reconnaît le client »). Quand le dépôt reste introuvable, il demande celui de
+  tous les flux de la sorte. Une session qui agit sur un autre dépôt rafraîchit ainsi
+  ce que suit une autre session, sans connaître ses flux. Reconnaître ces appels est
+  propre à l'agent, donc au client, pas à la brique.
+- **Un mod d'affichage demande un rafraîchissement dans les mêmes termes neutres**
+  (un dépôt, des sortes, un numéro), par le mod central, sans parler la langue du
+  service.
+- **Le mod central traduit chaque worktree de sa session en clés forge** : la branche
+  amont et son remote, ni le nom local ni le seul `origin`. Brique forge activée, il
+  s'abonne aux flux `pr` et `pipelines` de ces clés, s'abonne à nouveau quand la
+  branche change, et retire les abonnements d'un worktree sorti de la liste. Une
+  branche sans amont n'a pas de clé. Il voit un `git switch` lancé par son agent,
+  pas un lancé dans un terminal, jusqu'à ce que la brique git (#51) lui donne l'état
+  local.
 - **Le mod central relève les worktrees où écrit sa session**, d'après les appels
   d'outils, et les tient dans son état, brique claude-code activée ou non. Une
   session peut écrire dans un autre worktree que le sien : un consommateur qui ne
@@ -395,6 +414,11 @@ protocole.
 - **Vérifier en session interactive `/clear` et plusieurs observateurs sur la même
   clé.** Le rechargement à chaud et le rafraîchissement y ont été vérifiés (Claude Code
   2.1.319) ; `/clear` seulement en session sans interface (`claude -p`).
+- **L'amont d'une branche créée depuis une branche distante.** `git switch -c
+  <branche> origin/main` donne `origin/main` pour amont à la nouvelle branche
+  (git 2.56, réglages par défaut, vérifié le 2026-11-13), jusqu'à son premier `git
+  push -u`. Le mod central la traduirait en clés de `main`. Ignorer un amont qui ne
+  porte pas le nom de la branche n'est pas décidé.
 
 ## Hors périmètre pour l'instant
 

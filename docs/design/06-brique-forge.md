@@ -1,7 +1,9 @@
 # La brique forge
 
-État au 2026-11-10 : conception refaite sous #52, implémentation dans #125. Brique
-native (`01-briques.md`), qui remplace le premier jet décrit dans `00-cadrage.md`.
+État au 2026-11-13 : conception refaite sous #52, implémentation dans #125 ;
+détection des changements, clés dynamiques et rafraîchissement ciblé conçus le
+2026-11-13, pas encore implémentés. Brique native (`01-briques.md`), qui remplace le
+premier jet décrit dans `00-cadrage.md`.
 
 La brique est organisée par usages : une PR, des pipelines, des issues. Chaque
 forge (GitHub et Azure DevOps d'abord, GitLab ensuite) est un provider compilé dans
@@ -13,17 +15,24 @@ Une seule lecture sert toutes les sessions abonnées à la même cible. La briqu
 lit que les API publiques des forges, par polling. Aucune forge ne pousse vers une
 machine sans adresse publique, et le push demande des droits d'administration (voir
 « Plus tard : le push »). Le polling est donc réglé pour coûter peu et réagir vite :
-rapide quand quelque chose bouge, lent sinon.
+la brique interroge peu d'endpoints par dépôt pour savoir ce qui a bougé, et ne lit
+en détail que les cibles touchées (voir « Voir un changement »).
 
 ## Ce qu'elle publie
 
 | Sorte | Clé | Flux | Publie |
 |---|---|---|---|
-| `pr` | `{"remote": "<URL du remote>", "branch": "<branche>"}` | `forge/pr/<dépôt>#<branche>` | `forge.pr/v1` |
-| `pipelines` | `{"remote": "<URL du remote>", "branch": "<branche>"}` | `forge/pipelines/<dépôt>#<branche>` | `forge.pipelines/v1` |
+| `pr` | `{"remote": "<URL du remote>", "branch": "<branche>"}` ou `{"remote": "<URL du remote>", "pr": 111}` | `forge/pr/<dépôt>#<branche>` ou `forge/pr/<dépôt>!111` | `forge.pr/v1` |
+| `pipelines` | la même que `pr` | `forge/pipelines/<dépôt>#<branche>` ou `forge/pipelines/<dépôt>!111` | `forge.pipelines/v1` |
 | `issues` | `{"remote": "<URL du remote>"}` | `forge/issues/<suivi>` | `forge.issues/v1` |
 | `issue` | `{"remote": "<URL du remote>", "number": 52}` | `forge/issue/<suivi>#52` | `forge.issue/v1` |
 
+- **Un client envoie ce qu'il sait** : le remote, plus une branche, un numéro de PR
+  ou un numéro d'issue. La brique en fait sa cible. Elle ne contacte pas la forge
+  pour accepter un abonnement, si bien que l'identifiant de flux dérive de la clé
+  telle que donnée : `{remote, pr: 111}` et le `{remote, branch}` de la tête de la
+  PR 111 sont deux flux, nourris par une même lecture une fois que la brique a
+  résolu la PR.
 - **`<dépôt>` est l'identité normalisée du dépôt**, quelle que soit l'écriture du
   remote (SSH, HTTPS, alias SSH). Le provider qui reconnaît le remote la donne :
   `github.com/<propriétaire>/<dépôt>`, `dev.azure.com/<organisation>/<projet>/<dépôt>`.
@@ -41,8 +50,8 @@ rapide quand quelque chose bouge, lent sinon.
 - Un identifiant de flux qui dépasserait 256 octets est refusé (`key_too_long`).
 
 `pr` et `pipelines` ont la même clé et se lisent ensemble (voir « Le contrat d'un
-provider ») : un
-client s'abonne à l'un, à l'autre, ou aux deux, sans lecture de plus.
+provider ») : un client s'abonne à l'un, à l'autre, ou aux deux, sans lecture de
+plus.
 
 ## `forge.pr/v1`
 
@@ -68,6 +77,9 @@ client s'abonne à l'un, à l'autre, ou aux deux, sans lecture de plus.
   pour savoir si ce qu'il voit porte sur ses derniers commits.
 - **`pr`** est la PR de la branche, ouverte de préférence, sinon la plus récente ;
   `null` sans PR. `state` vaut `open`, `merged` ou `closed`.
+- **Sous une clé `{remote, pr}`**, `pr` est cette PR quel que soit son état, et
+  `branch` et `head_sha` sont ceux de sa tête, `null` avant la première lecture. Une
+  PR qui n'existe pas se lit dans `source` (`not_found`).
 - **`ci` est la synthèse de la CI**, la même que celle de `forge.pipelines/v1` pour
   la même branche : `state` et `required_state` (voir « La synthèse »), et `sha`, le
   commit qu'elle couvre. `null` quand il n'y a pas de commit à lire. Le détail par
@@ -131,7 +143,8 @@ client s'abonne à l'un, à l'autre, ou aux deux, sans lecture de plus.
 **Les pipelines qui ont testé la tête actuelle de la branche**, ceux de sa PR
 compris. `sha` est cette tête : celle de la PR ouverte quand il y en a une, sinon
 celle de la branche ; `null` sans commit à lire, et la liste est alors vide. `pr` est
-le numéro de la PR ouverte dont la CI est lue, `null` sans PR ouverte.
+le numéro de la PR ouverte dont la CI est lue, `null` sans PR ouverte. Sous une clé
+`{remote, pr}`, ce sont les pipelines de la tête de cette PR.
 
 **L'unité est le pipeline, pas le contrôle** : une exécution d'une définition de CI
 (un workflow run, un build). Plusieurs tournent sur un même commit (plusieurs
@@ -252,8 +265,11 @@ Le cœur ne connaît aucune forge ni aucun rythme. Il tient :
   donne l'identité du dépôt ou du suivi, d'où l'identifiant de flux ;
 - **les flux** : un par identifiant, quel que soit le nombre d'abonnés. Il transmet
   au provider ce qui les concerne (un flux ouvert, un `release`, un `refresh`) ;
+- **les portées de rafraîchissement** : il normalise le remote d'une portée par le
+  provider qui le reconnaît, et la lui transmet (voir « Le rafraîchissement
+  ciblé ») ;
 - **la publication** : il ne publie un flux que si son détail a changé, sauf après
-  un `refresh`, toujours suivi d'une publication.
+  le `refresh` de ce flux, toujours suivi d'une publication.
 
 ### Le contrat d'un provider
 
@@ -264,6 +280,9 @@ s'engage aussi sur un comportement :
 
 - **un `refresh` déclenche une lecture immédiate**, ou dès que la limite de la
   forge le permet ; des `refresh` rapprochés ne font qu'une lecture ;
+- **une portée de rafraîchissement fait regarder aussitôt ce qui a bougé** dans ce
+  dépôt et pour ces sortes, puis lire les cibles touchées ; une portée qu'aucun flux
+  ne suit ne coûte rien ;
 - **une CI qui tourne se suit de près, une tête neuve se voit vite**, dans les
   limites de ce que la forge accorde. Une attente humaine (une approbation) ne
   compte pas comme une CI qui tourne ;
@@ -300,9 +319,10 @@ La brique offre quelques outils, qu'un provider prend s'ils lui vont :
   lecture qui suit le `refresh` voit la tête neuve et passe en « CI attendue », qui
   couvre le délai entre le push et la création des pipelines. Si l'API n'a pas
   encore la tête, la fenêtre rapide la rattrape. Une lecture en échec repasse au
-  rythme normal, ou attend ce que la limite demande. Le rythme normal voit ce que la
-  machine ne voit pas : un push depuis un terminal ou par quelqu'un d'autre, une
-  relecture, un merge, une mise en file.
+  rythme normal, ou attend ce que la limite demande. Ce que la machine ne voit pas
+  (un push depuis un terminal ou par quelqu'un d'autre, une relecture, un merge, une
+  mise en file) se voit par la détection du provider (voir « Voir un changement »),
+  et à défaut au rythme normal.
 
 Rien n'oblige un provider à les prendre : un outil qui ne colle pas à une forge est
 contourné, pas plié pour elle.
@@ -319,6 +339,7 @@ contourné, pas plié pour elle.
 | Commit testé par un pipeline de PR | non donné par l'API REST | donné | `sha` : la tête quand il manque |
 | Statuts extérieurs | statuts de commit | statuts de PR | pipeline `external` |
 | Coût d'une lecture | gratuite quand rien ne change (`304`) | toujours comptée (TSTU) | rythme propre au provider |
+| Voir ce qui a bougé | trois listes par dépôt, en requêtes conditionnelles | comparaison du contenu, non vérifiée | détection propre au provider |
 
 Un provider à venir ajoute sa colonne, pas un champ : une notion qu'une seule forge
 connaît prend une valeur neutre ailleurs, ou n'entre pas dans le contrat.
@@ -366,6 +387,46 @@ redemandé après un `401`. Par un jeton : un jeton personnel, envoyé en
 (`If-None-Match`) ; une réponse `304` ne compte pas dans la limite de 5 000 requêtes
 par heure (vérifié le 2026-11-09 sur tous les endpoints ci-dessous). Les paramètres
 d'une requête restent identiques d'un appel à l'autre, sinon l'`ETag` ne sert plus.
+Les réponses pèsent de 150 à 600 Ko, environ dix fois moins en gzip : le provider
+demande gzip.
+
+**La détection.** Trois détecteurs par dépôt suivi, interrogés en requêtes
+conditionnelles toutes les 10 s. Mesuré par un spike le 2026-11-12, sur quatre dépôts
+(NixOS/nixpkgs, home-assistant/core, microsoft/vscode, phvn-orga/nowcast), pendant
+7 minutes à partir de 13:38 UTC, environ 525 requêtes authentifiées :
+
+| Détecteur | Endpoint | Changement vu après son `updated_at` (médiane à p90) |
+|---|---|---|
+| pipelines | `actions/runs?per_page=20` | 5 à 11 s |
+| PR | `pulls?state=all&sort=updated&direction=desc&per_page=20` | 8 à 24 s |
+| issues | `issues?state=all&sort=updated&direction=desc&per_page=20` | 8 à 24 s |
+
+- **Un `304` est gratuit** (mesuré), et chaque `200` du spike portait un vrai
+  changement.
+- **Le coût** est nul sur un dépôt calme. Sur un dépôt chargé, l'`ETag` change sur
+  50 à 90 % des interrogations : environ 700 points par heure et par dépôt pour les
+  trois, 14 % du budget de 5 000 par heure. Un détecteur dont la plupart des
+  interrogations répondent `200` ralentit ; de combien n'est pas fixé.
+- **Un détecteur dit ce qui a bougé** : les runs, PR et issues dont `updated_at`
+  dépasse la lecture précédente. Le provider lit ensuite en détail les seules cibles
+  touchées : une PR par son numéro, la tête d'une branche, une issue par son numéro.
+  Les PR que l'API des issues mêle aux issues en sont retirées.
+- **La progression d'une CI se lit encore sur le commit.** Le `updated_at` d'un run
+  ne bouge pas quand ses jobs se terminent, et sur un dépôt chargé un run en cours
+  sort des 20 premiers de `actions/runs` en 4 minutes environ. Tant qu'une CI
+  tourne, le provider lit les check runs du commit, qui montrent chaque job avec 8 à
+  15 s de retard.
+- **Écarté : le flux d'événements du dépôt.** Son interrogation est plafonnée à
+  60 s (`X-Poll-Interval`) ; pendant le spike, les événements frais arrivaient avec
+  20 à 66 s de retard (un lot avec 532 s), d'anciens événements revenaient comme
+  nouveaux, l'ordre n'était pas chronologique, et aucun type d'événement ne couvre
+  les workflow runs ni les check runs. La
+  [documentation](https://docs.github.com/en/rest/activity/events?apiVersion=2022-11-28)
+  annonce une latence de 30 s à 6 h et dit qu'il n'est « not built to serve
+  real-time use cases ».
+
+Les lectures de détail, à l'abonnement, quand un détecteur dit qu'une cible a bougé,
+après un `refresh`, et tant qu'une CI est attendue ou tourne :
 
 | Ce qui est lu | Endpoint | Partagé |
 |---|---|---|
@@ -438,10 +499,16 @@ Le reste passe par GraphQL, seul à le donner :
 
 **Rythme** : la machine à rythme, avec CI attendue 2 s pendant 30 s puis 5 s, CI en
 cours 5 s, fenêtre rapide 2 s, normal 60 s. Une lecture qui ne change rien est
-gratuite, d'où le rythme rapide ; `gh run watch` interroge toutes les 3 s. Les limites secondaires (débit par
-minute) n'ont pas été vérifiées sur des `304` : le provider ralentit sur un `403` ou
-un `429` qui les invoque, et respecte `Retry-After`. Une lecture partagée (les PR ouvertes d'un dépôt) suit
-la branche la plus rapide qui en dépend. Les issues se lisent au rythme normal.
+gratuite, d'où le rythme rapide ; `gh run watch` interroge toutes les 3 s. Les
+détecteurs remplacent le rythme normal pour ce qu'ils couvrent : une PR, une issue ou
+la liste des issues n'est relue que quand un détecteur la montre. Le rythme normal ne
+sert plus qu'à ce qu'aucun détecteur ne voit : la tête d'une branche sans PR, qui
+avance sans CI, les contrôles obligatoires et la file d'une base. Après un
+rafraîchissement ciblé qui n'a rien montré de neuf, la fenêtre rapide s'applique aux
+détecteurs de la portée. Les limites secondaires (débit par minute) n'ont pas été
+vérifiées sur des `304` : le provider ralentit sur un `403` ou un `429` qui les
+invoque, et respecte `Retry-After`. Une lecture partagée (les PR ouvertes d'un dépôt)
+suit la branche la plus rapide qui en dépend.
 
 ### Azure DevOps
 
@@ -562,6 +629,25 @@ réel).
 | `skipped` | `skipped` ; politique et statut `notApplicable` |
 | `unknown` | toute autre valeur |
 
+**La détection, non vérifiée.** Même principe qu'avec GitHub, autre mécanique, et
+rien n'a tourné : cette conception est écrite sans accès à Azure DevOps, et un spike
+tournera depuis une machine qui a accès à un projet réel (voir « À vérifier sur Azure
+DevOps (spike) »). Sans `ETag`, le provider compare le contenu, et chaque appel est
+compté : aux 0,015 à 0,03 TSTU mesurés sur les appels de liste, trois détecteurs
+interrogés toutes les 10 s coûteraient environ 3 TSTU par fenêtre de 5 minutes, sur
+200 (une estimation tirée de ces mesures). Les candidats :
+
+- les PR actives listées par projet, un appel pour tous les dépôts du projet ;
+- les derniers builds du projet ;
+- une requête WIQL sur `System.ChangedDate` depuis la dernière lecture, qui ne rend
+  que les identifiants des work items changés.
+
+La progression d'une CI se lit par le timeline de chaque build, par incréments avec
+`changeId`, comme aujourd'hui. Jusqu'au spike, le provider garde sa lecture par
+branche et comprend le rafraîchissement ciblé en relisant les flux de la portée :
+ceux du dépôt (du projet pour les issues), des sortes nommées, et du numéro quand il
+est donné. L'interface du mod central est ainsi la même pour les deux forges.
+
 **Rythme** : la machine à rythme, avec CI attendue 5 s pendant 30 s puis 10 s, CI en
 cours 10 s, fenêtre rapide 5 s, normal 120 s. Sur une PR, « CI attendue » n'a pas à
 être deviné : une évaluation de politique de build `queued`, non expirée, dit qu'un
@@ -569,30 +655,95 @@ build va venir, et la fenêtre de 2 minutes ne sert que pour une branche sans PR
 Chaque lecture est comptée, et le provider ralentit quand le budget restant baisse.
 Les work items se lisent au rythme normal.
 
-## La détection côté client
+## Voir un changement
+
+**Un changement ne se voit qu'en lisant la forge.** Tout le reste est un indice qui
+veut dire « lis maintenant » : il ne porte aucun état et ne remplace jamais une
+lecture. Un changement a trois origines :
+
+| Origine | Qui la voit | Indice envoyé à la brique |
+|---|---|---|
+| L'action d'une session d'agent (`git push`, `gh pr create`, un outil MCP) | le mod de cette session | un rafraîchissement ciblé |
+| Un push depuis la machine, hors d'un agent | un hook git, plus tard, avec la brique git (#51) | un rafraîchissement ciblé, à venir |
+| Le reste du monde (une autre machine, le navigateur, la CI, un merge automatique) | personne : seul le polling le voit | aucun |
+
+### Par dépôt et par sorte
+
+Pour chaque dépôt dont un flux est suivi, la brique interroge un détecteur par
+sorte : les pipelines, les PR, les issues. Un détecteur dit ce qui a bougé ; la
+brique lit ensuite en détail les seules cibles touchées (une PR par son numéro, la
+tête d'une branche, une issue par son numéro) et publie les flux dont le détail a
+changé. Un flux `pr` ou `pipelines` dépend des détecteurs des PR et des pipelines de
+son dépôt, un flux `issues` ou `issue` de celui des issues de son suivi. Un détecteur
+n'existe que tant qu'un flux en dépend. La mécanique appartient au provider : mesurée
+sur GitHub, à vérifier sur Azure DevOps (voir « Les providers »).
+
+### Le rafraîchissement ciblé
+
+`POST /v1/bricks/forge/refresh` peut porter une portée, que le service relaie sans
+l'interpréter (`03-contrats.md`) :
+
+```json
+{ "scope": { "remote": "git@github.com:phvn-orga/nowcast.git", "types": ["pr", "pipelines"], "number": 111 } }
+```
+
+- **`remote`** est normalisé comme celui d'une clé. Un remote qu'aucun provider ne
+  reconnaît ne rafraîchit rien.
+- **`types`** parmi `pr`, `pipelines` et `issues`, au moins un ; `issues` vise aussi
+  les flux `issue`.
+- **`number`**, facultatif, est le numéro d'une PR ou d'une issue que l'action a
+  touchée. Il compte parmi les cibles touchées, s'il nourrit un flux.
+- **La brique interroge aussitôt les détecteurs** de ce dépôt pour ces sortes, puis
+  lit les cibles touchées. Une portée qu'aucun flux ne suit ne coûte rien. Seuls les
+  flux dont le détail a changé sont publiés.
+- **Sans portée, rien ne change** : chaque flux de la brique, ou de la sorte nommée,
+  reçoit un `refresh` et se relit.
+
+### Ce que reconnaît le client
 
 Le service ne connaît aucun agent (`00-cadrage.md`) : reconnaître une action d'agent
-qui peut changer une PR ou une issue revient au client. **Le mod central de Claude
-Code s'en charge** (`02-clients.md`). Après un appel d'outil qui a abouti, il demande
-le rafraîchissement de tous les flux forge d'une sorte (`POST
-/v1/bricks/forge/refresh`, `03-contrats.md`) :
+qui peut changer la forge revient au client, et dans Claude Code au mod central
+(`02-clients.md`). Après un appel d'outil qui a abouti, il en fait une portée :
 
-- `git push`, `gh pr …`, `az repos pr …`, et les outils de PR des serveurs MCP
-  Azure DevOps : les sortes `pr` et `pipelines` ;
-- la relance d'un pipeline (`gh run rerun`, `az pipelines …`, les outils de
-  pipelines des serveurs MCP Azure DevOps), qui suit une politique expirée : les
-  sortes `pr` et `pipelines` ;
-- `gh issue …` qui écrit, `gh pr merge` (une PR peut fermer une issue),
-  `az boards work-item …` qui écrit, et les outils de work items des serveurs MCP
-  Azure DevOps : les sortes `issues` et `issue`.
+| Appel | `types` |
+|---|---|
+| `git push` | `pr`, `pipelines` |
+| `gh pr …` | `pr`, `pipelines` ; avec `issues` pour `gh pr merge`, qui peut fermer une issue |
+| `gh run …`, `gh workflow …` | `pr`, `pipelines` |
+| `gh issue …` | `issues` |
+| `az repos …`, `az pipelines …` | `pr`, `pipelines` |
+| `az boards …` | `issues` |
+| `gh api`, `curl` vers l'API d'une forge | d'après le chemin : PR, pipelines ou builds, issues ou work items |
+| Outils des serveurs MCP GitHub et Azure DevOps | d'après l'outil : PR, pipelines, issues ou work items |
 
-**Tous les flux, pas ceux de la session.** Une session sur un dépôt peut agir sur un
-autre (`gh issue create -R`, `git -C`), que suit une autre session. Le mod n'a pas à
-reconnaître le dépôt visé : la brique relit toutes les cibles de la sorte.
+- **Le dépôt vient des arguments** : `-R`, l'URL que `gh` affiche, le chemin de
+  l'API, les paramètres de l'outil MCP. À défaut, c'est celui du répertoire de
+  travail de la commande. Le numéro vient des mêmes sources.
+- **Un dépôt introuvable** fait demander le rafraîchissement de tous les flux des
+  sortes visées, comme avant les portées.
+- **La portée nomme le dépôt visé**, pas celui de la session : une session qui crée
+  une issue dans un autre dépôt (`gh issue create -R`) rafraîchit ce qu'y suit une
+  autre session, sans connaître ses flux.
 
 Sans brique forge activée, le service répond `unknown_brick` et le mod n'insiste
-pas ; sans flux, rien ne part. Un push depuis un terminal n'est pas vu : le rythme
-normal le rattrape.
+pas ; sans flux, rien ne se lit. Un push depuis un terminal n'envoie aucun indice :
+les détecteurs le voient, comme le reste du monde.
+
+### La vie d'une session
+
+| Étape | Ce qui change sur la forge | Qui le voit | Réaction |
+|---|---|---|---|
+| Un worktree, une nouvelle branche | rien | le mod central, si son agent a lancé la commande | aucune clé forge tant que la branche n'a pas d'amont |
+| Des commits locaux | rien | personne | aucune ; un consommateur compare `head_sha` à son HEAD |
+| `git push` | la branche est créée ou avance, une CI démarre | le mod central | abonnement aux clés de la branche amont si elle vient d'en avoir une ; portée `pr`, `pipelines` ; CI attendue |
+| `gh pr create` | une PR s'ouvre, sa CI démarre | le mod central, le numéro tiré de l'URL affichée | portée avec `number` : la brique résout la PR, le flux de la branche la montre |
+| D'autres pushs | la tête avance, la PR change | le mod central | comme `git push` |
+| La CI tourne | runs et jobs changent | la brique seule | « CI en cours » : sur GitHub, les check runs du commit, chaque job vu 8 à 15 s après |
+| Une relecture dans le navigateur | la PR change | le détecteur des PR | rien de publié ne change : `forge.pr/v1` ne porte pas les relectures |
+| Le merge, par `gh pr merge`, le navigateur, le merge automatique ou la file | la PR passe `merged`, la base avance | le mod central pour `gh pr merge` ; sinon les détecteurs des PR et des pipelines | rien de propre au merge : c'est un changement de PR et un push sur la base, que les détecteurs voient |
+| Le retour sur `main` | rien | le mod central, si son agent a lancé `git switch` ; sinon personne avant la brique git (#51) | abonnement aux clés de `main` ; un worktree supprimé sort de la liste, ses abonnements avec |
+| Une issue fermée par le merge (`Closes #N`) | l'issue passe `closed` | le détecteur des issues, interrogé aussitôt par la portée de `gh pr merge` | les flux `issues` et `issue` concernés se relisent |
+| Des issues créées dans un autre dépôt | une issue s'ouvre ailleurs | le mod central | portée sur ce dépôt-là ; les montrer dans la session n'est pas nécessaire pour l'instant |
 
 ## Ce qui existe déjà
 
@@ -637,8 +788,12 @@ change.
 
 - **GitLab** : un provider de plus, avec des pipelines enfants et des étapes. Ses
   `304` comptent dans sa limite de requêtes. Non instruit ici.
-- **D'autres cibles pour `pipelines`** : un commit donné, ou une définition sur une
-  branche. La v1 ne lit que la tête d'une branche.
+- **D'autres cibles pour `pipelines`** : un commit donné, ou un pipeline précis,
+  suivi jusqu'à sa fin (un run) ou run après run (une définition sur une branche).
+  La v1 ne lit que la tête d'une branche ou d'une PR.
+- **Garder les objets de la forge sur lesquels une session a agi**, pour montrer par
+  exemple les issues qu'elle a créées dans un autre dépôt. Pas nécessaire
+  aujourd'hui.
 - **Le détail de la CI d'une file de merge** : la v1 n'en publie que la synthèse,
   dans `queue.ci`.
 - **Le volume des work items** : un gros projet Azure DevOps a bien plus de 200
@@ -649,13 +804,6 @@ change.
 
 - Les permissions minimales d'un jeton personnel, sur chaque forge, pour tout ce que
   le provider lit.
-- Le provider Azure DevOps, construit d'après cette conception sans avoir tourné sur
-  un projet réel, est à valider depuis une machine qui a accès à un tel projet : les
-  quatre sortes sur un vrai dépôt, les politiques expirées, l'état d'une politique à
-  déclenchement manuel, le filtre des work items, le type de la politique de statut,
-  l'enregistrement d'une approbation en attente, le `targetUrl` d'un statut posé par
-  un build, si une PR active peut manquer de `lastMergeSourceCommit`, et le compte
-  rendu par `connectionData`.
 - La file de merge sur un dépôt qui en a une : la forme des entrées, la branche
   temporaire de leurs pipelines, et la raison d'une sortie de file
   (`RemovedFromMergeQueueEvent.reason`). nowcast n'a pas de file ; seul le schéma
@@ -663,10 +811,40 @@ change.
 - Que `refUpdateRule` rend bien les contrôles obligatoires à un compte sans droits
   d'administration (vérifié seulement avec un compte administrateur).
 
+## À vérifier sur Azure DevOps (spike)
+
+Le provider Azure DevOps est construit d'après cette conception sans avoir tourné sur
+un projet réel. Ces points sont à vérifier depuis une machine qui a accès à un tel
+projet, chacun avec sa date et ce qui a été observé.
+
+La détection :
+
+- si la liste des builds se trie par dernier changement, et pas seulement par heure
+  de mise en file ;
+- si la liste des PR reflète les votes et les statuts, ou s'il faut lire chaque PR
+  active ;
+- si les listes par projet (PR, builds) fonctionnent et couvrent tous les dépôts du
+  projet ;
+- le délai et le coût réel (`X-RateLimit-Cost`) de chaque détecteur ;
+- si une requête WIQL sur `System.ChangedDate` voit tous les changements d'un work
+  item (état, assignation, commentaires), et avec quel délai.
+
+Le provider tel que conçu :
+
+- les quatre sortes sur un vrai dépôt ;
+- les politiques expirées, et l'état d'une politique à déclenchement manuel ;
+- le filtre des work items ;
+- le type de la politique de statut ;
+- l'enregistrement d'une approbation en attente ;
+- le `targetUrl` d'un statut posé par un build ;
+- si une PR active peut manquer de `lastMergeSourceCommit` ;
+- le compte rendu par `connectionData`.
+
 ## Sources
 
 - https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api
 - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+- https://docs.github.com/en/rest/activity/events?apiVersion=2022-11-28
 - https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/using-the-github-cli-to-forward-webhooks-for-testing
 - https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party
 - https://github.com/cli/gh-webhook/issues/43
