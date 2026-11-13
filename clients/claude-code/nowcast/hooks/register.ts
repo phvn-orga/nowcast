@@ -9,6 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { NowcastStream } from '../types'
 import { CLI, STUB, checkService, history, input, last, refresh, refreshBrick, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
+import { registerForge } from './forge'
 import { registerMeasures } from './measures'
 import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
@@ -85,6 +86,8 @@ export const register: Register = on => {
   registerMeasures(on)
   // The worktrees the session writes in, in the state and the measures.
   registerWorktrees(on)
+  // What the agent changes on a forge, refreshed in the forge brick.
+  registerForge(on)
 
   // A backstop: a turn always runs under the session the service knows.
   on('turn.start', async ($, e, next) => {

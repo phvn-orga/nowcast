@@ -133,7 +133,7 @@ async function placeOf($: $, dir: string): Promise<Place> {
 }
 
 /** A git command's output, trimmed; null when it fails or prints nothing. */
-async function git($: $, cwd: string, args: string[]): Promise<string | null> {
+export async function git($: $, cwd: string, args: string[]): Promise<string | null> {
   const answer = await $.process.run(['git', ...args], { cwd, timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined)
   if (answer === undefined || answer.exitCode !== 0) return null
   const out = answer.stdout.trim()
