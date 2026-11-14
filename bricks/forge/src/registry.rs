@@ -2,28 +2,41 @@
 //! publication. It knows no forge and no pace.
 //!
 //! - `pr {remote, branch}` publishes `forge.pr/v1`, flow
-//!   `pr/<repo>#<branch>`;
+//!   `pr/<repo>#<branch>`, and `pr {remote, pr}`, flow `pr/<repo>!<pr>`;
 //! - `pipelines {remote, branch}` publishes `forge.pipelines/v1`, flow
-//!   `pipelines/<repo>#<branch>`;
+//!   `pipelines/<repo>#<branch>`, and `pipelines {remote, pr}`, flow
+//!   `pipelines/<repo>!<pr>`;
 //! - `issues {remote}` publishes `forge.issues/v1`, flow `issues/<tracker>`;
 //! - `issue {remote, number}` publishes `forge.issue/v1`, flow
 //!   `issue/<tracker>#<number>`.
 //!
-//! A target is what a provider follows: a branch, a tracker's open issues,
-//! or one issue. Both kinds of one branch share a target: the provider
-//! follows the branch once and each reading serves both flows. A flow is
-//! published when its detail changed, and after a `refresh` in any case.
+//! A target is what a provider follows: a branch, a PR by its number, a
+//! tracker's open issues, or one issue. Both kinds of one branch, or of one
+//! PR, share a target: the provider follows it once and each reading serves
+//! both flows. A PR's number and its head branch are two targets, the
+//! subscription being accepted without asking the forge which branch that
+//! is; a provider shares their requests where it can (GitHub's conditional
+//! requests). A flow is published when its detail changed, and after a
+//! `refresh` in any case.
+//!
+//! A scoped refresh (`refresh-scope`) is a hint that an action changed a
+//! repository: the targets it covers are read now, through their
+//! [`Watch`], the provider looking faster for a while (its own business),
+//! and only the flows whose detail changed are published.
 
 use std::collections::HashMap;
 
 use jiff::Timestamp;
 use nowcast_types::{BrickMessage, FlowId, RequestId};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 use crate::model::{Ci, Issue, Issues};
-use crate::provider::{BranchReading, Failure, Outcome, Provider, Reading, Repo, Updates, Watch};
+use crate::provider::{
+    BranchReading, Failure, Head, Outcome, Provider, Reading, Repo, Updates, Watch,
+};
 
 pub const PR_TYPE: &str = "forge.pr/v1";
 pub const PIPELINES_TYPE: &str = "forge.pipelines/v1";
@@ -70,10 +83,12 @@ impl Kind {
     /// The subject `params` name for this kind, or why they do not.
     fn subject(self, params: &Value) -> Result<Subject, &'static str> {
         match self {
-            Self::Pr | Self::Pipelines => params["branch"]
-                .as_str()
-                .map(|b| Subject::Branch(b.to_owned()))
-                .ok_or("remote and branch are required"),
+            Self::Pr | Self::Pipelines => match (params.get("branch"), params.get("pr")) {
+                (Some(branch), None) => branch.as_str().map(|b| Subject::Branch(b.to_owned())),
+                (None, Some(pr)) => pr.as_u64().filter(|n| *n > 0).map(Subject::Pr),
+                _ => None,
+            }
+            .ok_or("remote and either branch or a positive pr are required"),
             Self::Issues => Ok(Subject::Issues),
             Self::Issue => params["number"]
                 .as_u64()
@@ -88,17 +103,19 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Subject {
     Branch(String),
+    /// A PR by its number.
+    Pr(u64),
     /// The tracker's open issues.
     Issues,
     Issue(u64),
 }
 
 impl Subject {
-    /// What the subject belongs to: the repository for a branch, the
-    /// tracker for issues.
+    /// What the subject belongs to: the repository for a branch or a PR,
+    /// the tracker for issues.
     fn scope(&self, repo: &Repo) -> String {
         match self {
-            Self::Branch(_) => repo.id.clone(),
+            Self::Branch(_) | Self::Pr(_) => repo.id.clone(),
             Self::Issues | Self::Issue(_) => repo.tracker.clone(),
         }
     }
@@ -107,6 +124,7 @@ impl Subject {
     fn flow(&self, kind: Kind, scope: &str) -> String {
         match self {
             Self::Branch(branch) => format!("{}/{scope}#{branch}", kind.name()),
+            Self::Pr(number) => format!("{}/{scope}!{number}", kind.name()),
             Self::Issues => format!("{}/{scope}", kind.name()),
             Self::Issue(number) => format!("{}/{scope}#{number}", kind.name()),
         }
@@ -115,6 +133,16 @@ impl Subject {
 
 /// A subject in its scope: `(repo id or tracker, subject)`.
 type TargetKey = (String, Subject);
+
+/// How the log names the target of `key`.
+fn label((scope, subject): &TargetKey) -> String {
+    match subject {
+        Subject::Branch(branch) => format!("branch/{scope}#{branch}"),
+        Subject::Pr(number) => format!("pr/{scope}!{number}"),
+        Subject::Issues => format!("issues/{scope}"),
+        Subject::Issue(number) => format!("issue/{scope}#{number}"),
+    }
+}
 
 /// What a provider follows for one or more flows.
 struct Target {
@@ -169,11 +197,69 @@ impl Target {
         }
     }
 
-    /// The branch's name, for a branch's target.
-    fn branch_name(&self) -> &str {
+    /// The number of the PR the target is about, when known: a PR's own,
+    /// or the open PR the last reading of a branch found.
+    fn pr_number(&self) -> Option<u64> {
+        match self.subject {
+            Subject::Pr(number) => Some(number),
+            Subject::Branch(_) => self
+                .branch()
+                .and_then(|r| r.pr.as_ref())
+                .filter(|p| p.is_open())
+                .map(|p| p.number),
+            _ => None,
+        }
+    }
+
+    /// The branch's name, for a branch's target; for a PR's, its head
+    /// branch, `None` until a reading names it.
+    fn branch_name(&self) -> Option<&str> {
         match &self.subject {
-            Subject::Branch(branch) => branch,
-            _ => "",
+            Subject::Branch(branch) => Some(branch),
+            Subject::Pr(_) => self.branch().and_then(|r| r.branch.as_deref()),
+            _ => None,
+        }
+    }
+}
+
+/// A scoped refresh, as `schemas/scope.json` describes it.
+#[derive(Deserialize)]
+struct Scope {
+    remote: String,
+    /// `pr`, `pipelines`, `issues`; every kind when absent.
+    types: Option<Vec<String>>,
+    /// The PR or issue an action touched.
+    number: Option<u64>,
+}
+
+impl Scope {
+    fn names(&self, kind: &str) -> bool {
+        self.types
+            .as_ref()
+            .is_none_or(|types| types.iter().any(|t| t == kind))
+    }
+
+    /// Whether the scope covers `target`, of key `key`, in `repo`, the
+    /// scope's repository. `pr` and `pipelines` cover the repository's
+    /// branches and PRs, but those whose PR is known to be another than
+    /// `number`; `issues` covers the tracker's open issues, and its issues
+    /// but those whose number is another than `number`. A branch whose
+    /// open PR is unknown stays covered: the action may have opened it.
+    /// Beside `pr` or `pipelines`, `number` is a PR's, and the issues stay
+    /// covered whatever their number: merging a PR may close any of them.
+    fn covers(&self, repo: &Repo, (scope, subject): &TargetKey, target: &Target) -> bool {
+        let other = |known: Option<u64>| self.number.zip(known).is_some_and(|(n, k)| n != k);
+        let branches = self.names("pr") || self.names("pipelines");
+        match subject {
+            Subject::Branch(_) | Subject::Pr(_) => {
+                *scope == repo.id && branches && !other(target.pr_number())
+            }
+            Subject::Issues => *scope == repo.tracker && self.names("issues"),
+            Subject::Issue(number) => {
+                *scope == repo.tracker
+                    && self.names("issues")
+                    && (branches || !other(Some(*number)))
+            }
         }
     }
 }
@@ -284,10 +370,13 @@ impl Core {
     fn follow(&mut self, index: usize, repo: Repo, key: TargetKey) {
         self.last_target += 1;
         let id = self.last_target;
-        let updates = Updates::new(id, self.updates.clone());
+        let updates = Updates::new(id, self.updates.clone()).named(label(&key));
         let provider = &self.providers[index];
         let watch = match &key.1 {
-            Subject::Branch(branch) => provider.follow(&repo, branch, updates),
+            Subject::Branch(branch) => {
+                provider.follow(&repo, Head::Branch(branch.clone()), updates)
+            }
+            Subject::Pr(number) => provider.follow(&repo, Head::Pr(*number), updates),
             Subject::Issues => provider.follow_issues(&repo, updates),
             Subject::Issue(number) => provider.follow_issue(&repo, *number, updates),
         };
@@ -325,14 +414,55 @@ impl Core {
     }
 
     /// Asks the provider for a reading now; the flow is published after it.
-    pub fn refresh(&mut self, flow: &FlowId) {
-        let Some(flow) = self.flows.get_mut(flow) else {
+    pub fn refresh(&mut self, id: &FlowId) {
+        let Some(flow) = self.flows.get_mut(id) else {
+            debug!("refresh {id} unknown");
             return;
         };
         flow.force = true;
+        debug!("refresh {id} target={}", label(&flow.target));
         if let Some(target) = self.targets.get(&flow.target) {
             target.watch.refresh();
         }
+    }
+
+    /// Answers a `refresh-scope`: asks for a reading now of each target the
+    /// scope covers, its remote recognised as a subscription's. Nothing is
+    /// forced: a scope is a hint, and only what changed is published. A
+    /// scope no provider recognises, or that covers nothing, does nothing.
+    pub fn refresh_scope(&mut self, scope: &[u8]) {
+        let scope = match serde_json::from_slice::<Scope>(scope) {
+            Ok(scope) => scope,
+            Err(e) => {
+                crate::log(format_args!("refresh-scope ignored: {e}"));
+                return;
+            }
+        };
+        let Some(repo) = self
+            .providers
+            .iter()
+            .find_map(|p| p.recognise(&scope.remote))
+        else {
+            debug!("refresh-scope on a remote no provider recognises");
+            return;
+        };
+        let mut covered = Vec::new();
+        for (key, target) in &self.targets {
+            if scope.covers(&repo, key, target) {
+                target.watch.refresh();
+                covered.push(key);
+            }
+        }
+        debug!(
+            "refresh-scope repo={} types={} number={} targets={}",
+            repo.id,
+            scope
+                .types
+                .as_ref()
+                .map_or("all".into(), |t| crate::list(t.iter())),
+            scope.number.map_or("-".into(), |n| n.to_string()),
+            crate::list(covered.into_iter().map(label)),
+        );
     }
 
     /// Takes in what a provider read for target `id` at `at`, and publishes
@@ -352,6 +482,10 @@ impl Core {
         let Some(target) = self.targets.get_mut(key) else {
             return vec![];
         };
+        let outcome_name = match &outcome {
+            Ok(_) => "ok",
+            Err(failure) => failure.as_str(),
+        };
         match outcome {
             Ok(reading) => {
                 target.reading = Some(reading);
@@ -367,10 +501,23 @@ impl Core {
         }
         let target = &*target;
         let mut out = Vec::new();
+        let mut published = Vec::new();
         for flow_id in &target.flows {
-            if let Some(flow) = self.flows.get_mut(flow_id) {
-                out.extend(publish(&mut self.last_req, flow_id, flow, target, now));
+            if let Some(flow) = self.flows.get_mut(flow_id)
+                && let Some(message) = publish(&mut self.last_req, flow_id, flow, target, now)
+            {
+                published.push(flow.kind.name());
+                out.push(message);
             }
+        }
+        if published.is_empty() {
+            debug!("read {} outcome={outcome_name} unchanged", label(key));
+        } else {
+            debug!(
+                "read {} outcome={outcome_name} published={}",
+                label(key),
+                published.join(",")
+            );
         }
         out
     }
@@ -503,18 +650,30 @@ mod tests {
     #[derive(Default, Clone)]
     struct Fake {
         followed: Arc<Mutex<Vec<(String, String)>>>,
-        refreshes: Arc<Mutex<usize>>,
+        /// Each `refresh`, as `<scope> <what>` of the target it reached.
+        refreshes: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
         fn watch(&self, scope: &str, what: String) -> Watch {
+            let label = format!("{scope} {what}");
             self.followed.lock().unwrap().push((scope.to_owned(), what));
             let refreshes = self.refreshes.clone();
             Watch::spawn(move |mut rx: UnboundedReceiver<()>| async move {
                 while rx.recv().await.is_some() {
-                    *refreshes.lock().unwrap() += 1;
+                    refreshes.lock().unwrap().push(label.clone());
                 }
             })
+        }
+
+        /// The targets refreshed since the last call, sorted.
+        async fn refreshed(&self) -> Vec<String> {
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            let mut refreshed = std::mem::take(&mut *self.refreshes.lock().unwrap());
+            refreshed.sort();
+            refreshed
         }
     }
 
@@ -529,8 +688,12 @@ mod tests {
             })
         }
 
-        fn follow(&self, repo: &Repo, branch: &str, _updates: Updates) -> Watch {
-            self.watch(&repo.id, branch.to_owned())
+        fn follow(&self, repo: &Repo, head: Head, _updates: Updates) -> Watch {
+            let what = match head {
+                Head::Branch(branch) => branch,
+                Head::Pr(number) => format!("!{number}"),
+            };
+            self.watch(&repo.id, what)
         }
 
         fn follow_issues(&self, repo: &Repo, _updates: Updates) -> Watch {
@@ -558,6 +721,7 @@ mod tests {
         let mut ci = ci(vec![pipeline(state, vec![job("check", state, Some(true))])]);
         ci.sha = sha.into();
         Ok(Reading::Branch(Box::new(BranchReading {
+            branch: None,
             head_sha: Some(sha.into()),
             pr: Some(Pr {
                 number: 7,
@@ -715,7 +879,7 @@ mod tests {
         let flow = FlowId::new("pr/forge/o/r#feat").unwrap();
         core.refresh(&flow);
         tokio::task::yield_now().await;
-        assert_eq!(*fake.refreshes.lock().unwrap(), 1);
+        assert_eq!(fake.refreshes.lock().unwrap().len(), 1);
         let out = core.update(
             1,
             reading("a", State::Pass),
@@ -723,6 +887,198 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
+    }
+
+    fn pr_params(remote: &str, number: u64) -> Vec<u8> {
+        json!({ "remote": remote, "pr": number })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// A PR's number is a key of its own, answered without the forge: both
+    /// kinds share its following, apart from that of its head branch, and
+    /// its head branch is published once a reading names it.
+    #[tokio::test]
+    async fn a_pr_number_is_a_key_of_its_own() {
+        let (mut core, fake) = core();
+        let flow = |out: Vec<BrickMessage>| match &out[..] {
+            [BrickMessage::Subscribed { flow, .. }] => flow.as_str().to_owned(),
+            other => panic!("{other:?}"),
+        };
+        let pr = core.subscribe(RequestId(1), "pr", &pr_params("https://forge/O/R", 7));
+        let pipelines = core.subscribe(
+            RequestId(2),
+            "pipelines",
+            &pr_params("https://forge/o/r", 7),
+        );
+        core.subscribe(RequestId(3), "pr", &params("https://forge/o/r"));
+        assert_eq!(flow(pr), "pr/forge/o/r!7");
+        assert_eq!(flow(pipelines), "pipelines/forge/o/r!7");
+        assert_eq!(
+            *fake.followed.lock().unwrap(),
+            [
+                ("forge/o/r".to_owned(), "!7".to_owned()),
+                ("forge/o/r".to_owned(), "feat".to_owned()),
+            ]
+        );
+        let out = published(&core.update(
+            1,
+            Err(Failure::Unreachable),
+            Timestamp::now(),
+            Instant::now(),
+        ));
+        let pr = &out.iter().find(|(f, _)| f.starts_with("pr/")).unwrap().1;
+        assert_eq!(
+            (&pr["branch"], &pr["head_sha"]),
+            (&Value::Null, &Value::Null)
+        );
+        let Ok(Reading::Branch(mut read)) = reading("a", State::Running) else {
+            unreachable!()
+        };
+        read.branch = Some("feat".into());
+        let out = published(&core.update(
+            1,
+            Ok(Reading::Branch(read)),
+            Timestamp::now(),
+            Instant::now(),
+        ));
+        assert_eq!(out.len(), 2);
+        for (flow, detail) in &out {
+            assert_eq!(detail["branch"], "feat", "{flow}");
+        }
+        let pr = &out.iter().find(|(f, _)| f.starts_with("pr/")).unwrap().1;
+        assert_eq!(
+            (&pr["head_sha"], &pr["pr"]["number"]),
+            (&json!("a"), &json!(7))
+        );
+    }
+
+    /// `pr` and `pipelines` take a branch or a positive PR number, not both.
+    #[tokio::test]
+    async fn a_pr_key_names_a_branch_or_a_number() {
+        let (mut core, _) = core();
+        for params in [
+            br#"{"remote":"https://forge/o/r"}"#.as_slice(),
+            br#"{"remote":"https://forge/o/r","branch":"feat","pr":7}"#,
+            br#"{"remote":"https://forge/o/r","pr":0}"#,
+            br#"{"remote":"https://forge/o/r","pr":"7"}"#,
+        ] {
+            match &core.subscribe(RequestId(1), "pipelines", params)[..] {
+                [BrickMessage::Error { code, .. }] => assert_eq!(code, "invalid_params"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// A scope refreshes what it covers in its repository, its remote
+    /// spelt any way: the kinds it names, and with a number, the PR or
+    /// issue of that number and the branches whose open PR is unknown;
+    /// beside a PR's kind, every issue.
+    #[tokio::test]
+    async fn a_scope_refreshes_the_targets_it_covers() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        let main = json!({ "remote": "https://forge/o/r", "branch": "main" });
+        core.subscribe(RequestId(2), "pipelines", main.to_string().as_bytes());
+        core.subscribe(RequestId(3), "pr", &pr_params("https://forge/o/r", 9));
+        core.subscribe(RequestId(4), "pr", &params("https://forge/o/x"));
+        core.subscribe(RequestId(5), "issues", &issues_params("https://forge/o/r"));
+        core.subscribe(
+            RequestId(6),
+            "issue",
+            &issue_params("https://forge/o/r", 52),
+        );
+        core.subscribe(
+            RequestId(7),
+            "issue",
+            &issue_params("https://forge/o/r", 53),
+        );
+        // `feat` of o/r has the open PR 7.
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        let scope = |scope: Value| scope.to_string().into_bytes();
+
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/O/R", "types": ["pr"], "number": 7 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o/r feat", "forge/o/r main"]);
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pipelines"], "number": 9 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o/r !9", "forge/o/r main"]);
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pipelines"] }),
+        ));
+        assert_eq!(
+            fake.refreshed().await,
+            ["forge/o/r !9", "forge/o/r feat", "forge/o/r main"]
+        );
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/x", "types": ["issues"], "number": 52 }),
+        ));
+        assert_eq!(fake.refreshed().await, ["forge/o #52", "forge/o issues"]);
+        // A merged PR may close any issue.
+        core.refresh_scope(&scope(
+            json!({ "remote": "https://forge/o/r", "types": ["pr", "issues"], "number": 7 }),
+        ));
+        assert_eq!(
+            fake.refreshed().await,
+            [
+                "forge/o #52",
+                "forge/o #53",
+                "forge/o issues",
+                "forge/o/r feat",
+                "forge/o/r main"
+            ]
+        );
+        core.refresh_scope(&scope(json!({ "remote": "https://forge/o/x" })));
+        assert_eq!(
+            fake.refreshed().await,
+            [
+                "forge/o #52",
+                "forge/o #53",
+                "forge/o issues",
+                "forge/o/x feat"
+            ]
+        );
+        core.refresh_scope(&scope(json!({ "remote": "https://elsewhere/o/r" })));
+        core.refresh_scope(&scope(json!({ "remote": "https://forge/a/b" })));
+        core.refresh_scope(b"not json");
+        assert!(fake.refreshed().await.is_empty());
+    }
+
+    /// Unlike a flow's `refresh`, a scope forces no publication: a reading
+    /// that changed nothing publishes nothing.
+    #[tokio::test]
+    async fn a_scope_publishes_only_what_changed() {
+        let (mut core, fake) = core();
+        core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
+        core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        core.refresh_scope(br#"{"remote":"https://forge/o/r","types":["pr"]}"#);
+        assert_eq!(fake.refreshed().await, ["forge/o/r feat"]);
+        let same = core.update(
+            1,
+            reading("a", State::Pass),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        assert!(same.is_empty(), "unchanged");
+        let moved = core.update(
+            1,
+            reading("b", State::Running),
+            Timestamp::now(),
+            Instant::now(),
+        );
+        assert_eq!(published(&moved).len(), 1);
     }
 
     #[tokio::test]
@@ -751,6 +1107,7 @@ mod tests {
         core.subscribe(RequestId(1), "pr", &params("https://forge/o/r"));
         let t0 = Instant::now();
         let expected = Ok(Reading::Branch(Box::new(BranchReading {
+            branch: None,
             head_sha: Some("a".into()),
             pr: None,
             ci: Some(Ci {
@@ -953,7 +1310,7 @@ mod tests {
         );
         core.refresh(&FlowId::new("issues/forge/o").unwrap());
         tokio::task::yield_now().await;
-        assert_eq!(*fake.refreshes.lock().unwrap(), 1);
+        assert_eq!(fake.refreshes.lock().unwrap().len(), 1);
         let out = core.update(1, read(), Timestamp::now(), Instant::now());
         assert_eq!(published(&out).len(), 1, "unchanged, but refreshed");
     }

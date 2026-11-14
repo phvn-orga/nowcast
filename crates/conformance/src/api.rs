@@ -46,6 +46,9 @@ pub trait ApiHarness {
     /// The flows the probe was asked to refresh, in order.
     fn refreshes(&self) -> impl Future<Output = Vec<QualifiedFlowId>>;
 
+    /// The refresh scopes the probe received, in order.
+    fn scoped_refreshes(&self) -> impl Future<Output = Vec<Value>>;
+
     /// The inputs the probe received, in order: flow, type and detail.
     fn inputs(&self) -> impl Future<Output = Vec<(QualifiedFlowId, String, Value)>>;
 }
@@ -620,6 +623,52 @@ pub async fn brick_refresh_reaches_every_flow_of_the_brick<S: ApiSubject>() {
     assert_eq!(unknown.status(404).json()["error"]["code"], "unknown_kind");
 }
 
+/// `POST /v1/bricks/{brick}/refresh` with a scope answers `202` and relays
+/// it to the brick in one message, only once the brick has a live flow; a
+/// scope off the brick's schema answers `400` `invalid_scope`, and one sent
+/// with a kind `400` `invalid_request`.
+pub async fn brick_refresh_relays_a_scope<S: ApiSubject>() {
+    let (harness, client) = ready::<S>().await;
+    let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+    let scope = |ids: &[&str]| -> Value { serde_json::from_slice(&probe::scope(ids)).unwrap() };
+    client
+        .request("POST", &path, Some(json!({ "scope": scope(&["x"]) })))
+        .await
+        .status(202);
+    client.subscribe("a").await;
+    client
+        .request("POST", &path, Some(json!({ "scope": scope(&["a"]) })))
+        .await
+        .status(202);
+    let reached = timeout(WAIT, async {
+        while harness.scoped_refreshes().await.is_empty() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the brick never got the scope");
+    assert_eq!(
+        harness.scoped_refreshes().await,
+        [scope(&["a"])],
+        "only the scope sent with a live flow"
+    );
+    assert!(harness.refreshes().await.is_empty(), "no flow refresh");
+
+    client
+        .request("POST", &path, Some(json!({ "scope": { "ids": 1 } })))
+        .await
+        .error(400, "invalid_scope");
+    client
+        .request(
+            "POST",
+            &path,
+            Some(json!({ "kind": probe::KIND, "scope": scope(&["a"]) })),
+        )
+        .await
+        .error(400, "invalid_request");
+    assert_eq!(harness.scoped_refreshes().await.len(), 1);
+}
+
 async fn wait_for_refresh(harness: &impl ApiHarness, flow: &QualifiedFlowId) {
     let reached = timeout(WAIT, async {
         while !harness.refreshes().await.contains(flow) {
@@ -933,6 +982,7 @@ macro_rules! api_suite {
                     unsubscribing_answers_204,
                     refresh_answers_202_and_reaches_the_brick,
                     brick_refresh_reaches_every_flow_of_the_brick,
+                    brick_refresh_relays_a_scope,
                     input_answers_202_and_reaches_the_brick,
                     invalid_inputs_are_refused,
                     reading_a_flow_gives_its_last_event,

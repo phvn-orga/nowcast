@@ -356,6 +356,19 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn refresh_scope(&self, name: &BrickName, scope: Vec<u8>) {
+        match self.bricks.get(name) {
+            Some(brick) if brick.is_ready() && !brick.flows.is_empty() => {
+                brick.send(ServiceMessage::RefreshScope { scope });
+            }
+            // Like a refresh, a scope is not kept: a relaunched brick reads
+            // its flows again once subscribed again.
+            _ => {
+                debug!(brick = %name, "refresh scope dropped: the brick is not running with flows")
+            }
+        }
+    }
+
     /// Every brick not idle, and every brick given up on, by name.
     pub(crate) fn bricks(&self) -> Vec<BrickSummary> {
         let mut bricks: Vec<_> = self

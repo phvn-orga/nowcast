@@ -120,12 +120,62 @@ export type NowcastWorktree = {
   path: string
   /** The common git directory, the same for every worktree of a repository. */
   repo: string
-  /** The branch checked out at the last write; null on a detached HEAD. */
+  /**
+   * The branch checked out at the last write, or after a command of the
+   * agent that may move it; null on a detached HEAD.
+   */
   branch: string | null
-  /** The `origin` remote's URL as git has it, the forge brick's `remote`; null without one. */
+  /**
+   * The `origin` remote's URL as git has it; null without one. Not the forge
+   * key's remote: see `forge`.
+   */
   remote: string | null
   /** The last write in it, RFC 3339. */
   written_at: string
+  /**
+   * Where `git push` sends the branch, the key of the forge brick's `pr` and
+   * `pipelines` flows; null on a detached HEAD or without a push remote. Read
+   * again at each write in the worktree and after the agent runs a command
+   * that may move the branch (`git switch`, `git push -u`...). Absent from an
+   * entry an older mod wrote.
+   *
+   * While the forge brick is enabled, this mod subscribes to both flows of
+   * the key under the names `worktree-pr:<path>` and
+   * `worktree-pipelines:<path>`, takes them again when the key changes, and
+   * drops them when the worktree leaves the list. Each subscription's `flow`
+   * names the member of the state's `flows` to read.
+   *
+   * @example
+   * const id = `nowcast/worktree-pr:${worktree.path}`
+   * const { value: subscription } = await $.state.get({ plugin: 'nowcast', key: 'subscriptions', id })
+   * const flow = subscription?.flow ?? null
+   * const pr = flow === null ? undefined : (await $.state.get({ plugin: 'nowcast', key: 'flows', id: flow })).value
+   */
+  forge?: NowcastForgeKey | null
+}
+
+/** A branch on a forge, as the forge brick's `pr` and `pipelines` kinds take it. */
+export type NowcastForgeKey = {
+  /** The push remote's URL, as `git remote get-url --push` gives it. */
+  remote: string
+  /** The branch's name on that remote. */
+  branch: string
+}
+
+/** What to read again on a forge, in neutral terms: see `Nowcast.refreshForge`. */
+export type NowcastForgeRefresh = {
+  /** A remote's URL. Takes precedence over `cwd`. */
+  remote?: string
+  /**
+   * A directory whose push remote names the repository; relative, from the
+   * session's directory. The session's directory when neither it nor
+   * `remote` is given.
+   */
+  cwd?: string
+  /** What to read again; all of them when absent. `issues` covers single issues too. */
+  types?: Array<'pr' | 'pipelines' | 'issues'>
+  /** The number of a PR or issue that changed. */
+  number?: number
 }
 
 /**
@@ -174,8 +224,33 @@ export type Nowcast = {
    * a source others may follow. A brick that is not enabled answers
    * `unknown_brick`, a kind it does not declare `unknown_kind`; one without
    * flows answers `ok` and reads nothing.
+   *
+   * With `scope` instead of `kind`, the brick gets the scope and decides
+   * which of its flows it touches. The scope must match the schema the brick
+   * declares (`invalid_scope` otherwise); a brick that declares none answers
+   * `scope_not_accepted`, and `kind` with `scope` `invalid_request`.
    */
-  refreshBrick(request: { brick: string; kind?: string }): Promise<NowcastDone | NowcastFailure>
+  refreshBrick(request: {
+    brick: string
+    kind?: string
+    scope?: Record<string, unknown>
+  }): Promise<NowcastDone | NowcastFailure>
+  /**
+   * Asks the forge brick to read a repository again, for a mod that saw it
+   * change (a refresh button, an action of its own). It answers once the
+   * request went out, queued behind the refreshes of the agent's forge
+   * actions, which this mod sends already. A repository not to be found
+   * from `cwd` reads every flow of the types again; a service that takes no
+   * scope gets the refresh by kind. A brick that is not enabled answers
+   * `unknown_brick`, a malformed request `invalid_request`.
+   *
+   * @example
+   * // The PR and CI shown for a worktree, after a click.
+   * await $.nowcast.refreshForge({ cwd: worktree.path, types: ['pr', 'pipelines'] })
+   * // An issue of another repository.
+   * await $.nowcast.refreshForge({ remote: 'https://github.com/o/r', types: ['issues'], number: 52 })
+   */
+  refreshForge(request: NowcastForgeRefresh): Promise<NowcastDone | NowcastFailure>
   /**
    * `POST /v1/flows/{flow}/input`: sends `detail` to the flow's brick. The
    * flow's subscription kind must accept an input, and `detail` match the
@@ -273,7 +348,8 @@ declare module 'claude-code' {
       stream: NowcastStream
       /**
        * The worktrees the session wrote in, the most recent write first, at
-       * most 16; one whose root is gone leaves at the next write. Absent
+       * most 16; one whose root is gone leaves at the next write, or after a
+       * command of the agent that may move a branch. Absent
        * until the session writes: a consumer then follows the session's
        * directory. Kept whether or not the claude-code brick is enabled.
        */

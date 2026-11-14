@@ -2,8 +2,9 @@
 //!
 //! It has two subscription kinds whose params are `{"id": <string>}` and
 //! nothing else, both publishing `probe.item/v1`: `item`, and `inbox`, which
-//! also accepts `probe.input/v1`. A harness that runs a real
-//! brick (the test brick) declares it with these schemas.
+//! also accepts `probe.input/v1`. Its refresh scope is `{"ids": [<string>]}`.
+//! A harness that runs a real brick (the test brick) declares it with these
+//! schemas.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -40,6 +41,16 @@ pub fn type_schema() -> serde_json::Value {
 /// The JSON Schema of the `probe.input/v1` detail: any object.
 pub fn input_schema() -> serde_json::Value {
     json!({ "type": "object" })
+}
+
+/// The JSON Schema of the probe's refresh scope: the ids it touches.
+pub fn scope_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["ids"],
+        "properties": { "ids": { "type": "array", "items": { "type": "string" } } },
+        "additionalProperties": false
+    })
 }
 
 /// The probe as discovery would load it, launched by `command` in `dir`.
@@ -87,10 +98,16 @@ pub fn declaration(command: Vec<String>, dir: PathBuf) -> BrickDeclaration {
                 },
             ),
         ]),
+        refresh_scope: Some(scope_schema()),
     }
 }
 
 /// The params of the `item` subscription for `id`, as JSON bytes.
 pub fn params(id: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({ "id": id })).unwrap()
+}
+
+/// A refresh scope touching `ids`, as JSON bytes.
+pub fn scope(ids: &[&str]) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "ids": ids })).unwrap()
 }

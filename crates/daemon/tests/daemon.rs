@@ -63,7 +63,7 @@ impl Dirs {
     /// Activates the test brick, built if needed: its declaration names the
     /// bare program, which [`Dirs::command`] puts on the `PATH`.
     fn link_probe_brick(&self) {
-        build_binaries();
+        binaries();
         let bricks = self.config().join("bricks");
         fs::create_dir_all(&bricks).unwrap();
         let manifest = nowcast_test_brick::manifest();
@@ -113,43 +113,26 @@ impl Dirs {
     }
 }
 
-/// Builds the `nowcast` binary, which runs this crate as `nowcast daemon`,
-/// and the test brick, once per test run. Cargo builds them for their own
-/// packages' tests only, under `cargo test --workspace`.
-fn build_binaries() {
-    static BUILT: OnceLock<()> = OnceLock::new();
+/// The `nowcast` binary, which runs this crate as `nowcast daemon`, and the
+/// test brick, built once per test run (see [`nowcast_test_brick::build`]).
+fn binaries() -> &'static [PathBuf] {
+    static BUILT: OnceLock<Vec<PathBuf>> = OnceLock::new();
     BUILT.get_or_init(|| {
-        let mut cargo = Command::new(env!("CARGO"));
-        cargo.args([
-            "build",
-            "--quiet",
-            "-p",
-            "nowcast-cli",
-            "--bin",
-            "nowcast",
-            "-p",
-            "nowcast-test-brick",
-            "--bin",
-            "nowcast-test-brick",
-        ]);
-        if !cfg!(debug_assertions) {
-            cargo.arg("--release");
-        }
-        assert!(cargo.status().unwrap().success(), "the binaries build");
-    });
+        nowcast_test_brick::build(&[
+            ("nowcast-cli", "nowcast"),
+            (nowcast_test_brick::PROGRAM, nowcast_test_brick::PROGRAM),
+        ])
+    })
 }
 
-/// The `nowcast` binary, built if needed, beside the test brick.
-fn nowcast() -> PathBuf {
-    build_binaries();
-    let brick = nowcast_test_brick::binary().expect("the profile directory of the tests");
-    brick.with_file_name(format!("nowcast{}", std::env::consts::EXE_SUFFIX))
+/// The `nowcast` binary, built if needed.
+fn nowcast() -> &'static Path {
+    &binaries()[0]
 }
 
 /// The `PATH` with the test brick's directory first.
 fn path_with_test_brick() -> OsString {
-    let brick = nowcast_test_brick::binary().expect("the profile directory of the tests");
-    let dir = brick.parent().unwrap().to_path_buf();
+    let dir = binaries()[1].parent().unwrap().to_path_buf();
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap()
 }

@@ -1,5 +1,5 @@
 //! Where each forge's token comes from. The user chooses, forge by forge, at
-//! the brick's configuration ([`crate::configure`]): the forge's CLI, or a
+//! the brick's configuration ([`crate::configure()`]): the forge's CLI, or a
 //! token they give. The choice is kept in the brick's own configuration file,
 //! which holds no secret; a token goes to the system keyring (Secret
 //! Service). Only the chosen source is read, and nothing chosen gives no

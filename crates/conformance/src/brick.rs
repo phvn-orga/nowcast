@@ -23,6 +23,12 @@ pub trait BrickSubject {
     fn name() -> BrickName;
     /// A subscription kind and JSON params the brick serves.
     fn subscription() -> (String, Vec<u8>);
+    /// A refresh scope matching the schema the brick declares, as JSON
+    /// bytes; `None` for a brick that declares none, which is never sent a
+    /// `refresh-scope`.
+    fn scope() -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// How long a brick has to answer anything but `hello`, or to exit.
@@ -206,6 +212,17 @@ pub async fn release_gets_no_answer<S: BrickSubject>() {
     assert_eq!(brick.subscribe::<S>(2).await, flow);
 }
 
+/// `refresh-scope` gets no answer but publications; the brick keeps serving.
+/// Skipped for a brick that declares no refresh scope.
+pub async fn refresh_scope_gets_no_answer<S: BrickSubject>() {
+    let Some(scope) = S::scope() else { return };
+    let mut brick = Running::ready::<S>().await;
+    let flow = brick.subscribe::<S>(1).await;
+    brick.send(&ServiceMessage::RefreshScope { scope }).await;
+    // A publication the scope caused is acknowledged on the way.
+    assert_eq!(brick.subscribe::<S>(2).await, flow);
+}
+
 /// On `shutdown` the brick exits, its output holding nothing but frames.
 pub async fn shutdown_ends_the_brick<S: BrickSubject>() {
     let mut brick = Running::ready::<S>().await;
@@ -232,6 +249,7 @@ macro_rules! brick_suite {
                     flow_ids_are_deterministic,
                     publishes_after_a_refresh,
                     release_gets_no_answer,
+                    refresh_scope_gets_no_answer,
                     shutdown_ends_the_brick,
                 ]
             );

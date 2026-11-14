@@ -77,6 +77,8 @@ struct RawManifest {
     subscriptions: BTreeMap<String, RawSubscription>,
     #[serde(default)]
     types: BTreeMap<String, RawType>,
+    #[serde(default)]
+    refresh: Option<RawRefresh>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +110,12 @@ struct RawSubscription {
 #[serde(deny_unknown_fields)]
 struct RawType {
     schema: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRefresh {
+    scope: PathBuf,
 }
 
 /// Loads and validates a brick declaration file. Links are followed: relative
@@ -200,6 +208,10 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
             Ok((ty, TypeDeclaration { schema }))
         })
         .collect::<Result<_, ManifestError>>()?;
+    let refresh_scope = raw
+        .refresh
+        .map(|refresh| load_schema(&dir, &refresh.scope))
+        .transpose()?;
 
     Ok(BrickDeclaration {
         name,
@@ -212,6 +224,7 @@ pub fn load_manifest(path: &Path) -> Result<BrickDeclaration, ManifestError> {
         configure,
         subscriptions,
         types,
+        refresh_scope,
     })
 }
 

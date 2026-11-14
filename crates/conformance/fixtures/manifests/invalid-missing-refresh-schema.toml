@@ -1,0 +1,20 @@
+# A refresh scope schema must exist.
+manifest_version = 1
+name = "forge"
+version = "0.1.0"
+description = "State of a PR and its CI on GitHub and Azure DevOps."
+protocol = 1
+
+[run]
+command = ["bin/nowcast-forge"]
+
+[subscriptions.pr]
+description = "The PR of a branch and its CI checks."
+schema = "schemas/subscription-pr.json"
+publishes = "forge.pr/v1"
+
+[types."forge.pr/v1"]
+schema = "schemas/forge-pr-v1.json"
+
+[refresh]
+scope = "schemas/missing.json"

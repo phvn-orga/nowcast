@@ -28,6 +28,8 @@ struct File {
     subscriptions: BTreeMap<String, Subscription>,
     #[serde(default)]
     types: BTreeMap<String, Type>,
+    #[serde(default)]
+    refresh: Option<Refresh>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +52,11 @@ struct Subscription {
 #[derive(Deserialize)]
 struct Type {
     schema: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct Refresh {
+    scope: PathBuf,
 }
 
 /// Reads a declaration file as contract section 1 describes it.
@@ -104,6 +111,10 @@ impl ManifestSubject for Section1 {
             let schema = schema(&ty.schema)?;
             types.insert(name, TypeDeclaration { schema });
         }
+        let refresh_scope = file
+            .refresh
+            .map(|refresh| schema(&refresh.scope))
+            .transpose()?;
         Ok(BrickDeclaration {
             name: BrickName::new(file.name).map_err(|e| e.to_string())?,
             version: file.version,
@@ -115,6 +126,7 @@ impl ManifestSubject for Section1 {
             configure: None,
             subscriptions,
             types,
+            refresh_scope,
         })
     }
 }

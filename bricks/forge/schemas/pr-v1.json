@@ -15,8 +15,8 @@
   },
   "properties": {
     "repo": { "type": "string", "description": "The repository, normalized: github.com/<owner>/<name>, dev.azure.com/<organization>/<project>/<repository>." },
-    "branch": { "type": "string" },
-    "head_sha": { "type": ["string", "null"], "description": "The branch's head on the forge; null when the branch is not there." },
+    "branch": { "type": ["string", "null"], "description": "The branch; under a PR's number, its head branch, null until a reading names it, and null for a PR from a fork, whose head branch is not one of this repository." },
+    "head_sha": { "type": ["string", "null"], "description": "The branch's head on the forge; null when the branch is not there. Under a PR's number, the PR's head, null until a reading finds it." },
     "pr": {
       "type": ["object", "null"],
       "required": ["number", "state", "draft", "base", "head_sha", "url", "auto_merge", "queue", "dequeued"],

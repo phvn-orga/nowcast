@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "required": ["remote"],
+  "properties": {
+    "remote": { "type": "string", "minLength": 1, "description": "URL of the git remote: SSH, HTTPS or SSH alias. Two spellings of one repository share a flow." },
+    "branch": { "type": "string", "minLength": 1, "description": "Name of the branch on the forge." },
+    "pr": { "type": "integer", "minimum": 1, "description": "Number of a PR, followed whatever its state, with its head branch." }
+  },
+  "oneOf": [{ "required": ["branch"] }, { "required": ["pr"] }],
+  "additionalProperties": false
+}

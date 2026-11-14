@@ -36,41 +36,28 @@ const AGENT: &str = env!("CARGO_BIN_EXE_nowcast-e2e-agent");
 /// The session [`Agent`] declares, as an agent's hooks pass its session id.
 pub const AGENT_SESSION: &str = "agent-session";
 
-/// Builds the binaries of the other packages once per test run. Cargo builds
-/// them for their own packages' tests only, so under `cargo test --workspace`
-/// but not under `cargo test -p nowcast-e2e`.
-fn build_binaries() {
-    static BUILT: OnceLock<()> = OnceLock::new();
+/// The `nowcast` tool and the test brick, binaries of other packages, built
+/// once per test run (see [`nowcast_test_brick::build`]).
+fn binaries() -> &'static [PathBuf] {
+    static BUILT: OnceLock<Vec<PathBuf>> = OnceLock::new();
     BUILT.get_or_init(|| {
-        let mut cargo = std::process::Command::new(env!("CARGO"));
-        cargo.args(["build", "--quiet", "--bins"]);
-        for package in ["nowcast-cli", "nowcast-test-brick"] {
-            cargo.args(["-p", package]);
-        }
-        if !cfg!(debug_assertions) {
-            cargo.arg("--release");
-        }
-        assert!(cargo.status().unwrap().success(), "the binaries build");
-    });
-}
-
-/// Where Cargo puts the binaries: the parent of the `deps` directory holding
-/// the test executable.
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    exe.parent().unwrap().parent().unwrap().to_path_buf()
+        nowcast_test_brick::build(&[
+            ("nowcast-cli", "nowcast"),
+            (nowcast_test_brick::PROGRAM, nowcast_test_brick::PROGRAM),
+        ])
+    })
 }
 
 pub fn cli_binary() -> PathBuf {
-    profile_dir().join("nowcast")
+    binaries()[0].clone()
 }
 
 /// The `PATH` with the test brick's directory first: its declaration names
 /// the bare program.
 fn path_with_test_brick() -> std::ffi::OsString {
+    let dir = binaries()[1].parent().unwrap().to_path_buf();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::join_paths(std::iter::once(profile_dir()).chain(std::env::split_paths(&path)))
-        .unwrap()
+    std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap()
 }
 
 /// Polls `check` until it gives a value, for [`TIMEOUT`] at most.
@@ -99,7 +86,7 @@ impl Service {
 
     /// Every brick process the daemon launches runs in `mode`.
     pub async fn start_with(mode: Mode) -> Self {
-        build_binaries();
+        binaries();
         let root = TempDir::new().unwrap();
         let config = root.path().join("config/nowcast");
 

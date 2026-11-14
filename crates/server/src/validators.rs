@@ -76,6 +76,7 @@ mod tests {
             configure: None,
             subscriptions: Default::default(),
             types: Default::default(),
+            refresh_scope: None,
         })
     }
 

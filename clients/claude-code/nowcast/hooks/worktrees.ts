@@ -5,13 +5,20 @@
 // that succeeded, of the main loop or a subagent, marks the worktree of its
 // file; reads and Bash commands do not count.
 //
+// Each entry carries its forge key, where `git push` sends its branch
+// (`02-clients.md`), read again at each write in it and after a command of
+// the agent that may move a branch (`actions.ts`); `branches.ts` follows
+// the forge flows of these keys.
+//
 // The list lives in this mod's state (`worktrees`), whether or not the
 // claude-code brick is enabled, and goes out with the session's measures.
 // It belongs to the session: a `/clear` starts it over, a reload of this mod
 // finds it in the state.
 
 import type { EngineInterface, On } from 'claude-code'
-import type { NowcastWorktree } from '../types'
+import type { NowcastForgeKey, NowcastWorktree } from '../types'
+import { MAY_ACT, branchMoves, isUrl } from './actions'
+import { followForge } from './branches'
 import { write } from './flows'
 
 type $ = EngineInterface
@@ -39,6 +46,16 @@ let queue: Promise<void> = Promise.resolve()
 export function registerWorktrees(on: On): void {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, await next(e)))
   on('tool.call', { tool: 'Write' }, async ($, e, next) => marked($, e.file_path, await next(e)))
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!MAY_ACT.test(e.command)) return next(e)
+    // Read before the command runs: a `cd` in it moves the session.
+    const cwd = await $.session.cwd().catch(() => undefined)
+    const result = await next(e)
+    // A command that failed may still have switched before it did.
+    const moved = result.deny === undefined ? branchMoves(e.command, cwd) : []
+    if (moved.length > 0) reread($, moved)
+    return result
+  })
 }
 
 /** Records `file` when the call that wrote it succeeded; the call's result unchanged. */
@@ -62,6 +79,38 @@ function record($: $, file: string): void {
       await wrote($, file, new Date(now).toISOString(), session)
     })
     .catch(error => $.ui.log(`nowcast: cannot record the worktree of ${file}: ${message(error)}`, { to: 'debug' }))
+}
+
+/**
+ * Queues a new reading of the worktrees under `dirs`, any of them for an
+ * undefined one: their branch and key, or their leaving when gone. Order
+ * and dates stay.
+ */
+function reread($: $, dirs: Array<string | undefined>): void {
+  const asked = $.session.id()
+  // Handled when its turn comes, below.
+  asked.catch(() => undefined)
+  queue = queue
+    .then(async () => {
+      const session = await asked
+      const mine = await hold($)
+      if (mine.session !== session || mine.list.length === 0) return
+      const under = (path: string) => dirs.some(dir => dir === undefined || dir === path || dir.startsWith(`${path}/`))
+      const read = await Promise.all(
+        mine.list.map(async worktree => {
+          if (!under(worktree.path)) return worktree
+          if (!(await $.fs.exists(worktree.path).catch(() => true))) return undefined
+          return { ...worktree, ...(await describe($, worktree.path)) }
+        }),
+      )
+      const next = read.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
+      if (JSON.stringify(next) === JSON.stringify(mine.list)) return
+      mine.list = next
+      if ((await $.session.id()) !== session) return
+      await write($, () => $.state.set(WORKTREES, next), 'worktrees')
+      followForge($, next)
+    })
+    .catch(error => $.ui.log(`nowcast: cannot read the worktrees again: ${message(error)}`, { to: 'debug' }))
 }
 
 /** The session's worktrees, most recent write first. */
@@ -96,11 +145,7 @@ async function wrote($: $, file: string, at: string, session: string): Promise<v
   if (!file.startsWith('/')) return
   const place = await placeOf($, file.slice(0, file.lastIndexOf('/')) || '/')
   if (place === null) return
-  const [branch, remote, mine] = await Promise.all([
-    git($, place.root, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
-    git($, place.root, ['config', '--get', 'remote.origin.url']),
-    hold($),
-  ])
+  const [described, mine] = await Promise.all([describe($, place.root), hold($)])
   // The session of the call ended before its turn: its list is gone.
   if (mine.session !== session) return
   // A worktree removed since leaves the list.
@@ -110,14 +155,68 @@ async function wrote($: $, file: string, at: string, session: string): Promise<v
       .map(async worktree => ((await $.fs.exists(worktree.path).catch(() => true)) ? worktree : undefined)),
   )
   const others = kept.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
-  const next = [{ path: place.root, repo: place.repo, branch, remote, written_at: at }, ...others].slice(
-    0,
-    MAX_WORKTREES,
-  )
+  const { branch, remote, forge } = described
+  const written = { path: place.root, repo: place.repo, branch, remote, written_at: at, forge }
+  const next = [written, ...others].slice(0, MAX_WORKTREES)
   mine.list = next
   // The session ended meanwhile: the new one's state is not this list's.
   if ((await $.session.id()) !== session) return
   await write($, () => $.state.set(WORKTREES, next), 'worktrees')
+  followForge($, next)
+}
+
+/** What git says of a worktree now: its branch, its `origin` and its forge key. */
+async function describe($: $, root: string): Promise<Pick<NowcastWorktree, 'branch' | 'remote' | 'forge'>> {
+  const [branch, remote] = await Promise.all([
+    git($, root, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    git($, root, ['config', '--get', 'remote.origin.url']),
+  ])
+  return { branch, remote, forge: await forgeKey($, root, branch) }
+}
+
+/**
+ * Where `git push` sends `branch` from `dir` (`02-clients.md` on the design
+ * branch): `@{push}`, `<remote>/<branch>`; when git does not resolve it, as
+ * before a first push with `push.default` at `simple`, the same name on the
+ * push remote. Null on a detached HEAD or without a push remote.
+ */
+export async function forgeKey($: $, dir: string, branch: string | null): Promise<NowcastForgeKey | null> {
+  if (branch === null) return null
+  const [name, push] = await Promise.all([
+    pushRemote($, dir, branch),
+    git($, dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{push}']),
+  ])
+  const remote = await remoteUrl($, dir, name)
+  if (remote === null) return null
+  // `@{push}` names the remote git pushes to, the one found above.
+  const pushed = push?.startsWith(`${name}/`) ? push.slice(name.length + 1) : ''
+  return { remote, branch: pushed === '' ? branch : pushed }
+}
+
+/**
+ * The push URL of the remote `git push` sends `dir`'s branch to: its
+ * `pushRemote`, else `remote.pushDefault`, else its upstream's remote, else
+ * `origin` (`02-clients.md` on the design branch).
+ */
+export async function pushUrl($: $, dir: string): Promise<string | null> {
+  const branch = await git($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  return remoteUrl($, dir, await pushRemote($, dir, branch))
+}
+
+/** The name of the remote `git push` sends `branch` to, or its URL when given as one. */
+async function pushRemote($: $, dir: string, branch: string | null): Promise<string> {
+  const config = (key: string) => git($, dir, ['config', '--get', key])
+  return (
+    (branch === null ? null : await config(`branch.${branch}.pushRemote`)) ??
+    (await config('remote.pushDefault')) ??
+    (branch === null ? null : await config(`branch.${branch}.remote`)) ??
+    'origin'
+  )
+}
+
+/** A remote's push URL; a remote may be given as its URL. */
+function remoteUrl($: $, dir: string, name: string): Promise<string | null> {
+  return isUrl(name) ? Promise.resolve(name) : git($, dir, ['remote', 'get-url', '--push', name])
 }
 
 /** The worktree a directory belongs to, asked of git once per directory. */
@@ -133,7 +232,7 @@ async function placeOf($: $, dir: string): Promise<Place> {
 }
 
 /** A git command's output, trimmed; null when it fails or prints nothing. */
-async function git($: $, cwd: string, args: string[]): Promise<string | null> {
+export async function git($: $, cwd: string, args: string[]): Promise<string | null> {
   const answer = await $.process.run(['git', ...args], { cwd, timeoutMs: GIT_TIMEOUT_MS }).catch(() => undefined)
   if (answer === undefined || answer.exitCode !== 0) return null
   const out = answer.stdout.trim()

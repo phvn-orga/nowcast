@@ -116,6 +116,15 @@ test('refreshBrick reaches the brick, with its kind when given', plugins, async 
   expect(sent[1]?.body ?? '').toBe('')
 })
 
+test('refreshBrick sends a scope as given', plugins, async ($, on) => {
+  const w = world(on, { answer: service({ 'POST /v1/bricks/forge/refresh': { status: 202 } }) })
+
+  const scope = { repo: 'github.com/o/r', kinds: ['pr'] }
+  expect(await call($, 'refreshBrick', { brick: 'forge', scope })).toEqual({ ok: true })
+  const sent = w.requests.filter(r => r.url.endsWith('/v1/bricks/forge/refresh'))
+  expect(sent.map(r => JSON.parse(r.body ?? 'null'))).toEqual([{ scope }])
+})
+
 test('refresh, input and last reach the flow', plugins, async ($, on) => {
   const last = update(FLOW, '5', { number: 1 })
   const w = world(on, {
