@@ -222,17 +222,29 @@ impl Ci {
     /// The rollup of the required items; `None` when nothing says what is.
     /// A required check still missing while the CI is expected or runs is
     /// `running`: it may come yet, from a job that `needs` a running one.
+    /// Required items all skipped are `pass`: the forges hold a skipped
+    /// required check, or a policy that does not apply, as satisfied.
     fn required_state(&self, now: Instant) -> Option<&'static str> {
         let missing = !self.missing_required.is_empty();
         let any = self.elements().any(|(_, r)| r.is_some()) || missing;
+        let required = || {
+            self.elements()
+                .filter(|(_, r)| *r == Some(true))
+                .map(|(s, _)| s)
+        };
         any.then(|| {
-            rollup(
-                self.elements()
-                    .filter(|(_, r)| *r == Some(true))
-                    .map(|(s, _)| s),
+            match rollup(
+                required(),
                 missing,
                 self.expected(now) || (missing && self.is_running()),
-            )
+            ) {
+                "none"
+                    if required().next().is_some() && required().all(|s| s == State::Skipped) =>
+                {
+                    "pass"
+                }
+                state => state,
+            }
         })
     }
 
@@ -271,7 +283,8 @@ impl Ci {
 /// `running` if one runs or waits its turn, or a CI is expected; `missing`
 /// when a required one never reported (`missing` is only asked for the
 /// required rollup); `waiting` if one waits for a person; `pass` if one
-/// passed; `none` otherwise. Skipped and unknown states count for nothing.
+/// passed; `none` otherwise. Skipped and unknown states count for nothing,
+/// save that the required rollup reads required items all skipped as `pass`.
 fn rollup(states: impl Iterator<Item = State>, missing: bool, expected: bool) -> &'static str {
     let (mut fail, mut running, mut waiting, mut pass) = (false, expected, false, false);
     for state in states {
@@ -519,6 +532,48 @@ pub(crate) mod tests {
         ci.expected_until = None;
         ci.missing_required.clear();
         assert_eq!(ci.detail(now)["required_state"], "pass");
+    }
+
+    /// Required items all skipped meet the requirement, as the forges hold
+    /// it; the overall state still sees nothing that ran.
+    #[test]
+    fn required_items_all_skipped_pass_the_required_rollup_only() {
+        let now = Instant::now();
+        let mut ci = ci(vec![pipeline(
+            State::Skipped,
+            vec![
+                job("check", State::Skipped, Some(true)),
+                job("e2e", State::Skipped, Some(true)),
+                job("lint", State::Pass, Some(false)),
+            ],
+        )]);
+        assert_eq!(ci.detail(now)["required_state"], "pass");
+        ci.pipelines[0].jobs[2].state = State::Skipped;
+        assert_eq!(ci.detail(now)["state"], "none");
+        assert_eq!(ci.detail(now)["required_state"], "pass");
+        ci.expected_until = Some(now + Duration::from_secs(1));
+        assert_eq!(
+            ci.detail(now)["required_state"],
+            "running",
+            "a CI is expected"
+        );
+        ci.expected_until = None;
+        ci.missing_required = vec!["build".into()];
+        assert_eq!(ci.detail(now)["required_state"], "missing", "nothing runs");
+        ci.missing_required.clear();
+        ci.pipelines[0].jobs[1].state = State::Unknown;
+        assert_eq!(
+            ci.detail(now)["required_state"],
+            "none",
+            "not all were skipped"
+        );
+        ci.pipelines[0].jobs[0].required = Some(false);
+        ci.pipelines[0].jobs[1].required = Some(false);
+        assert_eq!(
+            ci.detail(now)["required_state"],
+            "none",
+            "no required item to have been skipped"
+        );
     }
 
     /// A required check may `need` a job that still runs: while anything
