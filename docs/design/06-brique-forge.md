@@ -1,9 +1,10 @@
 # La brique forge
 
-État au 2026-11-13 : conception refaite sous #52, implémentation dans #125 ;
+État au 2026-11-14 : conception refaite sous #52, implémentation dans #125 ;
 détection des changements, clés dynamiques et rafraîchissement ciblé conçus le
 2026-11-13, implémentés dans #132 ; détecteurs Azure DevOps décidés le
-2026-11-13 d'après une revue sur un projet réel. Brique
+2026-11-13 d'après une revue sur un projet réel ; savoir d'avance si une CI démarre
+décidé le 2026-11-14 d'après un spike sur nowcast. Brique
 native (`01-briques.md`), qui remplace le premier jet décrit dans `00-cadrage.md`.
 
 La brique est organisée par usages : une PR, des pipelines, des issues. Chaque
@@ -298,8 +299,10 @@ s'engage aussi sur un comportement :
   limites de ce que la forge accorde. Une attente humaine (une approbation) ne
   compte pas comme une CI qui tourne ;
 - **une CI est attendue** quand le provider estime que des pipelines vont apparaître
-  sur une tête neuve ; la synthèse et `missing_required` en tiennent compte. Sur une
-  branche sans PR, cette attente s'apprend par dépôt (voir la machine à rythme) ;
+  sur une tête neuve ; la synthèse et `missing_required` en tiennent compte. Quand la
+  configuration de la CI dit d'avance qu'aucun pipeline ne viendra, la tête publie
+  `none` aussitôt (voir « Savoir si une CI démarre » sous GitHub) ; sinon l'attente
+  dure 2 min au plus (voir la machine à rythme) ;
 - **la synthèse de `pr` et le détail de `pipelines`** d'une même branche viennent
   d'une même lecture et s'accordent ;
 - **une lecture en échec garde la dernière valeur** et met à jour `source` ;
@@ -322,7 +325,7 @@ La brique offre quelques outils, qu'un provider prend s'ils lui vont :
 
   | État | Quand | Jusqu'à |
   |---|---|---|
-  | **CI attendue** | une tête neuve (push, PR ouverte) sans aucun pipeline encore | un pipeline apparaît, ou 2 min sans rien : pas de CI pour cet événement |
+  | **CI attendue** | une tête neuve (push, PR ouverte) sans aucun pipeline encore, dont le provider n'a pas établi qu'aucune CI ne démarre | un pipeline apparaît, ou 2 min sans rien : pas de CI pour cet événement |
   | **CI en cours** | un pipeline ou un job `queued` ou `running`, PR ou file de merge | plus rien ne tourne |
   | **fenêtre rapide** | un `refresh` n'a rien montré de neuf | 30 s |
   | **normal** | | |
@@ -336,16 +339,12 @@ La brique offre quelques outils, qu'un provider prend s'ils lui vont :
   mise en file) se voit par la détection du provider (voir « Voir un changement »),
   et à défaut au rythme normal.
 
-  La brique apprend, par dépôt, si un push sur une branche sans PR ouverte démarre
-  une CI. Après un tel push, une tête qui reste 2 min sur le même commit sans aucun
-  pipeline enseigne que non : les pushs de branche suivants, dans ce dépôt,
-  n'attendent plus de CI et publient `none` aussitôt. Un pipeline après un push de
-  branche, `queued` compris, enseigne l'inverse et l'attente revient. Une tête de PR
-  (PR neuve, push sur une PR) attend toujours sa CI et n'apprend rien. L'apprentissage
-  vit en mémoire : le premier push après un redémarrage attend de nouveau. Les deux
-  forges l'appliquent. Constaté le 2026-11-14 sur nowcast, dont la CI ne tourne pas
-  sur un simple push de branche : une branche y montrait `running` sans aucun
-  pipeline pendant 2 min après chaque push.
+  Aucune forge ne donne de signal « évalué, rien ne correspond ». Sur GitHub, quand
+  aucun workflow ne correspond, le commit n'a aucune check suite (`total_count: 0`),
+  exactement comme pendant les 3 à 4 s qui précèdent le démarrage d'une CI (constaté
+  le 2026-11-14 sur nowcast). Seule la configuration de la CI permet donc de savoir
+  d'avance qu'aucun pipeline ne viendra ; quand le provider ne peut pas trancher, les
+  2 min restent le repli.
 
 Rien n'oblige un provider à les prendre : un outil qui ne colle pas à une forge est
 contourné, pas plié pour elle.
@@ -544,6 +543,34 @@ Le reste passe par GraphQL, seul à le donner :
 | `cancelled` | `cancelled` |
 | `skipped` | `skipped`, `neutral` |
 | `unknown` | `stale`, toute autre valeur |
+
+**Savoir si une CI démarre.** Les déclencheurs d'un workflow vivent dans l'arbre de
+chaque ref : le provider les lit au commit concerné, le commit poussé, ou la tête
+d'une PR, approximation de son commit de merge. Sur nowcast, le 2026-11-14, `design`
+n'a pas de `.github/workflows` et ses PR (#130, #131) n'ont démarré aucune CI, alors
+que les workflows de `main` en annoncent une sur toute PR ; les branches de
+fonctionnalité, elles, modifient `ci.yml`.
+
+- **La lecture** : `contents/.github/workflows?ref=<sha>`, puis chaque fichier par
+  le sha de son blob, immuable et donc gardé en cache pour de bon par dépôt, plus
+  `actions/workflows` pour l'état (`state`) de chaque workflow. Les relectures
+  répondent `304`. Mesuré le 2026-11-14 : la première lecture de nowcast coûte
+  5 points, une autre ref 1 point plus les blobs changés.
+- **Trois réponses** :
+
+  | Réponse | Quand | Effet |
+  |---|---|---|
+  | aucune | pas de workflow `push` ou `pull_request` dont les filtres de branche correspondent, ou pas de répertoire de workflows sur cette ref | pas de CI attendue, `none` aussitôt |
+  | certaine | un workflow qui correspond, sans filtre de chemins | CI attendue |
+  | peut-être | filtres de chemins, `[skip ci]`, un push fait avec `GITHUB_TOKEN`, un conflit de merge sur une PR, `action_required`, tout ce qui n'est pas compris | l'attente de 2 min, en repli |
+
+  `workflow_dispatch`, `schedule`, `workflow_run`, `workflow_call` et
+  `repository_dispatch` ne démarrent jamais sur un push ni sur une PR.
+- **Le YAML** se lit avec `serde-saphyr` (Rust pur, YAML 1.2, où `on` reste une
+  chaîne).
+- **Vérifié contre l'historique de nowcast** (2026-11-14) : pas de CI sur un push de
+  branche de fonctionnalité, une CI sur un push sur `main`, une CI sur une PR vers
+  `main`, aucune sur une PR vers `design`.
 
 **Rythme** : la machine à rythme, avec CI attendue 2 s pendant 30 s puis 5 s, CI en
 cours 5 s, fenêtre rapide 2 s, normal 60 s. Une lecture qui ne change rien est
@@ -762,6 +789,9 @@ La progression d'une CI se lit par le timeline de chaque build, par incréments 
 cours 10 s, fenêtre rapide 5 s, normal 120 s. Sur une PR, « CI attendue » n'a pas à
 être deviné : une évaluation de politique de build `queued`, non expirée, dit qu'un
 build va venir, et la fenêtre de 2 minutes ne sert que pour une branche sans PR.
+Elle y reste pour l'instant : la CI d'un pipeline YAML tourne par défaut sur toutes
+les branches, si bien qu'attendre est le plus souvent juste. Le savoir d'avance est à
+vérifier (voir « À vérifier sur Azure DevOps »).
 
 - Les détecteurs s'interrogent toutes les 10 s et ralentissent par la règle
   commune aux deux forges (voir GitHub), une réponse changée étant ici une liste
@@ -880,7 +910,7 @@ les détecteurs le voient, comme le reste du monde.
 |---|---|---|---|
 | Un worktree, une nouvelle branche | rien | le mod central, si son agent a lancé la commande | abonnement aux clés de la branche là où `git push` l'enverrait (`02-clients.md`) ; `head_sha` est `null` |
 | Des commits locaux | rien | personne | aucune ; un consommateur compare `head_sha` à son HEAD |
-| `git push` | la branche est créée ou avance, une CI démarre | le mod central | la clé ne change pas, `head_sha` se remplit ; portée `pr`, `pipelines` ; CI attendue, sauf dans un dépôt dont les pushs de branche n'en démarrent pas (voir la machine à rythme) |
+| `git push` | la branche est créée ou avance, une CI démarre ou non | le mod central | la clé ne change pas, `head_sha` se remplit ; portée `pr`, `pipelines` ; CI attendue, sauf si le provider sait qu'aucune ne démarre (sur GitHub, d'après les workflows du commit poussé) |
 | `gh pr create` | une PR s'ouvre, sa CI démarre | le mod central, le numéro tiré de l'URL affichée | portée avec `number` : la brique résout la PR, le flux de la branche la montre |
 | D'autres pushs | la tête avance, la PR change | le mod central | comme `git push` |
 | La CI tourne | runs et jobs changent | la brique seule | « CI en cours » : sur GitHub, les check runs du commit, chaque job vu 8 à 15 s après |
@@ -976,7 +1006,14 @@ pas de vérifier le reste, à reprendre sur un projet qui le montre :
 - que `statusFilter=inProgress,notStarted` et `$top=500` soient acceptés ;
 - qu'un vrai push, un build, un vote et une modification de work item ne
   réveillent chacun que la cible touchée ;
-- le budget consommé sur 5 minutes avec quelques dépôts suivis.
+- le budget consommé sur 5 minutes avec quelques dépôts suivis ;
+- savoir d'avance si un push de branche démarre une CI, en lisant le YAML de chaque
+  définition (`process.yamlFilename`, par `git/repositories/<dépôt>/items` à la
+  branche poussée) et les politiques de validation de build : la forme réelle de
+  `triggers[]` sur une définition YAML (`settingsSourceType`), si « Disable implied
+  YAML CI trigger » se lit par l'API, les `settings` d'une politique de build
+  (`filenamePatterns`, `manualQueueOnly`), l'`ETag` et le coût de `definitions` et
+  d'`items`, le délai avant qu'un build apparaisse après un push.
 
 ## Sources
 
