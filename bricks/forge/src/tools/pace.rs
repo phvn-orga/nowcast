@@ -73,11 +73,9 @@ impl Pushed {
 /// whether it starts a CI.
 #[derive(Debug)]
 struct Push {
-    /// No CI is expected for it: the repository's pushes start none.
+    /// No CI is expected for it: the repository's pushes started none when
+    /// it came, or it taught that they start none.
     quiet: bool,
-    /// Its lack of pipeline is accounted for: it was quiet, or it taught
-    /// that pushes start no CI.
-    settled: bool,
 }
 
 /// What the pace remembers of a branch between readings.
@@ -122,10 +120,8 @@ impl Pace {
             if subject.0.is_some() {
                 self.changed_at = Some(now);
                 if pr.is_none() && before.0 != subject.0 {
-                    let quiet = self.pushed.start_none();
                     self.push = Some(Push {
-                        quiet,
-                        settled: quiet,
+                        quiet: self.pushed.start_none(),
                     });
                 }
             }
@@ -135,9 +131,9 @@ impl Pace {
             if pipelines > 0 {
                 self.pushed.learn(false);
                 self.push = None;
-            } else if !push.settled && self.changed_at.is_some_and(|at| now >= at + EXPECTED_FOR) {
+            } else if !push.quiet && self.changed_at.is_some_and(|at| now >= at + EXPECTED_FOR) {
                 self.pushed.learn(true);
-                push.settled = true;
+                push.quiet = true;
             }
         }
     }
@@ -155,8 +151,8 @@ impl Pace {
         }
     }
 
-    /// Whether a CI is due and has not shown up: a recent change, and no
-    /// pipeline yet.
+    /// Whether a CI is due and has not shown up: a recent change that is
+    /// not a quiet push, and no pipeline yet.
     pub fn expects(&self, now: Instant, pipelines: usize) -> bool {
         self.expected_until(pipelines)
             .is_some_and(|until| now < until)
