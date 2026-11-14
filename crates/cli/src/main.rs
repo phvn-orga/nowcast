@@ -122,9 +122,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Get { flow, after } => {
             commands::get(&client, &flow, after, cli.json, &mut out, &mut err).await
         }
-        Command::Refresh { flow, brick, kind } => match (flow, brick) {
+        Command::Refresh {
+            flow,
+            brick,
+            kind,
+            scope,
+        } => match (flow, brick) {
             (Some(flow), _) => commands::refresh(&client, &flow).await,
-            (None, Some(brick)) => commands::refresh_brick(&client, &brick, kind.as_deref()).await,
+            (None, Some(brick)) => {
+                commands::refresh_brick(&client, &brick, kind.as_deref(), scope.as_deref()).await
+            }
             (None, None) => unreachable!("clap requires a flow or a brick"),
         },
         Command::Status => {

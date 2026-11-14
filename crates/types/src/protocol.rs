@@ -24,6 +24,13 @@ pub enum ServiceMessage {
     Release { flow: FlowId },
     /// The brick publishes again once it has re-read the source.
     Refresh { flow: FlowId },
+    /// The brick re-reads what the scope touches, and publishes again only
+    /// what changed. Sent only to a brick that declares the scope's schema
+    /// (`[refresh] scope`), already checked against it.
+    RefreshScope {
+        /// The JSON bytes of the scope.
+        scope: Vec<u8>,
+    },
     /// A subscriber of the flow sent a detail, already checked against the
     /// schema of `data_type`, the type the flow's kind accepts.
     Input {
@@ -51,6 +58,7 @@ impl ServiceMessage {
             Self::Subscribe { .. } => "subscribe",
             Self::Release { .. } => "release",
             Self::Refresh { .. } => "refresh",
+            Self::RefreshScope { .. } => "refresh-scope",
             Self::Input { .. } => "input",
             Self::Shutdown => "shutdown",
             Self::Ack { .. } => "ack",

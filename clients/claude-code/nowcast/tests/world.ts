@@ -325,11 +325,13 @@ export const caller: Plugin = {
               ? await $.nowcast.refresh(request)
               : method === 'refreshBrick'
                 ? await $.nowcast.refreshBrick(request)
-                : method === 'input'
-                  ? await $.nowcast.input(request)
-                  : method === 'history'
-                    ? await $.nowcast.history(request)
-                    : await $.nowcast.last(request)
+                : method === 'refreshForge'
+                  ? await $.nowcast.refreshForge(request)
+                  : method === 'input'
+                    ? await $.nowcast.input(request)
+                    : method === 'history'
+                      ? await $.nowcast.history(request)
+                      : await $.nowcast.last(request)
       return { text: JSON.stringify(answer) }
     })
   },
@@ -353,7 +355,7 @@ export const other: Plugin = {
 /** What `$.nowcast.<method>(request)` answers, called by the `caller` mod. */
 export async function call(
   $: Engine,
-  method: 'subscribe' | 'unsubscribe' | 'refresh' | 'refreshBrick' | 'input' | 'last' | 'history',
+  method: 'subscribe' | 'unsubscribe' | 'refresh' | 'refreshBrick' | 'refreshForge' | 'input' | 'last' | 'history',
   request: unknown,
   command = 'call',
 ) {

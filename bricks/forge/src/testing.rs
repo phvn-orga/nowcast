@@ -8,6 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 type Answer = (u16, Vec<(&'static str, &'static str)>, String);
+/// An answer whose body may be any bytes, such as a compressed one.
+type RawAnswer = (u16, Vec<(&'static str, &'static str)>, Vec<u8>);
 
 pub struct Server {
     port: u16,
@@ -16,6 +18,15 @@ pub struct Server {
 
 impl Server {
     pub async fn start(handler: impl Fn(&str) -> Answer + Send + Sync + 'static) -> Self {
+        Self::start_raw(move |request| {
+            let (status, headers, body) = handler(request);
+            (status, headers, body.into_bytes())
+        })
+        .await
+    }
+
+    /// [`Server::start`], with a body of bytes.
+    pub async fn start_raw(handler: impl Fn(&str) -> RawAnswer + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -51,8 +62,9 @@ impl Server {
                         answer.push_str(&format!("{name}: {value}\r\n"));
                     }
                     answer.push_str("\r\n");
-                    answer.push_str(&body);
-                    let _ = socket.write_all(answer.as_bytes()).await;
+                    let mut answer = answer.into_bytes();
+                    answer.extend_from_slice(&body);
+                    let _ = socket.write_all(&answer).await;
                     let _ = socket.shutdown().await;
                 });
             }

@@ -38,6 +38,7 @@ pub fn encode_service(msg: &ServiceMessage) -> Result<Vec<u8>, CodecError> {
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
             encode(t, &[("flow", flow.as_str().into())])
         }
+        ServiceMessage::RefreshScope { scope } => encode(t, &[("scope", scope.as_slice().into())]),
         ServiceMessage::Input {
             flow,
             data_type,
@@ -118,6 +119,9 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, CodecError> {
         },
         "refresh" => ServiceMessage::Refresh {
             flow: fields.flow()?,
+        },
+        "refresh-scope" => ServiceMessage::RefreshScope {
+            scope: fields.bin("scope")?.to_vec(),
         },
         "input" => ServiceMessage::Input {
             flow: fields.flow()?,

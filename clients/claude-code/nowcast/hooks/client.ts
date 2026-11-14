@@ -46,6 +46,7 @@ export const STUB: Nowcast = {
   unsubscribe: unavailable,
   refresh: unavailable,
   refreshBrick: unavailable,
+  refreshForge: unavailable,
   input: unavailable,
   last: unavailable,
   history: unavailable,
@@ -89,8 +90,14 @@ export async function refresh($: $, flow: string): Promise<NowcastDone | Nowcast
 }
 
 /** `$.nowcast.refreshBrick`. */
-export async function refreshBrick($: $, brick: string, kind?: string): Promise<NowcastDone | NowcastFailure> {
-  const body = kind === undefined ? undefined : { kind }
+export async function refreshBrick(
+  $: $,
+  brick: string,
+  kind?: string,
+  scope?: Record<string, unknown>,
+): Promise<NowcastDone | NowcastFailure> {
+  // JSON leaves out the field that is undefined.
+  const body = kind === undefined && scope === undefined ? undefined : { kind, scope }
   return expect(await request($, 'POST', `/v1/bricks/${encodeURIComponent(brick)}/refresh`, body), 202, done)
 }
 

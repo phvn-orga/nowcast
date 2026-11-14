@@ -2,7 +2,8 @@
 //! its last reading saw. The first state that applies wins:
 //!
 //! 1. CI expected: a new head (a push, a PR just opened) with no pipeline
-//!    yet, for at most [`EXPECTED_FOR`];
+//!    yet, for at most [`EXPECTED_FOR`], unless its provider knows that
+//!    it starts none ([`Starts`]);
 //! 2. CI running: a pipeline or a job queued or running; one waiting for a
 //!    person (an approval) does not count, it may wait for days;
 //! 3. fast window: a `refresh` asked for, for [`WINDOW_FOR`];
@@ -13,7 +14,6 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
 /// How long a new head without pipeline counts as expecting a CI. Past it,
@@ -34,6 +34,18 @@ pub struct Rhythm {
     pub normal: Duration,
 }
 
+/// Whether the branch's head, as its provider knows it, starts a CI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Starts {
+    /// No CI starts for it: nothing is expected.
+    None,
+    /// A CI starts for it.
+    Certain,
+    /// It may start one: the provider cannot tell.
+    #[default]
+    Maybe,
+}
+
 /// What the pace remembers of a branch between readings.
 #[derive(Debug, Default)]
 pub struct Pace {
@@ -43,6 +55,8 @@ pub struct Pace {
     /// When the subject last changed, for a CI to be expected.
     changed_at: Option<Instant>,
     window_until: Option<Instant>,
+    /// Whether the subject starts a CI, as its provider said last.
+    starts: Starts,
 }
 
 impl Pace {
@@ -64,19 +78,24 @@ impl Pace {
         self.subject = Some(subject);
     }
 
+    /// Whether the subject read last starts a CI; until said, it may.
+    pub fn starts(&mut self, starts: Starts) {
+        self.starts = starts;
+    }
+
     /// Until when a CI is due while it has not shown up: [`EXPECTED_FOR`]
-    /// after the last change, when there is no pipeline yet. The deadline
-    /// may have passed already.
+    /// after the last change, when there is no pipeline yet and the subject
+    /// may start one. The deadline may have passed already.
     pub fn expected_until(&self, pipelines: usize) -> Option<Instant> {
-        if pipelines == 0 {
+        if pipelines == 0 && self.starts != Starts::None {
             self.changed_at.map(|at| at + EXPECTED_FOR)
         } else {
             None
         }
     }
 
-    /// Whether a CI is due and has not shown up: a recent change, and no
-    /// pipeline yet.
+    /// Whether a CI is due and has not shown up: a recent change that may
+    /// start one, and no pipeline yet.
     pub fn expects(&self, now: Instant, pipelines: usize) -> bool {
         self.expected_until(pipelines)
             .is_some_and(|until| now < until)
@@ -97,32 +116,6 @@ impl Pace {
             rhythm.window
         } else {
             rhythm.normal
-        }
-    }
-}
-
-/// Waits until `deadline`, or for a `refresh`, which ends the wait unless a
-/// rate limit holds it (`limited`); refreshes that piled up count as one,
-/// each calling `refreshed`. `false` once the core is gone.
-pub async fn wait_or_refresh(
-    deadline: Instant,
-    refreshes: &mut UnboundedReceiver<()>,
-    limited: bool,
-    mut refreshed: impl FnMut(),
-) -> bool {
-    loop {
-        tokio::select! {
-            () = tokio::time::sleep_until(deadline) => return true,
-            refresh = refreshes.recv() => {
-                if refresh.is_none() {
-                    return false;
-                }
-                while refreshes.try_recv().is_ok() {}
-                refreshed();
-                if !limited {
-                    return true;
-                }
-            }
         }
     }
 }
@@ -188,6 +181,25 @@ mod tests {
         pace.saw(t0, Some("a"), None);
         pace.saw(t0, None, None);
         assert!(!pace.expects(t0, 0));
+    }
+
+    #[test]
+    fn a_head_that_starts_no_ci_expects_nothing() {
+        let (mut pace, t0) = (Pace::default(), Instant::now());
+        pace.saw(t0, Some("a"), None);
+        pace.saw(t0, Some("b"), None);
+        pace.starts(Starts::None);
+        assert_eq!(pace.expected_until(0), None);
+        assert_eq!(pace.next(&GITHUB, t0, 0, false), GITHUB.normal);
+        pace.saw(t0, Some("c"), None);
+        for starts in [Starts::Certain, Starts::Maybe] {
+            pace.starts(starts);
+            assert_eq!(
+                pace.expected_until(0),
+                Some(t0 + EXPECTED_FOR),
+                "{starts:?}"
+            );
+        }
     }
 
     #[test]

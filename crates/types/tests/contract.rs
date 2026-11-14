@@ -46,6 +46,9 @@ fn service_to_brick_messages() {
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },
+        ServiceMessage::RefreshScope {
+            scope: b"{}".to_vec(),
+        },
         ServiceMessage::Input {
             flow: flow(),
             data_type: "forge.push/v1".into(),
@@ -65,6 +68,7 @@ fn service_to_brick_messages() {
             "subscribe",
             "release",
             "refresh",
+            "refresh-scope",
             "input",
             "shutdown",
             "ack",
@@ -133,7 +137,9 @@ fn api_error_codes() {
             "brick_unavailable",
             "subscription_refused",
             "input_not_accepted",
-            "invalid_input"
+            "invalid_input",
+            "invalid_scope",
+            "scope_not_accepted"
         ]
     );
     for code in ApiErrorCode::ALL {

@@ -12,20 +12,28 @@ const ROOT = (name: string) => `/lab/nowcast/${name}`
 
 /**
  * A repository whose worktrees sit under `/lab/nowcast/`, each on the branch
- * of its name unless `branches` says otherwise (null: a detached HEAD).
- * Nothing else is in a repository.
+ * of its name unless `branches` says otherwise (null: a detached HEAD), with
+ * `origin` for remote and no branch pushed. `git` gives other answers by
+ * worktree, then command line. Nothing else is in a repository.
  */
-function repository(branches: Record<string, string | null> = {}) {
+function repository(branches: Record<string, string | null> = {}, git: Record<string, Record<string, string>> = {}) {
   return (args: readonly string[], cwd: string | undefined) => {
     const name = cwd?.match(/^\/lab\/nowcast\/([^/.][^/]*)/)?.[1]
     if (name === undefined) return { exitCode: 128, stdout: '' }
-    if (args[0] === 'rev-parse') return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n` }
+    const line = args.join(' ')
+    const given = git[name]?.[line]
+    if (given !== undefined) return { exitCode: 0, stdout: `${given}\n` }
+    if (args[0] === 'rev-parse' && args[1] === '--path-format=absolute') {
+      return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n` }
+    }
     if (args[0] === 'symbolic-ref') {
       const branch = name in branches ? branches[name] : name
       return branch === null ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: `${branch}\n` }
     }
-    if (args[0] === 'config') return { exitCode: 0, stdout: `${REMOTE}\n` }
-    return { exitCode: 128, stdout: '' }
+    if (line === 'config --get remote.origin.url' || line === 'remote get-url --push origin') {
+      return { exitCode: 0, stdout: `${REMOTE}\n` }
+    }
+    return { exitCode: 1, stdout: '' }
   }
 }
 
@@ -57,6 +65,7 @@ const entry = (name: string, ms: number, branch: string | null = name): NowcastW
   branch,
   remote: REMOTE,
   written_at: new Date(ms).toISOString(),
+  forge: branch === null ? null : { remote: REMOTE, branch },
 })
 
 test('an Edit or a Write marks the worktree of its file, the latest write first', async ($, on) => {
@@ -194,4 +203,117 @@ test('the measures carry the list', async ($, on) => {
 
   const sent = w.requests.filter(r => r.url.endsWith(input)).at(-1)
   expect(JSON.parse(sent?.body ?? 'null').worktrees).toEqual([entry('main', 1_000_000)])
+})
+
+const FORK = 'git@github.com:me/r.git'
+const PUSH = 'rev-parse --abbrev-ref --symbolic-full-name @{push}'
+
+test('the forge key is where git push sends the branch, before and after a first push', async ($, on) => {
+  const git: Record<string, Record<string, string>> = {}
+  const w = world(on, { git: repository({}, git), files: [ROOT('feature')] })
+  tools(on)
+  await $.session.start(START)
+
+  // Not pushed: `@{push}` fails, the same name on `origin`.
+  await edit($, `${ROOT('feature')}/a.ts`)
+  expect((await listed(w))?.[0]?.forge).toEqual({ remote: REMOTE, branch: 'feature' })
+
+  // Pushed under another name: `@{push}` says so.
+  git.feature = { [PUSH]: 'origin/feature-x' }
+  await edit($, `${ROOT('feature')}/a.ts`)
+  expect((await listed(w))?.[0]?.forge).toEqual({ remote: REMOTE, branch: 'feature-x' })
+})
+
+test("the forge key follows the branch's push remote, not origin", async ($, on) => {
+  const w = world(on, {
+    git: repository(
+      { a: 'feature', b: 'feature', c: 'feature' },
+      {
+        // `pushRemote`, with `@{push}` resolved.
+        a: {
+          'config --get branch.feature.pushRemote': 'fork',
+          'remote get-url --push fork': FORK,
+          [PUSH]: 'fork/feature',
+        },
+        // `remote.pushDefault`, given as a URL: git resolves no `@{push}`.
+        b: { 'config --get remote.pushDefault': FORK },
+        // No remote at all.
+        c: { 'remote get-url --push origin': '' },
+      },
+    ),
+    files: [ROOT('a'), ROOT('b'), ROOT('c')],
+  })
+  tools(on)
+  await $.session.start(START)
+
+  await edit($, `${ROOT('a')}/x.ts`)
+  await edit($, `${ROOT('b')}/x.ts`)
+  await edit($, `${ROOT('c')}/x.ts`)
+
+  expect((await listed(w))?.map(worktree => worktree.forge)).toEqual([
+    null,
+    { remote: FORK, branch: 'feature' },
+    { remote: FORK, branch: 'feature' },
+  ])
+})
+
+/** The tools beneath the mod, run from `cwd`, with Bash. */
+function shell(on: On, cwd: string) {
+  on('session.cwd', () => ({ value: cwd }))
+  tools(on)
+}
+
+const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command })
+
+test('a command that moves a branch reads the worktrees it ran in again', async ($, on) => {
+  const branches: Record<string, string | null> = {}
+  const git: Record<string, Record<string, string>> = {}
+  const w = world(on, { git: repository(branches, git), files: [ROOT('main'), ROOT('feature')] })
+  shell(on, ROOT('main'))
+  await $.session.start(START)
+  await edit($, `${ROOT('feature')}/a.ts`)
+  await w.clock.advance(1_000)
+  await edit($, `${ROOT('main')}/a.ts`)
+  await w.clock.settle()
+  const count = () => w.writes.filter(write => write.key === 'worktrees').length
+  const before = count()
+
+  // Nothing moves: no new reading, no write.
+  branches.main = 'other'
+  await bash($, 'git status && git log')
+  await w.clock.settle()
+  expect(count()).toBe(before)
+
+  // `git switch` in the session's directory: that worktree only.
+  branches.feature = 'elsewhere'
+  await bash($, 'git switch other')
+  expect(await listed(w)).toEqual([entry('main', 1_001_000, 'other'), entry('feature', 1_000_000)])
+
+  // Through a `cd`, after a push that sets the upstream.
+  git.feature = { [PUSH]: 'origin/elsewhere-x' }
+  await bash($, 'cd ../feature && git push -u origin HEAD:elsewhere-x')
+  expect((await listed(w))?.[1]).toEqual({
+    ...entry('feature', 1_000_000, 'elsewhere'),
+    forge: { remote: REMOTE, branch: 'elsewhere-x' },
+  })
+
+  // Detached by `git -C`.
+  branches.feature = null
+  await bash($, `git -C ${ROOT('feature')} checkout --detach`)
+  expect((await listed(w))?.[1]).toEqual(entry('feature', 1_000_000, null))
+})
+
+test('git worktree reads every worktree again: one removed leaves the list', async ($, on) => {
+  const files = [ROOT('main'), ROOT('feature')]
+  const w = world(on, { git: repository(), files })
+  shell(on, ROOT('main'))
+  await $.session.start(START)
+  await edit($, `${ROOT('feature')}/a.ts`)
+  await edit($, `${ROOT('main')}/a.ts`)
+  await w.clock.settle()
+
+  files.pop()
+  await bash($, 'git worktree remove ../feature')
+
+  expect(await listed(w)).toEqual([entry('main', 1_000_000)])
 })

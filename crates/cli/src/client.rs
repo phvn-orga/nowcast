@@ -264,10 +264,22 @@ impl Session<'_> {
     }
 
     /// `POST /v1/bricks/{brick}/refresh`: every live flow of the brick, or of
-    /// `kind`.
-    pub async fn refresh_brick(&self, brick: &str, kind: Option<&str>) -> Result<(), CliError> {
+    /// `kind`, or what `scope` touches.
+    pub async fn refresh_brick(
+        &self,
+        brick: &str,
+        kind: Option<&str>,
+        scope: Option<Value>,
+    ) -> Result<(), CliError> {
         let path = format!("/v1/bricks/{}/refresh", percent_encode(brick));
-        let body = kind.map(|kind| serde_json::json!({ "kind": kind }));
+        let mut fields = serde_json::Map::new();
+        if let Some(kind) = kind {
+            fields.insert("kind".into(), kind.into());
+        }
+        if let Some(scope) = scope {
+            fields.insert("scope".into(), scope);
+        }
+        let body = (!fields.is_empty()).then_some(Value::Object(fields));
         let reply = self.client.call(Method::POST, &path, body).await?;
         reply.expect(StatusCode::ACCEPTED)?;
         Ok(())

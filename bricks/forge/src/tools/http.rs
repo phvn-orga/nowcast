@@ -1,7 +1,8 @@
-//! JSON over HTTP. GET requests are conditional: each answer's `ETag` is
-//! sent back with the next request for the same URL (`If-None-Match`), and a
-//! `304` gives back the body kept from the last `200`. GitHub does not count
-//! a `304` against its rate limit. The cache is shared by every branch
+//! JSON over HTTP, answers asked for compressed in gzip (GitHub's weigh 150
+//! to 600 KB, about ten times less in gzip). GET requests are conditional:
+//! each answer's `ETag` is sent back with the next request for the same URL
+//! (`If-None-Match`), and a `304` gives back the body kept from the last
+//! `200`. GitHub does not count a `304` against its rate limit. The cache is shared by every branch
 //! followed, so two readings of the same URL pay for it once. POST requests,
 //! for an API that only answers them (GraphQL), are not cached. A forge
 //! without `ETag` is read in full every time; the answer's headers say what
@@ -26,8 +27,11 @@ const CACHE_MAX: usize = 4096;
 /// Why a request gave no body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// `401`, or `403` without a rate limit: the token was refused.
+    /// `401`, or a sign-in page: the token was refused.
     Unauthorized,
+    /// `403` without a rate limit: the token was accepted but denied this
+    /// resource.
+    Forbidden,
     /// `404`, or `410`: gone, such as a deleted issue.
     NotFound,
     /// A rate limit, with how long to wait when the forge says.
@@ -66,7 +70,19 @@ impl Http {
         authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<Arc<Value>, Failure> {
-        Ok(self.get_answer(url, authorization, headers).await?.0)
+        Ok(self.fetch(url, authorization, headers).await?.0)
+    }
+
+    /// [`Http::get`], and whether the body changed: `false` for a `304`,
+    /// which gives back the body kept.
+    pub async fn get_changed(
+        &self,
+        url: &str,
+        authorization: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Arc<Value>, bool), Failure> {
+        let (body, _, changed) = self.fetch(url, authorization, headers).await?;
+        Ok((body, changed))
     }
 
     /// [`Http::get`], with the answer's headers, for a forge that says on a
@@ -77,6 +93,17 @@ impl Http {
         authorization: &str,
         headers: &[(&str, &str)],
     ) -> Result<(Arc<Value>, HeaderMap), Failure> {
+        let (body, answer_headers, _) = self.fetch(url, authorization, headers).await?;
+        Ok((body, answer_headers))
+    }
+
+    /// The body, the answer's headers, and whether the body changed.
+    async fn fetch(
+        &self,
+        url: &str,
+        authorization: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Arc<Value>, HeaderMap, bool), Failure> {
         // The body is taken with its ETag: a 304 gives back this one, even if
         // the cache was cleared meanwhile.
         let kept = self.cache.lock().unwrap().get(url).cloned();
@@ -88,7 +115,7 @@ impl Http {
         let answer_headers = response.headers().clone();
         if response.status() == StatusCode::NOT_MODIFIED {
             return match kept {
-                Some((_, body)) => Ok((body, answer_headers)),
+                Some((_, body)) => Ok((body, answer_headers, false)),
                 None => Err(Failure::Unreadable("304 without a kept answer".into())),
             };
         }
@@ -104,7 +131,7 @@ impl Http {
             }
             cache.insert(url.to_owned(), (etag, body.clone()));
         }
-        Ok((body, answer_headers))
+        Ok((body, answer_headers, true))
     }
 
     /// POSTs `body` as JSON to `url`, with `headers` and the `authorization`
@@ -183,7 +210,7 @@ async fn json(response: Response) -> Result<Value, Failure> {
             return Err(match limit(response.headers()) {
                 Some(wait) => Failure::Limited(wait),
                 None if status == StatusCode::TOO_MANY_REQUESTS => Failure::Limited(None),
-                None => Failure::Unauthorized,
+                None => Failure::Forbidden,
             });
         }
         s if !s.is_success() => {
@@ -261,6 +288,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("authorization: bearer t"));
         assert!(requests[1].contains("if-none-match: \"v1\""));
+        let (_, changed) = http.get_changed(&url, "Bearer t", &[]).await.unwrap();
+        assert!(!changed, "a 304 changes nothing");
+        let (_, changed) = http.get_changed(&server.url("/b"), "t", &[]).await.unwrap();
+        assert!(changed, "a 200 does");
     }
 
     /// A POST sends its JSON body and caches nothing; its failures are those
@@ -294,6 +325,27 @@ mod tests {
         );
     }
 
+    /// `{"n":1}`, compressed by `gzip -n`.
+    const GZIPPED: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 171, 86, 202, 83, 178, 50, 172, 5, 0, 126, 59, 75, 212, 7,
+        0, 0, 0,
+    ];
+
+    /// Answers are asked for in gzip, and a gzip body is decoded.
+    #[tokio::test]
+    async fn answers_are_asked_for_compressed() {
+        let server = Server::start_raw(|request| {
+            if request.contains("accept-encoding: gzip") {
+                (200, vec![("Content-Encoding", "gzip")], GZIPPED.to_vec())
+            } else {
+                (200, vec![], b"{\"n\":0}".to_vec())
+            }
+        })
+        .await;
+        let http = Http::new().unwrap();
+        assert_eq!(http.get(&server.url("/a"), "t", &[]).await.unwrap()["n"], 1);
+    }
+
     #[tokio::test]
     async fn failures_are_told_apart() {
         let server = Server::start(|request| match request.lines().next().unwrap_or_default() {
@@ -325,7 +377,7 @@ mod tests {
             get("/limited").await,
             Err(Failure::Limited(Some(Duration::from_secs(7))))
         );
-        assert_eq!(get("/forbidden").await, Err(Failure::Unauthorized));
+        assert_eq!(get("/forbidden").await, Err(Failure::Forbidden));
         assert!(matches!(get("/other").await, Err(Failure::Unreadable(_))));
         assert!(matches!(
             http.get("http://127.0.0.1:9/", "t", &[]).await,

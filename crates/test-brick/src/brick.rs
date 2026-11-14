@@ -83,6 +83,8 @@ impl Brick {
                 })]
             }
             ServiceMessage::Refresh { .. } => vec![],
+            // Kept with what the service sent, for the test to read.
+            ServiceMessage::RefreshScope { .. } => vec![],
             ServiceMessage::Input { flow, detail, .. } if self.flows.contains(&flow) => {
                 // The service checked the detail against the accepted schema.
                 let input: serde_json::Value =

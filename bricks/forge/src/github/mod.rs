@@ -1,18 +1,26 @@
-//! The GitHub provider: recognises GitHub remotes and follows a branch
-//! through the REST API ([`read`]), at the pace of [`RHYTHM`], with the
-//! checks the base of its open PR requires ([`required`]) and the PR's
-//! entry in the base's merge queue ([`queue`]). A reading
-//! that changes nothing costs no rate limit (`304`), hence a fast pace while
-//! a CI is expected or runs. A repository's open issues, and one issue, are
-//! followed at the normal pace ([`issues`]). The token comes from the
-//! source the user chose, `gh` or a token of theirs ([`token`]);
+//! The GitHub provider: recognises GitHub remotes and follows a branch, or
+//! a PR by its number, through the REST API ([`read`]), with the checks the
+//! base of its open PR requires ([`required`]) and the PR's entry in the
+//! base's merge queue ([`queue`]). A repository's open issues, and one
+//! issue, are followed too ([`issues`]). Whether a new head starts a CI
+//! comes from the workflows' triggers at that commit ([`triggers`]).
+//!
+//! The detectors of each repository ([`detect`]) see what moved there and
+//! wake the targets it touches, which then read in detail. A reading that
+//! changes nothing costs no rate limit (`304`), hence a fast pace while a
+//! CI is expected or runs ([`RHYTHM`]). Otherwise a branch reads at the
+//! normal pace what no detector sees (a head moved without CI, the base's
+//! rules and queue), and the issues at a slow safety pace. The token comes
+//! from the source the user chose, `gh` or a token of theirs ([`token`]);
 //! [`API_VAR`] and [`TOKEN_VAR`] replace the API's address and the token,
 //! for tests.
 
+mod detect;
 mod issues;
 mod queue;
 mod read;
 mod required;
+mod triggers;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -23,13 +31,16 @@ use tokio::time::Instant;
 
 use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
-use crate::provider::{BranchReading, Failure, Provider, Reading, Repo, Updates, Watch};
+use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, wait_or_refresh};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, Starts};
 use crate::tools::remote;
+use detect::{Access, Detected, Detection, Interest};
 use issues::{Accounts, Tracker};
 use queue::Queues;
+use read::Facts;
 use required::{Base, Required};
+use triggers::{Event, Repository, Workflows};
 
 /// GitHub's REST API.
 pub const API: &str = "https://api.github.com";
@@ -38,7 +49,9 @@ pub const API_VAR: &str = "NOWCAST_FORGE_GITHUB_API";
 /// A token to use instead of the source chosen, for tests.
 pub const TOKEN_VAR: &str = "NOWCAST_FORGE_GITHUB_TOKEN";
 
-/// A reading that changes nothing is free: fast while something moves.
+/// A reading that changes nothing is free: fast while something moves. A
+/// `refresh` opens the fast window on the target and on the detectors it
+/// reaches.
 pub const RHYTHM: Rhythm = Rhythm {
     expected_first: Duration::from_secs(2),
     expected_after: Duration::from_secs(5),
@@ -65,6 +78,8 @@ pub struct GitHub {
     accounts: Accounts,
     required: Required,
     queues: Queues,
+    detection: Detection,
+    workflows: Workflows,
 }
 
 impl GitHub {
@@ -79,12 +94,34 @@ impl GitHub {
             accounts: Accounts::default(),
             required: Required::default(),
             queues: Queues::default(),
+            detection: Detection::default(),
+            workflows: Workflows::default(),
         }
+    }
+
+    /// Registers a target of `owner/name` about `interest`, named `label`
+    /// in the log, with the repository's detectors.
+    fn detect(&self, owner: &str, name: &str, interest: Interest, label: &str) -> Detected {
+        let access = Access {
+            http: self.http.clone(),
+            api: self.api.clone(),
+            credentials: self.credentials.clone(),
+            tokens: self.tokens.clone(),
+            accounts: self.accounts.clone(),
+        };
+        detect::watch(&self.detection, &access, owner, name, interest, label)
     }
 
     /// Follows the open issues of `repo`, or its issue `number`.
     fn follow_tracker(&self, repo: &Repo, number: Option<u64>, updates: Updates) -> Watch {
         let (owner, name) = owner_and_name(repo);
+        let interest = Interest {
+            kinds: detect::TRACKER,
+            issue: number,
+            tracker: number.is_none(),
+            ..Interest::default()
+        };
+        let detected = self.detect(&owner, &name, interest, updates.label());
         let tracker = Tracker {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -95,7 +132,7 @@ impl GitHub {
             name,
             number,
         };
-        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| tracker.follow(updates, refreshes, detected))
     }
 }
 
@@ -120,8 +157,19 @@ impl Provider for GitHub {
         })
     }
 
-    fn follow(&self, repo: &Repo, branch: &str, updates: Updates) -> Watch {
+    fn follow(&self, repo: &Repo, head: Head, updates: Updates) -> Watch {
         let (owner, name) = owner_and_name(repo);
+        let (branch, pr) = match &head {
+            Head::Branch(branch) => (Some(branch.clone()), None),
+            Head::Pr(number) => (None, Some(*number)),
+        };
+        let interest = Interest {
+            kinds: detect::BRANCH,
+            branch,
+            pr,
+            ..Interest::default()
+        };
+        let detected = self.detect(&owner, &name, interest, updates.label());
         let branch = Branch {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -131,11 +179,13 @@ impl Provider for GitHub {
             required: self.required.clone(),
             queues: self.queues.clone(),
             memory: Memory::default(),
+            workflows: self.workflows.clone(),
+            starts: None,
             owner,
             name,
-            branch: branch.to_owned(),
+            head,
         };
-        Watch::spawn(move |refreshes| branch.follow(updates, refreshes))
+        Watch::spawn(move |refreshes| branch.follow(updates, refreshes, detected))
     }
 
     fn follow_issues(&self, repo: &Repo, updates: Updates) -> Watch {
@@ -147,7 +197,7 @@ impl Provider for GitHub {
     }
 }
 
-/// One branch followed.
+/// One branch followed, by its name or through a PR's number.
 struct Branch {
     http: Http,
     api: String,
@@ -157,23 +207,33 @@ struct Branch {
     required: Required,
     queues: Queues,
     memory: Memory,
+    workflows: Workflows,
+    /// Whether the head read last starts a CI, with what it is about: the
+    /// head, and the open PR with its base.
+    starts: Option<(Subject, Starts)>,
     owner: String,
     name: String,
-    branch: String,
+    head: Head,
 }
 
 impl Branch {
-    /// Reads, sends what it read, waits as the pace says or for a
-    /// `refresh`, and again, until the core is gone. A `refresh` that comes
-    /// during a reading is answered by the next one. A rate limit is waited
-    /// out whatever the refreshes.
-    async fn follow(mut self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    /// Reads, sends what it read, waits as the pace says, for a detector
+    /// to say the branch moved, or for a `refresh`, and again, until the
+    /// core is gone. A `refresh` that comes during a reading is answered by
+    /// the next one. A rate limit is waited out whatever comes.
+    async fn follow(
+        mut self,
+        updates: Updates,
+        mut refreshes: UnboundedReceiver<()>,
+        mut detected: Detected,
+    ) {
         let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
             let (outcome, delay) = match outcome {
                 Ok(mut reading) => {
+                    self.learn(&detected, &reading);
                     pace.saw(
                         now,
                         reading.head_sha.as_deref(),
@@ -183,6 +243,7 @@ impl Branch {
                             .filter(|p| p.is_open())
                             .map(|p| p.number),
                     );
+                    pace.starts(self.starts.as_ref().map_or(Starts::Maybe, |(_, s)| *s));
                     // A PR in the merge queue moves as its queue CI runs.
                     let queued = reading.pr.as_ref().is_some_and(|p| p.queue.is_some());
                     let delay = match &mut reading.ci {
@@ -205,11 +266,29 @@ impl Branch {
             if !updates.send(outcome.map(|r| Reading::Branch(Box::new(r)))) {
                 return;
             }
+            // A refresh opens the target's own fast window too: the head
+            // pushed without CI on a branch without PR is a move no detector
+            // sees, and the API may not show it yet at the next reading.
             let refreshed = || pace.refreshed(Instant::now());
-            if !wait_or_refresh(now + delay, &mut refreshes, wait.is_some(), refreshed).await {
+            if !detected
+                .wait(now + delay, &mut refreshes, wait.is_some(), refreshed)
+                .await
+            {
                 return;
             }
         }
+    }
+
+    /// Tells the detectors what `reading` found: the commit read, and the
+    /// branch's PR, or the PR's head branch when it is of this repository.
+    fn learn(&self, detected: &Detected, reading: &BranchReading) {
+        detected.watcher.learn(|interest| {
+            interest.sha.clone_from(&reading.head_sha);
+            match &self.head {
+                Head::Branch(_) => interest.pr = reading.pr.as_ref().map(|p| p.number),
+                Head::Pr(_) => interest.branch.clone_from(&reading.branch),
+            }
+        });
     }
 
     /// One reading, and how long a rate limit asks to wait.
@@ -219,27 +298,95 @@ impl Branch {
         else {
             return (Err(Failure::NoCredentials), None);
         };
-        let read = read::read(
-            &self.http,
-            &self.api,
-            &token,
-            &self.owner,
-            &self.name,
-            &self.branch,
-        )
-        .await;
+        let (http, api, owner, name) = (&self.http, &self.api, &self.owner, &self.name);
+        let read = match &self.head {
+            Head::Branch(branch) => read::read(http, api, &token, owner, name, branch).await,
+            Head::Pr(number) => read::read_pr(http, api, &token, owner, name, *number).await,
+        };
         let failure = match read {
-            Ok(mut reading) => {
+            Ok((mut reading, facts)) => {
                 let names = self.mark_required(&token, &mut reading).await;
                 self.read_queue(&token, &mut reading, names.as_ref()).await;
+                self.read_starts(&token, &reading, &facts).await;
                 return (Ok(reading), None);
             }
             Err(failure) => failure,
         };
-        let at = format!("github.com/{}/{}#{}", self.owner, self.name, self.branch);
+        let at = format!("github.com/{}/{}{}", self.owner, self.name, self.head);
         let (failure, wait) = failed(&self.tokens, &self.owner, &at, failure);
         (Err(failure), wait)
     }
+}
+
+/// What a CI is about: a head, if any, and the open PR with its base.
+type Subject = (Option<String>, Option<(u64, String)>);
+
+impl Branch {
+    /// Works out whether the head `reading` found starts a CI, once per
+    /// head and open PR. The first reading expects no CI whatever, a branch
+    /// not pushed has no head, and a head whose CI showed up started one:
+    /// none of them reads the workflows.
+    async fn read_starts(&mut self, token: &str, reading: &BranchReading, facts: &Facts) {
+        let open = reading.pr.as_ref().filter(|p| p.is_open());
+        let subject = (
+            reading.head_sha.clone(),
+            open.map(|p| (p.number, p.base.clone())),
+        );
+        let starts = match (&self.starts, &reading.head_sha) {
+            (Some((read, _)), _) if *read == subject => return,
+            (None, _) | (_, None) => Starts::Maybe,
+            _ if reading
+                .ci
+                .as_ref()
+                .is_some_and(|ci| !ci.pipelines.is_empty()) =>
+            {
+                Starts::Certain
+            }
+            (Some((read, _)), Some(sha)) => {
+                let branch = match &self.head {
+                    Head::Branch(branch) => Some(branch.as_str()),
+                    Head::Pr(_) => reading.branch.as_deref(),
+                };
+                let events = events(read, &subject, branch);
+                let repo = Repository {
+                    http: &self.http,
+                    api: &self.api,
+                    token,
+                    owner: &self.owner,
+                    name: &self.name,
+                };
+                if events.is_empty() {
+                    Starts::Maybe
+                } else {
+                    triggers::starts(&repo, &self.workflows, sha, &events, facts).await
+                }
+            }
+        };
+        self.starts = Some((subject, starts));
+    }
+}
+
+/// The events that `subject` is after `read`, for the head's `branch` in the
+/// repository, if any: an open PR's opening, or a push on it, or a change of
+/// its base; a push on the branch when its head moved, or when it has no
+/// open PR.
+fn events<'a>(read: &Subject, subject: &'a Subject, branch: Option<&'a str>) -> Vec<Event<'a>> {
+    let pushed = read.0 != subject.0;
+    let mut events = Vec::new();
+    if let Some((number, base)) = &subject.1 {
+        let activities = match &read.1 {
+            Some((before, _)) if before == number && pushed => triggers::SYNCHRONIZED,
+            Some((before, _)) if before == number => triggers::EDITED,
+            _ => triggers::OPENED,
+        };
+        events.push(Event::PullRequest { base, activities });
+    }
+    if let Some(branch) = branch
+        && (pushed || subject.1.is_none())
+    {
+        events.push(Event::Push { branch });
+    }
+    events
 }
 
 /// The token that reads `owner`'s repositories, kept in `tokens` once its
@@ -275,7 +422,8 @@ async fn owner_token(
 
 /// What `failure`, in a reading of `at` with `owner`'s token, says in
 /// `source.status`, and how long a rate limit asks to wait. A refused token
-/// is forgotten: the next reading asks its source again.
+/// (`401`) is forgotten: the next reading asks its source again. A `403`
+/// reads as unauthorized too, but keeps the token, accepted elsewhere.
 fn failed(
     tokens: &Tokens,
     owner: &str,
@@ -287,6 +435,7 @@ fn failed(
             tokens.lock().unwrap().by_owner.remove(owner);
             (Failure::Unauthorized, None)
         }
+        http::Failure::Forbidden => (Failure::Unauthorized, None),
         http::Failure::NotFound => (Failure::NotFound, None),
         http::Failure::Limited(wait) => (Failure::RateLimited, Some(wait.unwrap_or(RHYTHM.normal))),
         http::Failure::Unreadable(why) => {
@@ -613,9 +762,11 @@ mod tests {
             required: Required::default(),
             queues: Queues::default(),
             memory: Memory::default(),
+            workflows: Workflows::default(),
+            starts: None,
             owner: owner.into(),
             name: "r".into(),
-            branch: "feat".into(),
+            head: Head::Branch("feat".into()),
         }
     }
 
@@ -1129,6 +1280,70 @@ mod tests {
         assert_eq!(asked(&server, "timelineitems"), 2, "answered: not again");
     }
 
+    /// A PR followed by its number is read whatever its state, with its
+    /// head branch and the CI of its head; a number that is no PR is not
+    /// found.
+    #[tokio::test]
+    async fn a_pr_is_followed_by_its_number() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/repos/o/r/pulls/7 ") {
+                json!({ "number": 7, "state": "closed", "draft": false, "html_url": "u",
+                    "merged_at": "t", "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } })
+            } else if line.contains("/repos/o/r/pulls/9 ") {
+                json!({ "number": 9, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "fork/r" } } })
+            } else if line.contains("/actions/runs?head_sha=abc") {
+                json!({ "workflow_runs": [{ "id": 1, "name": "CI", "path": "ci.yml",
+                    "event": "pull_request", "check_suite_id": 10, "status": "completed",
+                    "conclusion": "success", "created_at": "t" }] })
+            } else if line.contains("/commits/abc/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/commits/abc/status") {
+                json!({ "statuses": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let mut branch = branch(&server, "o");
+        branch.head = Head::Pr(7);
+        branch
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
+        let (Ok(reading), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(reading.branch.as_deref(), Some("feat"));
+        assert_eq!(reading.head_sha.as_deref(), Some("abc"));
+        let pr = reading.pr.unwrap();
+        assert_eq!((pr.number, pr.state, pr.queue), (7, "merged", None));
+        let ci = reading.ci.unwrap();
+        assert_eq!(ci.sha, "abc");
+        let run = &ci.pipelines[0];
+        assert_eq!(run.git_ref.as_deref(), Some("refs/pull/7/merge"));
+        assert!(
+            !server.requests().iter().any(|r| r.contains("/pulls?")),
+            "no listing"
+        );
+        branch.head = Head::Pr(8);
+        assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));
+        branch.head = Head::Pr(9);
+        let (Ok(fork), None) = branch.read_once().await else {
+            panic!("the reading failed");
+        };
+        assert_eq!(
+            fork.branch, None,
+            "a fork's branch is not this repository's"
+        );
+    }
+
     /// The provider follows a branch: its first reading reaches the core.
     #[tokio::test]
     async fn a_followed_branch_sends_its_readings() {
@@ -1158,7 +1373,7 @@ mod tests {
         let repo = github.recognise("git@github.com:o/r.git").unwrap();
         assert_eq!(repo.id, "github.com/o/r");
         let (tx, mut rx) = unbounded_channel();
-        let _watch = github.follow(&repo, "feat", Updates::new(3, tx));
+        let _watch = github.follow(&repo, Head::Branch("feat".into()), Updates::new(3, tx));
         let (target, outcome) = rx.recv().await.unwrap();
         assert_eq!(target, 3);
         let Ok(Reading::Branch(reading)) = outcome else {
@@ -1168,5 +1383,314 @@ mod tests {
         let ci = reading.ci.unwrap();
         assert_eq!(ci.sha, "abc");
         assert_eq!(ci.expected_until, None, "the first reading expects nothing");
+    }
+
+    /// A forge where every branch has the open PR 7 at `abc`, without CI,
+    /// and the lists the detectors poll are empty.
+    async fn quiet_forge() -> Server {
+        Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pulls?state=open") {
+                json!([{ "number": 7, "state": "open", "draft": false, "html_url": "u",
+                    "merged_at": null, "base": { "ref": "main" },
+                    "head": { "ref": "feat", "sha": "abc", "repo": { "full_name": "o/r" } } }])
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] })
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [] })
+            } else if line.contains("/user ") {
+                json!({ "login": "me" })
+            } else {
+                json!([])
+            };
+            (200, vec![], body.to_string())
+        })
+        .await
+    }
+
+    /// The requests to the detector of `kind`.
+    fn polls(server: &Server, kind: detect::Kind) -> usize {
+        let path = match kind {
+            detect::Kind::Runs => "/actions/runs?per_page=20 ",
+            detect::Kind::Pulls => "/pulls?state=all&sort=updated&direction=desc&per_page=20 ",
+            detect::Kind::Issues => "/issues?state=all&sort=updated&direction=desc&per_page=20 ",
+        };
+        asked(server, path)
+    }
+
+    /// Yields, a few milliseconds at a time, until `done`; fails past a
+    /// second.
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("not reached");
+    }
+
+    fn provider(server: &Server) -> GitHub {
+        let github = GitHub::new(Http::new().unwrap(), server.base(), testing::none());
+        github
+            .tokens
+            .lock()
+            .unwrap()
+            .by_owner
+            .insert("o".into(), "t".into());
+        github
+    }
+
+    /// Two branches of one repository share its detectors, polled once at
+    /// the start; the issues detector waits for a target that needs it; the
+    /// detectors stop with the last target.
+    #[tokio::test]
+    async fn one_detector_per_repository_serves_its_targets() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let other = github.follow(&repo, Head::Branch("other".into()), Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        until(|| polls(&server, detect::Kind::Runs) > 0 && polls(&server, detect::Kind::Pulls) > 0)
+            .await;
+        assert_eq!(polls(&server, detect::Kind::Runs), 1);
+        assert_eq!(polls(&server, detect::Kind::Pulls), 1);
+        assert_eq!(polls(&server, detect::Kind::Issues), 0);
+        assert_eq!(github.detection.running(), [("o/r".to_owned(), 2)]);
+        drop(feat);
+        assert_eq!(github.detection.running(), [("o/r".to_owned(), 2)]);
+        drop(other);
+        tokio::task::yield_now().await;
+        assert!(github.detection.running().is_empty());
+    }
+
+    /// A `refresh` has the detectors of the target's kinds poll before the
+    /// target reads again: a branch's, the runs and PRs; the issues', the
+    /// issues.
+    #[tokio::test]
+    async fn a_refresh_polls_the_detectors_of_its_kinds_first() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let issues = github.follow_issues(&repo, Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        let started = |s: &Server| {
+            [
+                detect::Kind::Runs,
+                detect::Kind::Pulls,
+                detect::Kind::Issues,
+            ]
+            .map(|kind| polls(s, kind))
+        };
+        until(|| started(&server) == [1, 1, 1]).await;
+        feat.refresh();
+        let (target, _) = rx.recv().await.unwrap();
+        assert_eq!(target, 1);
+        assert_eq!(started(&server), [2, 2, 1]);
+        let requests = server.requests();
+        let last = |what: &str| requests.iter().rposition(|r| r.contains(what)).unwrap();
+        assert!(last("/actions/runs?per_page=20 ") < last("/pulls?state=open"));
+        assert!(last("/pulls?state=all") < last("/pulls?state=open"));
+        issues.refresh();
+        let (target, _) = rx.recv().await.unwrap();
+        assert_eq!(target, 2);
+        assert_eq!(started(&server), [2, 2, 2]);
+    }
+
+    /// A push on an open PR's head is a push too; a PR that shows up is
+    /// opened, and one whose base changed is edited.
+    #[test]
+    fn a_new_subject_is_the_events_github_sees() {
+        let pr =
+            |head: &str, n: Option<u64>| (Some(head.to_owned()), n.map(|n| (n, "main".into())));
+        let kinds = |events: Vec<Event>| -> Vec<String> {
+            events
+                .iter()
+                .map(|e| match e {
+                    Event::Push { branch } => format!("push {branch}"),
+                    Event::PullRequest { base, activities } => {
+                        format!("pr {base} {}", activities.join(","))
+                    }
+                })
+                .collect()
+        };
+        let pushed = pr("b", Some(7));
+        assert_eq!(
+            kinds(events(&pr("a", Some(7)), &pushed, Some("feat"))),
+            ["pr main synchronize", "push feat"]
+        );
+        assert_eq!(
+            kinds(events(&pr("a", Some(7)), &pushed, None)),
+            ["pr main synchronize"],
+            "a fork's push is not in the repository"
+        );
+        assert_eq!(
+            kinds(events(&pr("b", None), &pushed, Some("feat"))),
+            ["pr main opened,reopened"]
+        );
+        let rebased = (Some("b".to_owned()), Some((7, "design".to_owned())));
+        assert_eq!(
+            kinds(events(&pushed, &rebased, Some("feat"))),
+            ["pr design edited"]
+        );
+        assert_eq!(
+            kinds(events(&pr("a", None), &pr("b", None), Some("feat"))),
+            ["push feat"]
+        );
+    }
+
+    /// A push on a branch without PR expects a CI only when a workflow at
+    /// the pushed commit runs on it; the first reading asks nothing.
+    #[tokio::test]
+    async fn a_push_expects_a_ci_only_when_a_workflow_runs_on_it() {
+        use base64::Engine as _;
+        let cases = [
+            (
+                "on:\n  push:\n    branches: [main]\n  pull_request:\n",
+                false,
+            ),
+            ("on: push\n", true),
+        ];
+        // A branch read first with a head, or not pushed yet.
+        for (first, (workflow, expected)) in [Some("a"), None]
+            .into_iter()
+            .flat_map(|first| cases.map(|case| (first, case)))
+        {
+            let head = Arc::new(Mutex::new(first));
+            let served = head.clone();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(workflow);
+            let server = Server::start(move |request| {
+                let line = request.lines().next().unwrap_or_default().to_owned();
+                let body = if line.contains("/branches/feat") {
+                    match *served.lock().unwrap() {
+                        Some(sha) => json!({ "commit": { "sha": sha } }),
+                        None => return (404, vec![], String::new()),
+                    }
+                } else if line.contains("/contents/.github/workflows?ref=") {
+                    json!([{ "type": "file", "path": ".github/workflows/ci.yml", "sha": "w" }])
+                } else if line.contains("/actions/workflows?") {
+                    json!({ "workflows": [] })
+                } else if line.contains("/git/blobs/w ") {
+                    json!({ "encoding": "base64", "content": encoded })
+                } else if line.contains("/actions/runs") {
+                    json!({ "workflow_runs": [] })
+                } else if line.contains("/check-runs") {
+                    json!({ "check_runs": [] })
+                } else if line.contains("/status") {
+                    json!({ "statuses": [] })
+                } else {
+                    json!([])
+                };
+                (200, vec![], body.to_string())
+            })
+            .await;
+            let github = provider(&server);
+            let repo = github.recognise("git@github.com:o/r.git").unwrap();
+            let (tx, mut rx) = unbounded_channel();
+            let feat = github.follow(&repo, Head::Branch("feat".into()), Updates::new(1, tx));
+            let _ = rx.recv().await.unwrap();
+            assert_eq!(asked(&server, "/contents/"), 0, "the first reading");
+            *head.lock().unwrap() = Some("b");
+            feat.refresh();
+            let (_, outcome) = rx.recv().await.unwrap();
+            let Ok(Reading::Branch(reading)) = outcome else {
+                panic!("{outcome:?}");
+            };
+            let ci = reading.ci.unwrap();
+            assert_eq!(ci.sha, "b");
+            assert_eq!(
+                ci.expected_until.is_some(),
+                expected,
+                "{first:?} {workflow}"
+            );
+            assert_eq!(asked(&server, "/contents/.github/workflows?ref=b "), 1);
+        }
+    }
+
+    /// A `refresh` opens the target's own fast window: with nothing moving,
+    /// it reads again at the window pace, not the normal one, for a head
+    /// the API did not show yet and no detector sees.
+    #[tokio::test]
+    async fn a_refresh_opens_the_targets_fast_window() {
+        let server = quiet_forge().await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(&repo, Head::Branch("feat".into()), Updates::new(1, tx));
+        let _ = rx.recv().await.unwrap();
+        feat.refresh();
+        let _ = rx.recv().await.unwrap();
+        let next = tokio::time::timeout(RHYTHM.window * 3, rx.recv()).await;
+        assert_eq!(next.expect("read at the window pace").unwrap().0, 1);
+    }
+
+    /// What a detector sees move wakes the target it touches, which reads
+    /// again without a `refresh`.
+    #[tokio::test]
+    async fn a_detector_wakes_the_branch_it_touches() {
+        let runs = Arc::new(Mutex::new(json!({ "workflow_runs": [] })));
+        let polled = runs.clone();
+        let server = Server::start(move |request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/actions/runs?per_page=20 ") {
+                polled.lock().unwrap().clone()
+            } else if line.contains("/actions/runs") {
+                json!({ "workflow_runs": [] })
+            } else if line.contains("/branches/") {
+                json!({ "commit": { "sha": "abc" } })
+            } else if line.contains("/check-runs") {
+                json!({ "check_runs": [] })
+            } else if line.contains("/status") {
+                json!({ "statuses": [] })
+            } else {
+                json!([])
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let github = provider(&server);
+        let repo = github.recognise("git@github.com:o/r.git").unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let feat = github.follow(
+            &repo,
+            Head::Branch("feat".into()),
+            Updates::new(1, tx.clone()),
+        );
+        let other = github.follow(&repo, Head::Branch("other".into()), Updates::new(2, tx));
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        until(|| polls(&server, detect::Kind::Runs) == 1).await;
+        *runs.lock().unwrap() = json!({ "workflow_runs": [{ "id": 1, "updated_at": "t",
+            "status": "queued", "head_branch": "feat", "head_sha": "def",
+            "head_repository": { "full_name": "o/r" } }] });
+        // The refresh of `other` has the detectors poll: the run they see
+        // wakes `feat`, which `other`'s refresh does not cover.
+        other.refresh();
+        let mut read = [rx.recv().await.unwrap().0, rx.recv().await.unwrap().0];
+        read.sort_unstable();
+        assert_eq!(
+            read,
+            [1, 2],
+            "the refreshed target, and the one the run touches"
+        );
+        assert_eq!(asked(&server, "/branches/feat"), 2);
+        assert_eq!(asked(&server, "/branches/other"), 2);
+        drop(feat);
     }
 }

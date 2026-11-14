@@ -106,6 +106,15 @@ impl<I: Identity> ApiHarness for Harness<I> {
         self.supervisor.refreshes()
     }
 
+    async fn scoped_refreshes(&self) -> Vec<Value> {
+        self.supervisor
+            .scoped_refreshes()
+            .into_iter()
+            .filter(|(brick, _)| *brick == probe::name())
+            .map(|(_, scope)| serde_json::from_slice(&scope).unwrap())
+            .collect()
+    }
+
     async fn inputs(&self) -> Vec<(QualifiedFlowId, String, serde_json::Value)> {
         self.supervisor
             .inputs()
@@ -521,6 +530,61 @@ fn a_brick_refresh_reaches_another_anchors_flows() {
 }
 
 #[test]
+fn a_scope_to_a_brick_declaring_none_answers_405() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        let mut plain = probe::declaration(vec!["plain".into()], PathBuf::from("/"));
+        plain.name = BrickName::new("plain").unwrap();
+        plain.refresh_scope = None;
+        harness.discovery.insert(plain);
+        declare(&harness).await;
+        let body = json!({ "scope": { "ids": [] } }).to_string();
+        request(&harness, "POST", "/v1/bricks/plain/refresh", &body)
+            .await
+            .error(405, "scope_not_accepted");
+        // Without a scope, the brick refreshes as before.
+        let response = request(&harness, "POST", "/v1/bricks/plain/refresh", "").await;
+        assert_eq!(response.status, 202);
+        assert!(harness.supervisor.scoped_refreshes().is_empty());
+    });
+}
+
+#[test]
+fn a_null_scope_is_checked_not_a_refresh_of_every_flow() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        subscribe(&harness, "a").await;
+        let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+        let body = json!({ "scope": null }).to_string();
+        request(&harness, "POST", &path, &body)
+            .await
+            .error(400, "invalid_scope");
+        assert!(harness.supervisor.refreshes().is_empty());
+        assert!(harness.supervisor.scoped_refreshes().is_empty());
+    });
+}
+
+#[test]
+fn an_invalid_scope_says_what_is_wrong() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        subscribe(&harness, "a").await;
+        let path = format!("/v1/bricks/{}/refresh", probe::NAME);
+        let body = json!({ "scope": { "ids": [3] } }).to_string();
+        let response = request(&harness, "POST", &path, &body).await;
+        response.error(400, "invalid_scope");
+        let message = response.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(message.contains("/ids/0"), "{message}");
+        assert!(harness.supervisor.scoped_refreshes().is_empty());
+    });
+}
+
+#[test]
 fn the_session_is_per_anchor() {
     run(async {
         let harness = start(ProbeMode::Ready);
@@ -807,6 +871,10 @@ impl Supervisor for DyingAnchor {
 
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {
         self.inner.refresh(flow)
+    }
+
+    fn refresh_scope(&self, brick: &BrickName, scope: Vec<u8>) {
+        self.inner.refresh_scope(brick, scope);
     }
 
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {

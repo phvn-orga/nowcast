@@ -69,6 +69,10 @@ error_codes!(
         InputNotAccepted => "input_not_accepted",
         /// The input is not JSON, or does not match the accepted type's schema.
         InvalidInput => "invalid_input",
+        /// The refresh scope does not match the schema the brick declares.
+        InvalidScope => "invalid_scope",
+        /// The brick declares no refresh scope.
+        ScopeNotAccepted => "scope_not_accepted",
     }
 );
 

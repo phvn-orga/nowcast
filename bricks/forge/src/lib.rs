@@ -14,7 +14,47 @@
 //!   machine, remote parsing), and nothing obliges it to;
 //! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one;
 //! - [`credentials`] reads the token source each forge's user chose, which
-//!   [`configure`] asks for.
+//!   [`configure()`] asks for.
+//!
+//! Standard error is the brick's log, which the service journals: errors
+//! only, unless [`LOG_VAR`] is `debug` in the service's environment. Then
+//! each line `forge: debug: ...` tells one step, to follow a refresh that
+//! changes nothing:
+//!
+//! - `refresh <flow> target=<target>`, a flow's refresh (`refresh <flow>
+//!   unknown` for a flow the brick does not publish), and
+//!   `refresh-scope repo=<repo> types=<kinds> number=<n> targets=<targets>`,
+//!   a scoped one, with the targets it covers (`refresh-scope on a remote
+//!   no provider recognises` when no provider takes it);
+//! - `poll <detector> answer=<answer> moved=<items> woke=<targets>`, a
+//!   detector's poll: `first`, `changed`, `unchanged` (a `304` on GitHub),
+//!   `no-token` or `failed:<why>`;
+//! - `read <target> outcome=<ok or failure> published=<kinds>` or
+//!   `unchanged`, a target's reading;
+//! - `triggers <repo>@<sha> answer=<answer> events=<event>=<answer>,...`,
+//!   whether a GitHub head starts a CI, overall and by event (`push:<branch>`
+//!   or `pr:<base>:<activities>`, as the workflows say before a skip marker
+//!   or a conflict): `none`, `certain` or `maybe:<why>` (`path-filter`,
+//!   `skip-marker`, `conflict`, `pull_request_target`, `unparsable`,
+//!   `read-failed`, `unsupported-trigger`...);
+//! - `triggers <repo>@<sha> get=<contents or workflows> status=<status>`
+//!   and `triggers <repo>@<sha> blob=<path> cache=hit` or `cache=miss
+//!   status=<status>`, the requests of that reading: `200`, `304`, `404`
+//!   or `failed:<kind>`.
+//!
+//! A target reads as `branch/<repo>#<branch>`, `pr/<repo>!<number>`,
+//! `issues/<tracker>` or `issue/<tracker>#<number>`. No line carries a
+//! remote as written, which may hold credentials, nor a token.
+
+/// Writes a debug line to the log, only when [`LOG_VAR`] asks for it; the
+/// arguments are not even formatted otherwise.
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if $crate::debug_on() {
+            $crate::log(format_args!("debug: {}", format_args!($($arg)*)));
+        }
+    };
+}
 
 mod azure;
 mod configure;
@@ -28,6 +68,7 @@ mod testing;
 mod tools;
 
 use std::process::ExitCode;
+use std::sync::LazyLock;
 
 use jiff::Timestamp;
 use nowcast_codec::{read_service, write_brick};
@@ -54,8 +95,8 @@ pub const FILES: &[(&str, &str)] = &[
         include_str!(concat!(env!("OUT_DIR"), "/brick.toml")),
     ),
     (
-        "schemas/params-branch.json",
-        include_str!("../schemas/params-branch.json"),
+        "schemas/params-pr.json",
+        include_str!("../schemas/params-pr.json"),
     ),
     ("schemas/pr-v1.json", include_str!("../schemas/pr-v1.json")),
     (
@@ -78,6 +119,7 @@ pub const FILES: &[(&str, &str)] = &[
         "schemas/issue-v1.json",
         include_str!("../schemas/issue-v1.json"),
     ),
+    ("schemas/scope.json", include_str!("../schemas/scope.json")),
 ];
 
 /// Runs the brick on standard input and output until `shutdown` or the end
@@ -105,8 +147,46 @@ pub fn configure() -> ExitCode {
     configure::run()
 }
 
+/// Writes a line to the log, its control characters escaped: a string the
+/// brick was handed (a branch name, a scope's type) cannot forge a line.
 fn log(message: impl std::fmt::Display) {
-    eprintln!("{NAME}: {message}");
+    eprintln!("{NAME}: {}", escaped(&message.to_string()));
+}
+
+/// `text` with each control character written as its escape (`\n`,
+/// `\u{1b}`).
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `items` joined by commas, `none` when there is none, for the log.
+fn list(items: impl Iterator<Item = impl std::fmt::Display>) -> String {
+    let list = items.map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    if list.is_empty() { "none".into() } else { list }
+}
+
+/// The environment variable that turns the debug lines on, when `debug`.
+pub const LOG_VAR: &str = "NOWCAST_FORGE_LOG";
+
+static DEBUG: LazyLock<bool> =
+    LazyLock::new(|| debug_asked(std::env::var(LOG_VAR).ok().as_deref()));
+
+/// Whether the debug lines are written.
+fn debug_on() -> bool {
+    *DEBUG
+}
+
+/// Whether `value`, that of [`LOG_VAR`], asks for the debug lines.
+fn debug_asked(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("debug"))
 }
 
 /// The providers the brick carries, each reading the token the user chose
@@ -179,7 +259,12 @@ async fn serve() -> ExitCode {
                         log(format_args!("publication {req} refused: {code:?}"));
                         vec![]
                     }
-                    ServiceMessage::Input { .. } | ServiceMessage::Ack { .. } => vec![],
+                    ServiceMessage::RefreshScope { scope } => {
+                        core.refresh_scope(&scope);
+                        vec![]
+                    }
+                    ServiceMessage::Input { .. }
+                    | ServiceMessage::Ack { .. } => vec![],
                 }
             }
             Some((target, outcome)) = updates.recv() => core.update(target, outcome, Timestamp::now(), Instant::now()),
@@ -199,4 +284,30 @@ async fn send(output: &mut Stdout, messages: Vec<BrickMessage>) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_line_escapes_its_control_characters() {
+        assert_eq!(
+            escaped("read branch/r#feat\nforge: debug: x\r\t\u{1b}[31m é"),
+            "read branch/r#feat\\nforge: debug: x\\r\\t\\u{1b}[31m é"
+        );
+    }
+
+    #[test]
+    fn the_debug_lines_are_off_unless_asked() {
+        for value in [None, Some(""), Some("info"), Some("1"), Some("debugging")] {
+            assert!(!debug_asked(value), "{value:?}");
+        }
+        assert!(debug_asked(Some("debug")));
+        assert!(debug_asked(Some(" DEBUG\n")));
+        assert!(
+            std::env::var_os(LOG_VAR).is_some() || !debug_on(),
+            "off without the variable"
+        );
+    }
 }

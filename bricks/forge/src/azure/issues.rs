@@ -1,6 +1,7 @@
 //! A project's work items on Azure DevOps: its open work items, the most
-//! recently created first, and one work item. Both are read at the normal
-//! pace of [`RHYTHM`], and at once after a `refresh`.
+//! recently created first, and one work item. Both are read when the
+//! project's work items detector says they moved, at once after a
+//! `refresh`, and at the slow [`SAFETY`] pace for what detection could miss.
 //!
 //! WIQL cannot filter on state categories, so the states of each work item
 //! type are read (each has a fixed category) and the query excludes, type
@@ -19,11 +20,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
+use super::detect::Detected;
 use super::{Client, Context, Names, RHYTHM, VERSION, failed, token};
 use crate::model::{Issue, Issues};
 use crate::provider::{Failure, Outcome, Reading, Updates};
 use crate::tools::http::{self, encode};
-use crate::tools::pace::wait_or_refresh;
 
 /// The work items listed at most.
 const MAX: usize = 200;
@@ -39,6 +40,9 @@ const NOT_TICKETS: [&str; 5] = [
 ];
 /// How long the states of a project's types serve: they rarely change.
 const KINDS_FOR: Duration = Duration::from_secs(30 * 60);
+/// How often work items are read without the detector saying they moved:
+/// for what it could miss, such as revisions past the batches of a poll.
+pub const SAFETY: Duration = Duration::from_secs(300);
 
 /// The account each token reads as, shared by every tracker followed.
 pub type Accounts = Arc<Mutex<HashMap<String, String>>>;
@@ -61,18 +65,33 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Reads, sends what it read, waits for the normal pace or a `refresh`,
-    /// and again, until the core is gone. A rate limit is waited out
-    /// whatever the refreshes.
-    pub async fn follow(self, updates: Updates, mut refreshes: UnboundedReceiver<()>) {
+    /// Reads, sends what it read, waits for the [`SAFETY`] pace (the normal
+    /// one after a failure), for the work items detector to say they moved,
+    /// or for a `refresh`, and again, until the core is gone. A rate limit
+    /// is waited out whatever comes.
+    pub async fn follow(
+        self,
+        updates: Updates,
+        mut refreshes: UnboundedReceiver<()>,
+        mut detected: Detected,
+    ) {
         loop {
             let (outcome, wait) = self.read_once().await;
+            // A failure is retried at the normal pace: no detector sees it end.
+            let pace = if outcome.is_ok() {
+                SAFETY
+            } else {
+                RHYTHM.normal
+            };
             if !updates.send(outcome) {
                 return;
             }
-            let delay = wait.map_or(RHYTHM.normal, |w| w.max(RHYTHM.normal));
+            let delay = wait.map_or(pace, |w| w.max(RHYTHM.normal));
             let deadline = Instant::now() + delay;
-            if !wait_or_refresh(deadline, &mut refreshes, wait.is_some(), || {}).await {
+            if !detected
+                .wait(deadline, &mut refreshes, wait.is_some(), || {})
+                .await
+            {
                 return;
             }
         }

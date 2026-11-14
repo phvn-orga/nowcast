@@ -114,6 +114,11 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
         self.inner.update(|state, _| state.refresh(flow))
     }
 
+    fn refresh_scope(&self, brick: &BrickName, scope: Vec<u8>) {
+        self.inner
+            .update(|state, _| state.refresh_scope(brick, scope));
+    }
+
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {
         self.inner.lock().kind(flow)
     }

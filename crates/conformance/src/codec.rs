@@ -40,6 +40,9 @@ pub fn service_messages() -> Vec<ServiceMessage> {
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },
+        ServiceMessage::RefreshScope {
+            scope: br#"{"repo":"github.com/org/repo","kinds":["pr"]}"#.to_vec(),
+        },
         ServiceMessage::Input {
             flow: flow(),
             data_type: "forge.push/v1".into(),
@@ -186,7 +189,8 @@ pub fn refuses_a_wrong_length<S: CodecSubject>() {
     assert!(S::decode_service(&frame).is_err());
 }
 
-/// `params` and `detail` are `bin`: the same bytes sent as a string are refused.
+/// `params`, `scope` and `detail` are `bin`: the same bytes sent as a string
+/// are refused.
 pub fn refuses_json_sent_as_a_string<S: CodecSubject>() {
     let as_string = |value: Value, key: &str| match value {
         Value::Map(entries) => Value::Map(
@@ -208,6 +212,12 @@ pub fn refuses_json_sent_as_a_string<S: CodecSubject>() {
         S::decode_service(&frame).is_err(),
         "params sent as a string"
     );
+    let scoped = service_messages()
+        .into_iter()
+        .find(|msg| matches!(msg, ServiceMessage::RefreshScope { .. }))
+        .unwrap();
+    let frame = reference::frame(&as_string(reference::service_value(&scoped), "scope"));
+    assert!(S::decode_service(&frame).is_err(), "scope sent as a string");
     let publish = &brick_messages()[3];
     let frame = reference::frame(&as_string(reference::brick_value(publish), "detail"));
     assert!(S::decode_brick(&frame).is_err(), "detail sent as a string");

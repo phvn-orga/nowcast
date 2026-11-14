@@ -79,6 +79,15 @@ struct Subscribe {
 #[serde(deny_unknown_fields)]
 struct RefreshBrick {
     kind: Option<String>,
+    /// A scope the brick interprets, instead of a kind. A `null` scope is a
+    /// scope too, checked like any other, not a refresh of every flow.
+    #[serde(default, deserialize_with = "given")]
+    scope: Option<Value>,
+}
+
+/// `Some` for a field present in the body, `null` included.
+fn given<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(value).map(Some)
 }
 
 #[derive(serde::Serialize)]
@@ -391,8 +400,9 @@ where
     }
 
     /// Refreshes every live flow of a brick, or of one of its kinds, whoever
-    /// subscribed to it. A brick without flows gets nothing, and a stopped
-    /// one is not launched for it.
+    /// subscribed to it; or relays a scope the brick interprets, checked
+    /// against the schema it declares. A brick without flows gets nothing,
+    /// and a stopped one is not launched for it.
     async fn refresh_brick(
         &self,
         brick: &str,
@@ -404,13 +414,37 @@ where
         let brick = BrickName::new(name.as_str()).map_err(|_| unknown_brick())?;
         let declaration = self.discovery.brick(&brick).ok_or_else(unknown_brick)?;
         let body = read_body(body).await?;
-        let RefreshBrick { kind } = if body.iter().all(u8::is_ascii_whitespace) {
+        let RefreshBrick { kind, scope } = if body.iter().all(u8::is_ascii_whitespace) {
             RefreshBrick::default()
         } else {
             serde_json::from_slice(&body).map_err(|e| {
                 HttpError::invalid_request(format!("the body is not the expected JSON: {e}"))
             })?
         };
+        if let Some(scope) = scope {
+            if kind.is_some() {
+                return Err(HttpError::invalid_request(
+                    "the body carries a kind or a scope, not both",
+                ));
+            }
+            let schema = declaration.refresh_scope.as_ref().ok_or_else(|| {
+                HttpError::api(
+                    ApiErrorCode::ScopeNotAccepted,
+                    format!("brick {brick} declares no refresh scope"),
+                )
+            })?;
+            params::validate_scope(schema, &scope, &brick)?;
+            let live = self
+                .router
+                .flows()
+                .iter()
+                .any(|flow| flow.subscribers > 0 && flow.flow.brick() == &brick);
+            if live {
+                let scope = serde_json::to_vec(&scope).expect("a JSON value always serializes");
+                self.supervisor.refresh_scope(&brick, scope);
+            }
+            return Ok(empty(StatusCode::ACCEPTED));
+        }
         if let Some(kind) = &kind
             && !declaration.subscriptions.contains_key(kind)
         {

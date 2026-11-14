@@ -59,9 +59,40 @@ pub async fn read(
         }
     };
     Ok(BranchReading {
+        branch: None,
         head_sha,
         pr: found.map(|(pr, _)| pr),
         ci,
+    })
+}
+
+/// Reads PR `number` of the repository, whatever its state, its source
+/// branch, and the CI of its head as for a branch: that of the PR while it
+/// is active, else the builds of its head. A PR from a fork names no
+/// branch: its source branch is the fork's, not one of this repository.
+pub async fn read_pr(
+    client: &Client<'_>,
+    names: &Names,
+    number: u64,
+    memory: &mut Memory,
+) -> Result<BranchReading, Failure> {
+    let path = format!("{}/pullrequests/{number}?{VERSION}", names.repo_api());
+    let raw = client.get(&path).await?;
+    let pr = pr_of(&raw, names)
+        .ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
+    let source = raw["sourceRefName"].as_str().unwrap_or_default();
+    let branch = source.strip_prefix("refs/heads/").unwrap_or(source);
+    let ci = if pr.is_open() {
+        pr_ci(client, names, branch, &pr, &raw, memory).await?
+    } else {
+        memory.iteration = None;
+        branch_ci(client, names, branch, &pr.head_sha).await?
+    };
+    Ok(BranchReading {
+        branch: raw["forkSource"].is_null().then(|| branch.to_owned()),
+        head_sha: Some(pr.head_sha.clone()),
+        pr: Some(pr),
+        ci: Some(ci),
     })
 }
 
@@ -392,7 +423,10 @@ fn build_policy(e: &Value, blocking: bool) -> BuildPolicy {
 
 /// A policy evaluation's state. A `queued` one that waits for a person
 /// (expired, or queued by hand only) is `waiting`: nothing runs until
-/// someone queues the build.
+/// someone queues the build. An `approved` one passes even when its build
+/// tested an older merge commit (`context.buildIsNotCurrent`): Azure DevOps
+/// holds the policy satisfied until its `validDuration` runs out, then
+/// expires it.
 fn evaluation_state(status: Option<&str>, waits: bool) -> State {
     match status {
         Some("queued") if waits => State::Waiting,
@@ -470,8 +504,9 @@ async fn pr_ci(
         }
     }
     let iteration = latest_iteration(client, names, pr, &statuses, memory).await?;
-    let built = pipelines.iter().map(|p| p.id.clone()).collect();
-    let (external, missing) = statuses_pipeline(&statuses, iteration, &built, &policies.statuses);
+    let published = Published::of(&pipelines);
+    let (external, missing) =
+        statuses_pipeline(&statuses, iteration, &published, &policies.statuses);
     pipelines.extend(external);
     Ok(Ci {
         sha: pr.head_sha.clone(),
@@ -576,22 +611,49 @@ fn context_name(genre: Option<&str>, name: &str) -> String {
     }
 }
 
+/// The builds already published for a PR, which its statuses may come from.
+#[derive(Debug, Default)]
+struct Published {
+    /// Their ids.
+    builds: HashSet<String>,
+    /// Their definitions' names, in lowercase.
+    definitions: HashSet<String>,
+}
+
+impl Published {
+    fn of(pipelines: &[Pipeline]) -> Self {
+        let mut published = Self::default();
+        for pipeline in pipelines {
+            published.builds.insert(pipeline.id.clone());
+            if pipeline.definition.is_some() {
+                published.definitions.insert(pipeline.name.to_lowercase());
+            }
+        }
+        published
+    }
+}
+
 /// The PR's statuses as one `external` pipeline, a job per context: the
 /// latest of each, on the latest `iteration` or on the whole PR. A status a
-/// build of the PR posts itself (its `targetUrl` names a build in `built`)
-/// is that build's, already published. Each job is required when a
-/// blocking status policy names it; such a policy that nothing answered is
-/// missing.
+/// published build posts itself is that build's, already published, and
+/// left out, unless a blocking status policy requires it. Each job is
+/// required when a blocking status policy names it; such a policy that
+/// nothing answered is missing.
 fn statuses_pipeline(
     statuses: &Value,
     iteration: Option<u64>,
-    built: &HashSet<String>,
+    published: &Published,
     policies: &[StatusPolicy],
 ) -> (Option<Pipeline>, Vec<String>) {
+    let requires = |name: &str| {
+        policies
+            .iter()
+            .any(|p| p.blocking && p.context.eq_ignore_ascii_case(name))
+    };
     let mut latest: Vec<(String, &Value)> = Vec::new();
     for status in list(statuses) {
         let on = status["iterationId"].as_u64();
-        if on.is_some_and(|on| Some(on) != iteration) || from_build(status, built) {
+        if on.is_some_and(|on| Some(on) != iteration) {
             continue;
         }
         let context = &status["context"];
@@ -599,17 +661,15 @@ fn statuses_pipeline(
             context["genre"].as_str(),
             context["name"].as_str().unwrap_or_default(),
         );
+        if from_build(status, published) && !requires(&name) {
+            continue;
+        }
         match latest.iter_mut().find(|(n, _)| *n == name) {
             Some(kept) if kept.1["id"].as_u64() < status["id"].as_u64() => kept.1 = status,
             Some(_) => {}
             None => latest.push((name, status)),
         }
     }
-    let requires = |name: &str| {
-        policies
-            .iter()
-            .any(|p| p.blocking && p.context.eq_ignore_ascii_case(name))
-    };
     let jobs: Vec<Job> = latest
         .iter()
         .map(|(name, status)| status_job(name, status, requires(name)))
@@ -639,14 +699,21 @@ fn statuses_pipeline(
     (pipeline, missing)
 }
 
-/// Whether a build in `built` posted `status`: its `targetUrl` names it.
-fn from_build(status: &Value, built: &HashSet<String>) -> bool {
+/// Whether a published build posted `status`: its `targetUrl` names the
+/// build, or its `genre` the build's definition, case aside. A build's
+/// own statuses (code coverage) carry no `targetUrl`, and the definition's
+/// name, in lowercase, as their genre.
+fn from_build(status: &Value, published: &Published) -> bool {
+    let genre = status["context"]["genre"].as_str();
+    if genre.is_some_and(|g| published.definitions.contains(&g.to_lowercase())) {
+        return true;
+    }
     let Some(url) = status["targetUrl"].as_str() else {
         return false;
     };
     url.split_once("buildId=").is_some_and(|(_, rest)| {
         let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        built.contains(&id)
+        published.builds.contains(&id)
     })
 }
 
@@ -794,6 +861,19 @@ mod tests {
         assert!(policies.statuses.is_empty(), "a reviewer policy is no CI");
     }
 
+    /// A build approved on an older merge commit, still within the
+    /// policy's valid duration, satisfies the policy as Azure DevOps holds
+    /// it: the policy passes, on the build it designates.
+    #[test]
+    fn a_policy_approved_on_an_older_merge_commit_passes() {
+        let evaluations = json!({ "value": [
+            evaluation("e1", "approved",
+                json!({ "buildId": 5, "buildIsNotCurrent": true, "isExpired": false }), true),
+        ]});
+        let policy = &policies(&evaluations).builds[0];
+        assert_eq!((policy.state, policy.build), (State::Pass, Some(5)));
+    }
+
     fn status(id: u64, name: &str, state: &str, iteration: Option<u64>) -> Value {
         json!({ "id": id, "state": state, "iterationId": iteration,
             "context": { "genre": "ci", "name": name }, "targetUrl": "https://x" })
@@ -813,7 +893,10 @@ mod tests {
             status(4, "deploy", "pending", None),
             coverage,
         ]});
-        let built = HashSet::from(["41".to_owned()]);
+        let published = Published {
+            builds: HashSet::from(["41".to_owned()]),
+            ..Published::default()
+        };
         let policies = [
             StatusPolicy {
                 context: "ci/scan".into(),
@@ -828,7 +911,7 @@ mod tests {
                 blocking: false,
             },
         ];
-        let (pipeline, missing) = statuses_pipeline(&statuses, Some(2), &built, &policies);
+        let (pipeline, missing) = statuses_pipeline(&statuses, Some(2), &published, &policies);
         let pipeline = pipeline.unwrap();
         assert_eq!(pipeline.trigger, Trigger::External);
         let jobs: Vec<_> = pipeline
@@ -846,10 +929,51 @@ mod tests {
         assert_eq!(missing, ["ci/e2e"]);
     }
 
-    /// A forge where `feat` has the active PR 7, whose blocking build
-    /// policy designates build 40: two stages, `build` with the jobs `a`
-    /// and `b`, `deploy` waiting for an approval. Build 41 of another
-    /// definition tested the merge commit; build 39, an older merge commit.
+    /// A published build's own status that a blocking status policy
+    /// requires answers that policy: it stays a required job, by its
+    /// `targetUrl` as by its genre, and nothing is missing.
+    #[test]
+    fn a_required_status_of_a_published_build_answers_its_policy() {
+        let mut coverage = status(1, "coverage", "failed", None);
+        coverage["targetUrl"] = json!("https://dev.azure.com/o/p/_build/results?buildId=41");
+        let mut tests = status(2, "tests", "pending", None);
+        tests["context"]["genre"] = json!("app-validation");
+        tests["targetUrl"] = Value::Null;
+        let statuses = json!({ "value": [coverage, tests] });
+        let published = Published {
+            builds: HashSet::from(["41".to_owned()]),
+            definitions: HashSet::from(["app-validation".to_owned()]),
+        };
+        let policies = ["ci/coverage", "app-validation/tests"].map(|context| StatusPolicy {
+            context: context.into(),
+            blocking: true,
+        });
+        let (pipeline, missing) = statuses_pipeline(&statuses, None, &published, &policies);
+        let jobs: Vec<_> = pipeline
+            .unwrap()
+            .jobs
+            .iter()
+            .map(|j| (j.name.clone(), j.state, j.required))
+            .collect();
+        assert_eq!(
+            jobs,
+            [
+                ("ci/coverage".to_owned(), State::Fail, Some(true)),
+                (
+                    "app-validation/tests".to_owned(),
+                    State::Running,
+                    Some(true)
+                ),
+            ]
+        );
+        assert!(missing.is_empty());
+    }
+
+    /// A forge where `feat` has the active PR 7, also read by its number,
+    /// whose blocking build policy designates build 40: two stages, `build`
+    /// with the jobs `a` and `b`, `deploy` waiting for an approval. Build 41
+    /// of another definition tested the merge commit; build 39, an older
+    /// merge commit.
     /// Build 42 of the branch tested its head; build 43, an older head. A
     /// blocking build policy and a blocking status policy do not apply.
     async fn forge() -> Server {
@@ -857,6 +981,8 @@ mod tests {
             let line = request.lines().next().unwrap_or_default().to_owned();
             let body = if line.contains("/pullrequests?searchcriteria.status=active") {
                 json!({ "value": [raw_pr("active")] })
+            } else if line.contains("/repositories/r/pullrequests/7?api-version=7.1 ") {
+                raw_pr("active")
             } else if line.contains("/policy/evaluations?") {
                 let mut skipped = evaluation("e2", "notApplicable", json!({ "buildId": 38 }), true);
                 skipped["configuration"]["settings"]["buildDefinitionId"] = json!(15);
@@ -997,6 +1123,85 @@ mod tests {
         assert!(!requests.iter().any(|r| r.contains("/builds/38")));
     }
 
+    /// An active PR read by its number reads as its source branch: the
+    /// same PR and CI, its branch named, and no listing of the PRs.
+    #[tokio::test]
+    async fn an_active_pr_by_its_number_reads_as_its_branch() {
+        let server = forge().await;
+        let by_branch = read_feat(&context(&server)).await;
+        let context = context(&server);
+        let client = Client {
+            context: &context,
+            token: "t".into(),
+        };
+        let listings = server.requests().len();
+        let by_number = read_pr(&client, &names(), 7, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(by_number.branch.as_deref(), Some("feat"));
+        assert_eq!(
+            BranchReading {
+                branch: None,
+                ..by_number
+            },
+            by_branch
+        );
+        assert!(
+            !server.requests()[listings..]
+                .iter()
+                .any(|r| r.contains("/pullrequests?")),
+            "no listing"
+        );
+    }
+
+    /// A PR no longer active, read by its number, gives the builds of its
+    /// head; a number that is no PR is not found.
+    #[tokio::test]
+    async fn a_completed_pr_by_its_number_gives_the_builds_of_its_head() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pullrequests/7?") {
+                raw_pr("completed")
+            } else if line.contains("/pullrequests/9?") {
+                let mut fork = raw_pr("completed");
+                fork["forkSource"] = json!({ "name": "refs/heads/feat" });
+                fork
+            } else if line.contains("/build/builds?branchname=refs%2fheads%2ffeat") {
+                json!({ "value": [{ "id": 2, "status": "completed", "result": "succeeded",
+                    "reason": "individualCI", "definition": { "id": 1 }, "sourceVersion": "abc" }] })
+            } else if line.contains("/timeline") {
+                json!({ "changeId": 1, "records": [] })
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let context = context(&server);
+        let client = Client {
+            context: &context,
+            token: "t".into(),
+        };
+        let reading = read_pr(&client, &names(), 7, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(reading.branch.as_deref(), Some("feat"));
+        assert_eq!(reading.head_sha.as_deref(), Some("abc"));
+        assert_eq!(reading.pr.unwrap().state, "merged");
+        let ci = reading.ci.unwrap();
+        assert_eq!(ci.sha, "abc");
+        assert_eq!(ci.pipelines[0].id, "2");
+        let missing = read_pr(&client, &names(), 8, &mut Memory::default()).await;
+        assert_eq!(missing, Err(Failure::NotFound));
+        let fork = read_pr(&client, &names(), 9, &mut Memory::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.branch, None,
+            "a fork's branch is not this repository's"
+        );
+    }
+
     /// A queued evaluation that still names a completed build waits for
     /// the next one: no job, a CI expected.
     #[tokio::test]
@@ -1131,5 +1336,47 @@ mod tests {
         let pr = reading.pr.unwrap();
         assert_eq!((pr.number, pr.state), (7, "merged"));
         assert_eq!((reading.head_sha, reading.ci), (None, None));
+    }
+
+    /// A status a build posts on the PR, code coverage, carries no
+    /// `targetUrl` and its definition's name in lowercase as its genre: it
+    /// is that build's, not an external job running as long as the build.
+    #[tokio::test]
+    async fn a_build_s_own_status_without_target_url_is_the_build_s() {
+        let server = Server::start(|request| {
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let body = if line.contains("/pullrequests?searchcriteria.status=active") {
+                json!({ "value": [raw_pr("active")] })
+            } else if line.contains("/policy/evaluations?") {
+                json!({ "value": [evaluation("e1", "running", json!({ "buildId": 40 }), true)] })
+            } else if line.contains("/build/builds?branchname=refs%2fpull%2f7%2fmerge") {
+                json!({ "value": [{ "id": 40, "status": "inProgress", "reason": "pullRequest",
+                    "definition": { "id": 12, "name": "App-Code-Validation" },
+                    "sourceVersion": "m1", "sourceBranch": "refs/pull/7/merge" }] })
+            } else if line.contains("/build/builds?") {
+                json!({ "value": [] })
+            } else if line.contains("/timeline") {
+                json!({ "changeId": 1, "records": [] })
+            } else if line.contains("/statuses?") {
+                json!({ "value": [
+                    { "id": 1, "state": "pending", "targetUrl": null,
+                      "context": { "genre": "app-code-validation", "name": "codecoverage" },
+                      "createdBy": { "displayName": "Azure Pipelines Test Service" } },
+                    { "id": 2, "state": "succeeded", "targetUrl": "https://scan",
+                      "context": { "genre": "sonar", "name": "quality" } },
+                ]})
+            } else {
+                return (404, vec![], String::new());
+            };
+            (200, vec![], body.to_string())
+        })
+        .await;
+        let ci = read_feat(&context(&server)).await.ci.unwrap();
+        let ids: Vec<_> = ci.pipelines.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["40", "statuses"]);
+        let external = &ci.pipelines[1];
+        let jobs: Vec<_> = external.jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(jobs, ["sonar/quality"]);
+        assert_eq!(external.state, State::Pass);
     }
 }

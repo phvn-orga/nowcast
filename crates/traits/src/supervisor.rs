@@ -174,6 +174,12 @@ pub trait Supervisor: Send + Sync + 'static {
     /// Relays a refresh request to the brick serving `flow`.
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow>;
 
+    /// Relays a refresh scope to `brick`, in one `refresh-scope`, if it runs
+    /// with flows. `scope` is JSON bytes, already validated against the
+    /// schema the brick declares. A stopped brick is not launched for it,
+    /// and one not ready does not get it.
+    fn refresh_scope(&self, brick: &BrickName, scope: Vec<u8>);
+
     /// The subscription kind the brick serves `flow` for, `None` if it serves
     /// no such flow. Two kinds mapped to one flow keep the first.
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String>;

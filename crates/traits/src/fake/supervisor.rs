@@ -14,6 +14,7 @@ struct State {
     /// The kind of each flow resolved.
     resolved: HashMap<QualifiedFlowId, String>,
     refreshes: Vec<QualifiedFlowId>,
+    scoped_refreshes: Vec<(BrickName, Vec<u8>)>,
     inputs: Vec<(QualifiedFlowId, String, Vec<u8>)>,
     bricks: Vec<BrickSummary>,
 }
@@ -59,6 +60,11 @@ impl FakeSupervisor {
         self.state.lock().unwrap().refreshes.clone()
     }
 
+    /// The refresh scopes relayed, in order: brick and JSON bytes.
+    pub fn scoped_refreshes(&self) -> Vec<(BrickName, Vec<u8>)> {
+        self.state.lock().unwrap().scoped_refreshes.clone()
+    }
+
     /// The inputs relayed, in order: flow, type and JSON bytes.
     pub fn inputs(&self) -> Vec<(QualifiedFlowId, String, Vec<u8>)> {
         self.state.lock().unwrap().inputs.clone()
@@ -98,6 +104,11 @@ impl Supervisor for FakeSupervisor {
         }
         state.refreshes.push(flow.clone());
         Ok(())
+    }
+
+    fn refresh_scope(&self, brick: &BrickName, scope: Vec<u8>) {
+        let mut state = self.state.lock().unwrap();
+        state.scoped_refreshes.push((brick.clone(), scope));
     }
 
     fn kind(&self, flow: &QualifiedFlowId) -> Option<String> {

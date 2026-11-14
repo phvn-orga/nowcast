@@ -19,6 +19,8 @@ it, with no error and nothing waiting
 Locally, run only what the change touches:
 
 - a Rust crate: `cargo test -p nowcast-<crate>`;
+- Rust doc comments: `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links"
+  cargo doc -p nowcast-<crate> --no-deps --document-private-items`;
 - the Claude Code client, from `clients/claude-code`: `nr typecheck` and
   `nr test`, after `nr types` once in a fresh worktree (it fetches the plugin
   API's types);

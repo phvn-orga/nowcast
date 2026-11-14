@@ -17,6 +17,8 @@
 //!   `n` counting the refreshes of this process from 1. A refresh of a flow it
 //!   does not serve is ignored. Nothing is published otherwise, so a new flow
 //!   has no value until a test publishes one.
+//! - `refresh-scope` publishes nothing: a test reads the scope among what
+//!   the service sent.
 //! - `release` forgets the flow; `shutdown` or the end of its input ends the
 //!   process with status 0.
 //!
@@ -41,7 +43,7 @@
 //!
 //! [`manifest`] is the declaration file shipped with the crate. Its command
 //! is the bare program name `nowcast-test-brick`, looked up in the service's
-//! `PATH`. [`binary`] gives the path of the built program.
+//! `PATH`. [`binary`] builds the program and gives its path.
 //!
 //! # From a test
 //!
@@ -52,15 +54,20 @@
 //! bricks directory. Each [`Control::accept`] is then one launch of the
 //! brick, and [`ControlledBrick::exited`] its end.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 mod control;
 pub mod wire;
 
 pub use control::{Control, ControlledBrick};
 
+/// The name of the package and of its binary.
+pub const PROGRAM: &str = "nowcast-test-brick";
 /// The brick's name, the conformance probe's.
 pub const NAME: &str = "probe";
 /// Its subscription kind without input.
@@ -92,22 +99,66 @@ pub fn manifest() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/brick/probe.toml"))
 }
 
-/// Where Cargo puts the `nowcast-test-brick` binary for the running test: the
-/// profile directory, parent of the `deps` directory holding the test
-/// executable. It is the directory to put on the service's `PATH` for
-/// [`manifest`], or the command of a declaration.
+/// The `nowcast-test-brick` binary, built for the running test when missing
+/// or stale (see [`build`]). It is the command of a declaration, and its
+/// directory the one to put on the service's `PATH` for [`manifest`].
+pub fn binary() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| build(&[(PROGRAM, PROGRAM)]).remove(0))
+}
+
+/// Builds each `(package, binary)` of `bins` with the Cargo running the tests,
+/// in their profile, and gives the paths of the executables in the same order.
 ///
-/// Cargo builds the binary only when it builds this package's own tests
-/// (`cargo test --workspace` does) or on `cargo build -p nowcast-test-brick`:
-/// a test of another package must make sure it exists and is up to date.
-/// `None` when the running executable has no such parent.
-pub fn binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let profile = exe.parent()?.parent()?;
-    Some(profile.join(format!(
-        "nowcast-test-brick{}",
-        std::env::consts::EXE_SUFFIX
-    )))
+/// Cargo builds a package's binaries only for that package's own tests
+/// (`cargo test --workspace` builds them all), so a test of another package
+/// builds them here, a no-op when they are up to date. The paths are the ones
+/// Cargo reports, wherever its configuration and version put them: no guess
+/// from the test executable's own path.
+///
+/// # Panics
+///
+/// When the build fails, or reports no executable for one of `bins`.
+pub fn build(bins: &[(&str, &str)]) -> Vec<PathBuf> {
+    // Set by Cargo when it runs the tests; the one that built them otherwise.
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or(env!("CARGO").into()));
+    cargo.args([
+        "build",
+        "--quiet",
+        "--message-format=json-render-diagnostics",
+    ]);
+    for (package, bin) in bins {
+        cargo.args(["-p", package, "--bin", bin]);
+    }
+    if !cfg!(debug_assertions) {
+        cargo.arg("--release");
+    }
+    let output = cargo.stderr(Stdio::inherit()).output().expect("cargo runs");
+    assert!(output.status.success(), "the binaries build");
+    let mut executables = HashMap::new();
+    for line in output.stdout.split(|&byte| byte == b'\n') {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let target = &message["target"];
+        let is_bin = target["kind"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"));
+        if let (true, Some(name), Some(executable)) = (
+            is_bin,
+            target["name"].as_str(),
+            message["executable"].as_str(),
+        ) {
+            executables.insert(name.to_owned(), PathBuf::from(executable));
+        }
+    }
+    bins.iter()
+        .map(|(_, bin)| {
+            executables
+                .remove(*bin)
+                .unwrap_or_else(|| panic!("cargo reports no executable for {bin}"))
+        })
+        .collect()
 }
 
 /// How the brick answers the service, fixed for the life of the process.

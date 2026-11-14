@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["repo"],
+  "properties": {
+    "repo": { "type": "string" },
+    "kinds": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}
