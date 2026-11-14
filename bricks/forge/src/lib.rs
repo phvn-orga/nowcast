@@ -15,6 +15,34 @@
 //! - [`github`] is the GitHub provider, [`azure`] the Azure DevOps one;
 //! - [`credentials`] reads the token source each forge's user chose, which
 //!   [`configure()`] asks for.
+//!
+//! Standard error is the brick's log, which the service journals: errors
+//! only, unless [`LOG_VAR`] is `debug` in the service's environment. Then
+//! each line `forge: debug: ...` tells one step, to follow a refresh that
+//! changes nothing:
+//!
+//! - `refresh <flow> target=<target>`, a flow's refresh, and
+//!   `refresh-scope repo=<repo> types=<kinds> number=<n> targets=<targets>`,
+//!   a scoped one, with the targets it covers;
+//! - `poll <detector> answer=<answer> moved=<items> woke=<targets>`, a
+//!   detector's poll: `first`, `changed`, `unchanged` (a `304` on GitHub),
+//!   `no-token` or `failed:<why>`;
+//! - `read <target> outcome=<ok or failure> published=<kinds>` or
+//!   `unchanged`, a target's reading.
+//!
+//! A target reads as `branch/<repo>#<branch>`, `pr/<repo>!<number>`,
+//! `issues/<tracker>` or `issue/<tracker>#<number>`. No line carries a
+//! remote as written, which may hold credentials, nor a token.
+
+/// Writes a debug line to the log, only when [`LOG_VAR`] asks for it; the
+/// arguments are not even formatted otherwise.
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if $crate::debug_on() {
+            $crate::log(format_args!("debug: {}", format_args!($($arg)*)));
+        }
+    };
+}
 
 mod azure;
 mod configure;
@@ -28,6 +56,7 @@ mod testing;
 mod tools;
 
 use std::process::ExitCode;
+use std::sync::LazyLock;
 
 use jiff::Timestamp;
 use nowcast_codec::{read_service, write_brick};
@@ -108,6 +137,28 @@ pub fn configure() -> ExitCode {
 
 fn log(message: impl std::fmt::Display) {
     eprintln!("{NAME}: {message}");
+}
+
+/// `items` joined by commas, `none` when there is none, for the log.
+fn list(items: impl Iterator<Item = impl std::fmt::Display>) -> String {
+    let list = items.map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    if list.is_empty() { "none".into() } else { list }
+}
+
+/// The environment variable that turns the debug lines on, when `debug`.
+pub const LOG_VAR: &str = "NOWCAST_FORGE_LOG";
+
+static DEBUG: LazyLock<bool> =
+    LazyLock::new(|| debug_asked(std::env::var(LOG_VAR).ok().as_deref()));
+
+/// Whether the debug lines are written.
+fn debug_on() -> bool {
+    *DEBUG
+}
+
+/// Whether `value`, that of [`LOG_VAR`], asks for the debug lines.
+fn debug_asked(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("debug"))
 }
 
 /// The providers the brick carries, each reading the token the user chose
@@ -205,4 +256,22 @@ async fn send(output: &mut Stdout, messages: Vec<BrickMessage>) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_debug_lines_are_off_unless_asked() {
+        for value in [None, Some(""), Some("info"), Some("1"), Some("debugging")] {
+            assert!(!debug_asked(value), "{value:?}");
+        }
+        assert!(debug_asked(Some("debug")));
+        assert!(debug_asked(Some(" DEBUG\n")));
+        assert!(
+            std::env::var_os(LOG_VAR).is_some() || !debug_on(),
+            "off without the variable"
+        );
+    }
 }

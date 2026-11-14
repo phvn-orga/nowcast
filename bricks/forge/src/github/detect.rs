@@ -228,14 +228,15 @@ pub type Detection = detect::Detection<Repository>;
 /// A target's registration, and what its detectors send it.
 pub type Detected = detect::Detected<Repository>;
 
-/// Registers a target of `owner/name` about `interest`: the detectors it
-/// depends on run while it stays registered.
+/// Registers a target of `owner/name` about `interest`, named `label` in
+/// the log: the detectors it depends on run while it stays registered.
 pub fn watch(
     detection: &Detection,
     access: &Access,
     owner: &str,
     name: &str,
     interest: Interest,
+    label: &str,
 ) -> Detected {
     let key = format!("{owner}/{name}").to_ascii_lowercase();
     let repository = || Repository {
@@ -243,7 +244,7 @@ pub fn watch(
         owner: owner.to_owned(),
         name: name.to_owned(),
     };
-    detection.watch(key, repository, interest)
+    detection.watch(key, repository, interest, label)
 }
 
 /// One repository detected: what its detectors share.

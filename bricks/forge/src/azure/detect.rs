@@ -376,13 +376,15 @@ pub type Detection = detect::Detection<Project>;
 /// A target's registration, and what its detectors send it.
 pub type Detected = detect::Detected<Project>;
 
-/// Registers a target of the project of `names` about `interest`: the
-/// detectors it depends on run while it stays registered.
+/// Registers a target of the project of `names` about `interest`, named
+/// `label` in the log: the detectors it depends on run while it stays
+/// registered.
 pub fn watch(
     detection: &Detection,
     context: &Context,
     names: &Names,
     interest: Interest,
+    label: &str,
 ) -> Detected {
     let project = || Project {
         context: context.clone(),
@@ -391,7 +393,7 @@ pub fn watch(
             ..names.clone()
         },
     };
-    detection.watch(names.tracker(), project, interest)
+    detection.watch(names.tracker(), project, interest, label)
 }
 
 /// One project detected: what its detectors share.

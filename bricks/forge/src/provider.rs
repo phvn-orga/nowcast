@@ -101,12 +101,28 @@ pub type Outcome = Result<Reading, Failure>;
 /// Where a provider sends the readings of one target it follows.
 pub struct Updates {
     target: u64,
+    label: String,
     tx: UnboundedSender<(u64, Outcome)>,
 }
 
 impl Updates {
+    /// Named by its number until [`Updates::named`].
     pub fn new(target: u64, tx: UnboundedSender<(u64, Outcome)>) -> Self {
-        Self { target, tx }
+        Self {
+            target,
+            label: target.to_string(),
+            tx,
+        }
+    }
+
+    /// Names the target for the log.
+    pub fn named(self, label: String) -> Self {
+        Self { label, ..self }
+    }
+
+    /// How the log names the target.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// `false` once the core is gone: the provider stops.

@@ -41,8 +41,8 @@ pub trait Scope: Send + Sync + Sized + 'static {
     type Interest: Send + 'static;
     /// What tells a detector of the scope from the others.
     type Key: Clone + Eq + Hash + Send + 'static;
-    /// An item a detector saw move.
-    type Moved: Send + 'static;
+    /// An item a detector saw move, written as is in the log.
+    type Moved: std::fmt::Debug + Send + 'static;
     type Detector: Detector<Moved = Self::Moved>;
 
     /// The provider's paces: `normal` after a failed poll or without a
@@ -109,14 +109,15 @@ impl<S: Scope> Default for Detection<S> {
 }
 
 impl<S: Scope> Detection<S> {
-    /// Registers a target of the scope `key` about `interest`, `scope`
-    /// making the scope when no target holds it: the detectors it depends
-    /// on run while it stays registered.
+    /// Registers a target of the scope `key` about `interest`, named
+    /// `label` in the log, `scope` making the scope when no target holds
+    /// it: the detectors it depends on run while it stays registered.
     pub fn watch(
         &self,
         key: String,
         scope: impl FnOnce() -> S,
         interest: S::Interest,
+        label: &str,
     ) -> Detected<S> {
         let watched = {
             let mut scopes = self.scopes.lock().unwrap();
@@ -133,7 +134,7 @@ impl<S: Scope> Detection<S> {
             }
         };
         let (wake, wakes) = unbounded_channel();
-        let id = watched.add(interest, wake);
+        let id = watched.add(interest, label.to_owned(), wake);
         Detected {
             watcher: Watcher { watched, id },
             wakes,
@@ -165,8 +166,8 @@ pub struct Watched<S: Scope> {
 
 struct State<S: Scope> {
     last_id: u64,
-    /// Each target registered, and where to wake it.
-    watchers: HashMap<u64, (S::Interest, UnboundedSender<()>)>,
+    /// Each target registered, its name in the log, and where to wake it.
+    watchers: HashMap<u64, (S::Interest, String, UnboundedSender<()>)>,
     detectors: HashMap<S::Key, Running>,
 }
 
@@ -196,7 +197,12 @@ impl Drop for Running {
 impl<S: Scope> Watched<S> {
     /// Registers a target, starting the detectors it needs that no other
     /// target started.
-    fn add(self: &Arc<Self>, interest: S::Interest, wake: UnboundedSender<()>) -> u64 {
+    fn add(
+        self: &Arc<Self>,
+        interest: S::Interest,
+        label: String,
+        wake: UnboundedSender<()>,
+    ) -> u64 {
         let mut state = self.state.lock().unwrap();
         state.last_id += 1;
         let id = state.last_id;
@@ -208,7 +214,7 @@ impl<S: Scope> Watched<S> {
                 vacant.insert(Running { task, asks });
             }
         }
-        state.watchers.insert(id, (interest, wake));
+        state.watchers.insert(id, (interest, label, wake));
         id
     }
 
@@ -221,17 +227,20 @@ impl<S: Scope> Watched<S> {
             detectors,
             ..
         } = &mut *state;
-        detectors.retain(|key, _| watchers.values().any(|(i, _)| S::keys(i).contains(key)));
+        detectors.retain(|key, _| watchers.values().any(|(i, ..)| S::keys(i).contains(key)));
     }
 
-    /// Wakes the targets one of `moved` touches.
-    fn wake(&self, moved: &[S::Moved]) {
+    /// Wakes the targets one of `moved` touches, and returns their names.
+    fn wake(&self, moved: &[S::Moved]) -> Vec<String> {
         let state = self.state.lock().unwrap();
-        for (interest, wake) in state.watchers.values() {
+        let mut woken = Vec::new();
+        for (interest, label, wake) in state.watchers.values() {
             if moved.iter().any(|m| S::touches(m, interest)) {
                 let _ = wake.send(());
+                woken.push(label.clone());
             }
         }
+        woken
     }
 }
 
@@ -245,7 +254,7 @@ impl<S: Scope> Watcher<S> {
     /// Updates what the target is about.
     pub fn learn(&self, update: impl FnOnce(&mut S::Interest)) {
         let mut state = self.watched.state.lock().unwrap();
-        if let Some((interest, _)) = state.watchers.get_mut(&self.id) {
+        if let Some((interest, ..)) = state.watchers.get_mut(&self.id) {
             update(interest);
         }
     }
@@ -258,7 +267,7 @@ impl<S: Scope> Watcher<S> {
             let keys = state
                 .watchers
                 .get(&self.id)
-                .map(|(i, _)| S::keys(i))
+                .map(|(i, ..)| S::keys(i))
                 .unwrap_or_default();
             keys.iter()
                 .filter_map(|key| state.detectors.get(key))
@@ -422,22 +431,34 @@ impl<S: Scope> Poller<S> {
     /// limit asks, or the normal pace without a token.
     pub(crate) async fn poll(&mut self) -> Option<Duration> {
         match self.detector.poll().await {
-            Polled::NoToken => Some(S::RHYTHM.normal),
+            Polled::NoToken => {
+                debug!("poll {} answer=no-token", self.detector.at());
+                Some(S::RHYTHM.normal)
+            }
             Polled::First => {
+                debug!("poll {} answer=first", self.detector.at());
                 self.answered();
                 None
             }
             Polled::Answered { changed, moved } => {
                 self.answered();
                 self.throttle.answered(changed);
-                if !moved.is_empty()
-                    && let Some(watched) = self.watched.upgrade()
-                {
-                    watched.wake(&moved);
-                }
+                let woken = match self.watched.upgrade() {
+                    Some(watched) if !moved.is_empty() => watched.wake(&moved),
+                    _ => Vec::new(),
+                };
+                debug!(
+                    "poll {} answer={} moved={moved:?} woke={}",
+                    self.detector.at(),
+                    if changed { "changed" } else { "unchanged" },
+                    crate::list(woken.iter()),
+                );
                 None
             }
-            Polled::Failed(failure) => self.failed(failure).await,
+            Polled::Failed(failure) => {
+                debug!("poll {} answer=failed:{failure:?}", self.detector.at());
+                self.failed(failure).await
+            }
         }
     }
 
@@ -488,7 +509,9 @@ pub mod testing {
         let mut state = watched.state.lock().unwrap();
         for (id, interest) in interests.into_iter().enumerate() {
             let (wake, woken) = unbounded_channel();
-            state.watchers.insert(id as u64, (interest, wake));
+            state
+                .watchers
+                .insert(id as u64, (interest, id.to_string(), wake));
             wakes.push(woken);
         }
         drop(state);

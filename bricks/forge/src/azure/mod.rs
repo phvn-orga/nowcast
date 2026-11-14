@@ -133,7 +133,13 @@ impl Azure {
             tracker: number.is_none(),
             ..Interest::default()
         };
-        let detected = detect::watch(&self.detection, &self.context, &names, interest);
+        let detected = detect::watch(
+            &self.detection,
+            &self.context,
+            &names,
+            interest,
+            updates.label(),
+        );
         let tracker = Tracker {
             context: self.context.clone(),
             names,
@@ -166,7 +172,13 @@ impl Provider for Azure {
             pr,
             ..Interest::default()
         };
-        let detected = detect::watch(&self.detection, &self.context, &names, interest);
+        let detected = detect::watch(
+            &self.detection,
+            &self.context,
+            &names,
+            interest,
+            updates.label(),
+        );
         let branch = Branch {
             context: self.context.clone(),
             names,

@@ -134,6 +134,16 @@ impl Subject {
 /// A subject in its scope: `(repo id or tracker, subject)`.
 type TargetKey = (String, Subject);
 
+/// How the log names the target of `key`.
+fn label((scope, subject): &TargetKey) -> String {
+    match subject {
+        Subject::Branch(branch) => format!("branch/{scope}#{branch}"),
+        Subject::Pr(number) => format!("pr/{scope}!{number}"),
+        Subject::Issues => format!("issues/{scope}"),
+        Subject::Issue(number) => format!("issue/{scope}#{number}"),
+    }
+}
+
 /// What a provider follows for one or more flows.
 struct Target {
     /// Tells this target's readings from those of an earlier target of the
@@ -360,7 +370,7 @@ impl Core {
     fn follow(&mut self, index: usize, repo: Repo, key: TargetKey) {
         self.last_target += 1;
         let id = self.last_target;
-        let updates = Updates::new(id, self.updates.clone());
+        let updates = Updates::new(id, self.updates.clone()).named(label(&key));
         let provider = &self.providers[index];
         let watch = match &key.1 {
             Subject::Branch(branch) => {
@@ -404,11 +414,13 @@ impl Core {
     }
 
     /// Asks the provider for a reading now; the flow is published after it.
-    pub fn refresh(&mut self, flow: &FlowId) {
-        let Some(flow) = self.flows.get_mut(flow) else {
+    pub fn refresh(&mut self, id: &FlowId) {
+        let Some(flow) = self.flows.get_mut(id) else {
+            debug!("refresh {id} unknown");
             return;
         };
         flow.force = true;
+        debug!("refresh {id} target={}", label(&flow.target));
         if let Some(target) = self.targets.get(&flow.target) {
             target.watch.refresh();
         }
@@ -431,13 +443,23 @@ impl Core {
             .iter()
             .find_map(|p| p.recognise(&scope.remote))
         else {
+            debug!("refresh-scope on a remote no provider recognises");
             return;
         };
+        let mut covered = Vec::new();
         for (key, target) in &self.targets {
             if scope.covers(&repo, key, target) {
                 target.watch.refresh();
+                covered.push(key);
             }
         }
+        debug!(
+            "refresh-scope repo={} types={} number={} targets={}",
+            repo.id,
+            scope.types.as_ref().map_or("all".into(), |t| t.join(",")),
+            scope.number.map_or("-".into(), |n| n.to_string()),
+            crate::list(covered.into_iter().map(label)),
+        );
     }
 
     /// Takes in what a provider read for target `id` at `at`, and publishes
@@ -457,6 +479,10 @@ impl Core {
         let Some(target) = self.targets.get_mut(key) else {
             return vec![];
         };
+        let outcome_name = match &outcome {
+            Ok(_) => "ok",
+            Err(failure) => failure.as_str(),
+        };
         match outcome {
             Ok(reading) => {
                 target.reading = Some(reading);
@@ -472,10 +498,23 @@ impl Core {
         }
         let target = &*target;
         let mut out = Vec::new();
+        let mut published = Vec::new();
         for flow_id in &target.flows {
-            if let Some(flow) = self.flows.get_mut(flow_id) {
-                out.extend(publish(&mut self.last_req, flow_id, flow, target, now));
+            if let Some(flow) = self.flows.get_mut(flow_id)
+                && let Some(message) = publish(&mut self.last_req, flow_id, flow, target, now)
+            {
+                published.push(flow.kind.name());
+                out.push(message);
             }
+        }
+        if published.is_empty() {
+            debug!("read {} outcome={outcome_name} unchanged", label(key));
+        } else {
+            debug!(
+                "read {} outcome={outcome_name} published={}",
+                label(key),
+                published.join(",")
+            );
         }
         out
     }

@@ -95,9 +95,9 @@ impl GitHub {
         }
     }
 
-    /// Registers a target of `owner/name` about `interest` with the
-    /// repository's detectors.
-    fn detect(&self, owner: &str, name: &str, interest: Interest) -> Detected {
+    /// Registers a target of `owner/name` about `interest`, named `label`
+    /// in the log, with the repository's detectors.
+    fn detect(&self, owner: &str, name: &str, interest: Interest, label: &str) -> Detected {
         let access = Access {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -105,7 +105,7 @@ impl GitHub {
             tokens: self.tokens.clone(),
             accounts: self.accounts.clone(),
         };
-        detect::watch(&self.detection, &access, owner, name, interest)
+        detect::watch(&self.detection, &access, owner, name, interest, label)
     }
 
     /// Follows the open issues of `repo`, or its issue `number`.
@@ -117,7 +117,7 @@ impl GitHub {
             tracker: number.is_none(),
             ..Interest::default()
         };
-        let detected = self.detect(&owner, &name, interest);
+        let detected = self.detect(&owner, &name, interest, updates.label());
         let tracker = Tracker {
             http: self.http.clone(),
             api: self.api.clone(),
@@ -165,7 +165,7 @@ impl Provider for GitHub {
             pr,
             ..Interest::default()
         };
-        let detected = self.detect(&owner, &name, interest);
+        let detected = self.detect(&owner, &name, interest, updates.label());
         let branch = Branch {
             http: self.http.clone(),
             api: self.api.clone(),
