@@ -55,6 +55,14 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   (ce qui tourne, voir plus bas), `nowcast reload` (redémarrer le service sur le
   binaire installé, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
+- **L'outil ne remplace la session de son ancrage que si on lui en donne une.** Il
+  déclare sa session avant chaque commande : celle de `--session` ou de
+  `NOWCAST_SESSION`, qui remplace celle de l'ancrage (le hook d'un agent passe la
+  sienne, à jour après un `/clear`), sinon `cli-<pid>` avec `"replace": false`
+  (`03-contrats.md`, section 3). Lancé d'un terminal, il est son propre ancrage et
+  déclare donc `cli-<pid>`. Lancé de l'outil Bash d'un agent, il a l'agent pour
+  ancrage et en garde la session : `nowcast status` montre toujours l'identifiant
+  que l'agent a déclaré.
 - **`nowcast status` dit ce qui tourne, et à quelle version.** Il affiche, lisible
   par défaut, l'état que rend `GET /v1/status` (`03-contrats.md` section 3) : la
   version du service en marche à côté de la sienne, celle du binaire installé,
