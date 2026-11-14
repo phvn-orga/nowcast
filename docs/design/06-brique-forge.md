@@ -290,7 +290,8 @@ s'engage aussi sur un comportement :
   limites de ce que la forge accorde. Une attente humaine (une approbation) ne
   compte pas comme une CI qui tourne ;
 - **une CI est attendue** quand le provider estime que des pipelines vont apparaître
-  sur une tête neuve ; la synthèse et `missing_required` en tiennent compte ;
+  sur une tête neuve ; la synthèse et `missing_required` en tiennent compte. Sur une
+  branche sans PR, cette attente s'apprend par dépôt (voir la machine à rythme) ;
 - **la synthèse de `pr` et le détail de `pipelines`** d'une même branche viennent
   d'une même lecture et s'accordent ;
 - **une lecture en échec garde la dernière valeur** et met à jour `source` ;
@@ -326,6 +327,17 @@ La brique offre quelques outils, qu'un provider prend s'ils lui vont :
   (un push depuis un terminal ou par quelqu'un d'autre, une relecture, un merge, une
   mise en file) se voit par la détection du provider (voir « Voir un changement »),
   et à défaut au rythme normal.
+
+  La brique apprend, par dépôt, si un push sur une branche sans PR ouverte démarre
+  une CI. Après un tel push, une tête qui reste 2 min sur le même commit sans aucun
+  pipeline enseigne que non : les pushs de branche suivants, dans ce dépôt,
+  n'attendent plus de CI et publient `none` aussitôt. Un pipeline après un push de
+  branche, `queued` compris, enseigne l'inverse et l'attente revient. Une tête de PR
+  (PR neuve, push sur une PR) attend toujours sa CI et n'apprend rien. L'apprentissage
+  vit en mémoire : le premier push après un redémarrage attend de nouveau. Les deux
+  forges l'appliquent. Constaté le 2026-11-14 sur nowcast, dont la CI ne tourne pas
+  sur un simple push de branche : une branche y montrait `running` sans aucun
+  pipeline pendant 2 min après chaque push.
 
 Rien n'oblige un provider à les prendre : un outil qui ne colle pas à une forge est
 contourné, pas plié pour elle.
@@ -860,7 +872,7 @@ les détecteurs le voient, comme le reste du monde.
 |---|---|---|---|
 | Un worktree, une nouvelle branche | rien | le mod central, si son agent a lancé la commande | abonnement aux clés de la branche là où `git push` l'enverrait (`02-clients.md`) ; `head_sha` est `null` |
 | Des commits locaux | rien | personne | aucune ; un consommateur compare `head_sha` à son HEAD |
-| `git push` | la branche est créée ou avance, une CI démarre | le mod central | la clé ne change pas, `head_sha` se remplit ; portée `pr`, `pipelines` ; CI attendue |
+| `git push` | la branche est créée ou avance, une CI démarre | le mod central | la clé ne change pas, `head_sha` se remplit ; portée `pr`, `pipelines` ; CI attendue, sauf dans un dépôt dont les pushs de branche n'en démarrent pas (voir la machine à rythme) |
 | `gh pr create` | une PR s'ouvre, sa CI démarre | le mod central, le numéro tiré de l'URL affichée | portée avec `number` : la brique résout la PR, le flux de la branche la montre |
 | D'autres pushs | la tête avance, la PR change | le mod central | comme `git push` |
 | La CI tourne | runs et jobs changent | la brique seule | « CI en cours » : sur GitHub, les check runs du commit, chaque job vu 8 à 15 s après |
