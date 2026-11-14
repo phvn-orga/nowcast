@@ -18,6 +18,17 @@ pub(super) const HEADERS: &[(&str, &str)] = &[
 /// The open PRs one page lists: a full page may leave the branch's out.
 const PAGE: usize = 100;
 
+/// What a reading saw of its head beyond the neutral model, for whether it
+/// starts a CI ([`super::triggers`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// The head commit's message, when the reading got it: that of a branch
+    /// without open PR.
+    pub message: Option<String>,
+    /// The PR is known to conflict with its base.
+    pub conflict: bool,
+}
+
 /// Reads the PR of `branch` in `owner/name` and the CI of its head.
 pub async fn read(
     http: &Http,
@@ -26,7 +37,7 @@ pub async fn read(
     owner: &str,
     name: &str,
     branch: &str,
-) -> Result<BranchReading, Failure> {
+) -> Result<(BranchReading, Facts), Failure> {
     let repo = format!("{api}/repos/{owner}/{name}");
     let get = |url: String| async move { http.get(&url, token, HEADERS).await };
 
@@ -45,10 +56,14 @@ pub async fn read(
         pr = closed.as_array().and_then(|a| a.first()).and_then(pr_of);
     }
     let open_one = pr.as_ref().filter(|p| p.is_open());
+    let mut facts = Facts::default();
     let head_sha = match open_one {
         Some(pr) => Some(pr.head_sha.clone()),
         None => match get(format!("{repo}/branches/{}", encode(branch))).await {
-            Ok(b) => b["commit"]["sha"].as_str().map(str::to_owned),
+            Ok(b) => {
+                facts.message = b["commit"]["commit"]["message"].as_str().map(str::to_owned);
+                b["commit"]["sha"].as_str().map(str::to_owned)
+            }
             Err(Failure::NotFound) => None,
             Err(e) => return Err(e),
         },
@@ -68,12 +83,13 @@ pub async fn read(
         ),
         None => None,
     };
-    Ok(BranchReading {
+    let reading = BranchReading {
         branch: None,
         head_sha,
         pr,
         ci,
-    })
+    };
+    Ok((reading, facts))
 }
 
 /// Reads PR `number` of `owner/name`, whatever its state, its head branch,
@@ -86,19 +102,25 @@ pub async fn read_pr(
     owner: &str,
     name: &str,
     number: u64,
-) -> Result<BranchReading, Failure> {
+) -> Result<(BranchReading, Facts), Failure> {
     let url = format!("{api}/repos/{owner}/{name}/pulls/{number}");
     let p = http.get(&url, token, HEADERS).await?;
     let pr = pr_of(&p).ok_or_else(|| Failure::Unreadable(format!("PR {number} is unreadable")))?;
     let ci = ci(http, api, token, owner, name, &pr.head_sha, Some(number)).await?;
-    Ok(BranchReading {
+    let reading = BranchReading {
         branch: is_repo(&p["head"]["repo"], &format!("{owner}/{name}"))
             .then(|| p["head"]["ref"].as_str().map(str::to_owned))
             .flatten(),
         head_sha: Some(pr.head_sha.clone()),
         pr: Some(pr),
         ci: Some(ci),
-    })
+    };
+    // `mergeable` is `null` until GitHub has computed it.
+    let facts = Facts {
+        message: None,
+        conflict: p["mergeable"] == false,
+    };
+    Ok((reading, facts))
 }
 
 /// Reads the CI of commit `sha` in `owner/name`, which `pr`, when open,
@@ -495,7 +517,8 @@ mod tests {
             let body = if line.contains("/pulls?") {
                 "[]".to_owned()
             } else if line.contains("/branches/feat%2fx") {
-                json!({ "commit": { "sha": "abc" } }).to_string()
+                json!({ "commit": { "sha": "abc", "commit": { "message": "Fix [skip ci]" } } })
+                    .to_string()
             } else if line.contains("/actions/runs?head_sha=abc") {
                 json!({ "workflow_runs": [run(1, "ci.yml", "push", "t", "queued", None)] })
                     .to_string()
@@ -510,9 +533,10 @@ mod tests {
         })
         .await;
         let http = Http::new().unwrap();
-        let reading = read(&http, &server.base(), "t", "o", "r", "feat/x")
+        let (reading, facts) = read(&http, &server.base(), "t", "o", "r", "feat/x")
             .await
             .unwrap();
+        assert_eq!(facts.message.as_deref(), Some("Fix [skip ci]"));
         assert_eq!(reading.head_sha.as_deref(), Some("abc"));
         assert_eq!(reading.pr, None);
         assert_eq!(reading.ci.unwrap().pipelines[0].state, State::Queued);
@@ -535,7 +559,7 @@ mod tests {
         })
         .await;
         let http = Http::new().unwrap();
-        let reading = read(&http, &server.base(), "t", "o", "r", "feat")
+        let (reading, _) = read(&http, &server.base(), "t", "o", "r", "feat")
             .await
             .unwrap();
         assert_eq!(reading, BranchReading::default());
@@ -569,7 +593,7 @@ mod tests {
         })
         .await;
         let http = Http::new().unwrap();
-        let reading = read(&http, &server.base(), "t", "o", "r", "feat")
+        let (reading, _) = read(&http, &server.base(), "t", "o", "r", "feat")
             .await
             .unwrap();
         assert_eq!(reading.pr.unwrap().number, 500);

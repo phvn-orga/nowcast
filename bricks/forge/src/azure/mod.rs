@@ -35,7 +35,7 @@ use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::State;
 use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http, encode};
-use crate::tools::pace::{Pace, Pushed, Pushes, Rhythm};
+use crate::tools::pace::{Pace, Rhythm};
 use crate::tools::remote;
 use detect::{Detected, Detection, Interest};
 use issues::Tracker;
@@ -100,7 +100,6 @@ struct Context {
 pub struct Azure {
     context: Context,
     detection: Detection,
-    pushes: Pushes,
 }
 
 impl Azure {
@@ -118,7 +117,6 @@ impl Azure {
                 kinds: issues::Kinds::default(),
             },
             detection: Detection::default(),
-            pushes: Pushes::default(),
         }
     }
 
@@ -184,7 +182,6 @@ impl Provider for Azure {
             names,
             head,
             memory: read::Memory::default(),
-            pushed: self.pushes.of(&repo.id),
         };
         Watch::spawn(move |refreshes| branch.follow(updates, refreshes, detected))
     }
@@ -544,8 +541,6 @@ struct Branch {
     names: Names,
     head: Head,
     memory: read::Memory,
-    /// What the repository's pushes on a branch without PR taught.
-    pushed: Pushed,
 }
 
 impl Branch {
@@ -559,7 +554,7 @@ impl Branch {
         mut refreshes: UnboundedReceiver<()>,
         mut detected: Detected,
     ) {
-        let mut pace = Pace::new(self.pushed.clone());
+        let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
@@ -634,18 +629,18 @@ impl Branch {
 /// waiting for its build, a build not started) has not shown up yet: a CI
 /// is expected. On an open PR, the policies say whether a build comes, so
 /// nothing more is guessed; a branch without one expects a CI for a while
-/// after a new head, while its repository's pushes start one.
+/// after a new head.
 fn paced(pace: &mut Pace, reading: &mut BranchReading, now: Instant) -> Duration {
     let open = reading
         .pr
         .as_ref()
         .filter(|p| p.is_open())
         .map(|p| p.number);
-    let total = reading.ci.as_ref().map_or(0, |ci| ci.pipelines.len());
-    pace.saw(now, reading.head_sha.as_deref(), open, total);
+    pace.saw(now, reading.head_sha.as_deref(), open);
     let Some(ci) = reading.ci.as_mut() else {
         return pace.next(&RHYTHM, now, 0, false);
     };
+    let total = ci.pipelines.len();
     let shown = ci
         .pipelines
         .iter()
@@ -823,35 +818,6 @@ mod tests {
         assert!(pushed.ci.unwrap().expected_until.is_some());
     }
 
-    /// On a branch without PR, a push that showed no pipeline for the whole
-    /// window stops the next ones expecting a CI; a build queued for one,
-    /// even without a job yet, makes it expected again.
-    #[test]
-    fn a_branch_expects_a_ci_while_its_pushes_start_one() {
-        let t0 = Instant::now();
-        let reading = |head: &str, pipelines| BranchReading {
-            branch: None,
-            head_sha: Some(head.into()),
-            pr: None,
-            ci: Some(Ci {
-                sha: head.into(),
-                pipelines,
-                ..Ci::default()
-            }),
-        };
-        let mut pace = Pace::new(Pushed::default());
-        paced(&mut pace, &mut reading("a", vec![]), t0);
-        paced(&mut pace, &mut reading("b", vec![]), t0);
-        let after = t0 + Duration::from_secs(121);
-        paced(&mut pace, &mut reading("b", vec![]), after);
-        let mut pushed = reading("c", vec![]);
-        assert_eq!(paced(&mut pace, &mut pushed, after), RHYTHM.normal);
-        assert_eq!(pushed.ci.unwrap().expected_until, None, "starts none");
-        let mut queued = reading("c", vec![pipeline(State::Queued, vec![])]);
-        assert_eq!(paced(&mut pace, &mut queued, after), RHYTHM.expected_first);
-        assert!(queued.ci.unwrap().expected_until.is_some());
-    }
-
     /// No token is `no_credentials`; a refused one is forgotten; a budget
     /// almost spent is a rate limit, waited out.
     #[tokio::test]
@@ -875,7 +841,6 @@ mod tests {
             names: names(org, "p", "r").unwrap(),
             head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
-            pushed: Pushed::default(),
         };
         *azure.context.token.lock().await = Some(("t".into(), None, Stamp::default()));
         assert_eq!(
@@ -926,7 +891,6 @@ mod tests {
             names: names("o", "p", "r").unwrap(),
             head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
-            pushed: Pushed::default(),
         };
         let no_credentials = (Err(Failure::NoCredentials), None);
         assert_eq!(branch.read_once().await, no_credentials);
@@ -970,7 +934,6 @@ mod tests {
             names: names("o", "p", "r").unwrap(),
             head: Head::Branch("feat".into()),
             memory: read::Memory::default(),
-            pushed: Pushed::default(),
         };
         fake.choose(Forge::Azure, Some(Source::Token), Some("good"));
         assert_eq!(branch.read_once().await, (Err(Failure::NotFound), None));

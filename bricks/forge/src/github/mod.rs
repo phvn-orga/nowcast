@@ -2,7 +2,8 @@
 //! a PR by its number, through the REST API ([`read`]), with the checks the
 //! base of its open PR requires ([`required`]) and the PR's entry in the
 //! base's merge queue ([`queue`]). A repository's open issues, and one
-//! issue, are followed too ([`issues`]).
+//! issue, are followed too ([`issues`]). Whether a new head starts a CI
+//! comes from the workflows' triggers at that commit ([`triggers`]).
 //!
 //! The detectors of each repository ([`detect`]) see what moved there and
 //! wake the targets it touches, which then read in detail. A reading that
@@ -19,6 +20,7 @@ mod issues;
 mod queue;
 mod read;
 mod required;
+mod triggers;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -31,12 +33,14 @@ use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{EXPECTED_FOR, Pace, Pushed, Pushes, Rhythm};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm, Starts};
 use crate::tools::remote;
 use detect::{Access, Detected, Detection, Interest};
 use issues::{Accounts, Tracker};
 use queue::Queues;
+use read::Facts;
 use required::{Base, Required};
+use triggers::{Event, Repository, Workflows};
 
 /// GitHub's REST API.
 pub const API: &str = "https://api.github.com";
@@ -75,7 +79,7 @@ pub struct GitHub {
     required: Required,
     queues: Queues,
     detection: Detection,
-    pushes: Pushes,
+    workflows: Workflows,
 }
 
 impl GitHub {
@@ -91,7 +95,7 @@ impl GitHub {
             required: Required::default(),
             queues: Queues::default(),
             detection: Detection::default(),
-            pushes: Pushes::default(),
+            workflows: Workflows::default(),
         }
     }
 
@@ -175,7 +179,8 @@ impl Provider for GitHub {
             required: self.required.clone(),
             queues: self.queues.clone(),
             memory: Memory::default(),
-            pushed: self.pushes.of(&repo.id),
+            workflows: self.workflows.clone(),
+            starts: None,
             owner,
             name,
             head,
@@ -202,8 +207,10 @@ struct Branch {
     required: Required,
     queues: Queues,
     memory: Memory,
-    /// What the repository's pushes on a branch without PR taught.
-    pushed: Pushed,
+    workflows: Workflows,
+    /// Whether the head read last starts a CI, with what it is about: the
+    /// head, and the open PR with its base.
+    starts: Option<(Subject, Starts)>,
     owner: String,
     name: String,
     head: Head,
@@ -220,7 +227,7 @@ impl Branch {
         mut refreshes: UnboundedReceiver<()>,
         mut detected: Detected,
     ) {
-        let mut pace = Pace::new(self.pushed.clone());
+        let mut pace = Pace::default();
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
@@ -235,8 +242,8 @@ impl Branch {
                             .as_ref()
                             .filter(|p| p.is_open())
                             .map(|p| p.number),
-                        reading.ci.as_ref().map_or(0, |ci| ci.pipelines.len()),
                     );
+                    pace.starts(self.starts.as_ref().map_or(Starts::Maybe, |(_, s)| *s));
                     // A PR in the merge queue moves as its queue CI runs.
                     let queued = reading.pr.as_ref().is_some_and(|p| p.queue.is_some());
                     let delay = match &mut reading.ci {
@@ -297,9 +304,10 @@ impl Branch {
             Head::Pr(number) => read::read_pr(http, api, &token, owner, name, *number).await,
         };
         let failure = match read {
-            Ok(mut reading) => {
+            Ok((mut reading, facts)) => {
                 let names = self.mark_required(&token, &mut reading).await;
                 self.read_queue(&token, &mut reading, names.as_ref()).await;
+                self.read_starts(&token, &reading, &facts).await;
                 return (Ok(reading), None);
             }
             Err(failure) => failure,
@@ -307,6 +315,57 @@ impl Branch {
         let at = format!("github.com/{}/{}{}", self.owner, self.name, self.head);
         let (failure, wait) = failed(&self.tokens, &self.owner, &at, failure);
         (Err(failure), wait)
+    }
+}
+
+/// What a CI is about: a head, if any, and the open PR with its base.
+type Subject = (Option<String>, Option<(u64, String)>);
+
+impl Branch {
+    /// Works out whether the head `reading` found starts a CI, once per
+    /// head and open PR. The first reading expects no CI whatever, a branch
+    /// not pushed has no head, and a head whose CI showed up started one:
+    /// none of them reads the workflows.
+    async fn read_starts(&mut self, token: &str, reading: &BranchReading, facts: &Facts) {
+        let open = reading.pr.as_ref().filter(|p| p.is_open());
+        let subject = (
+            reading.head_sha.clone(),
+            open.map(|p| (p.number, p.base.clone())),
+        );
+        let starts = match (&self.starts, &reading.head_sha) {
+            (Some((read, _)), _) if *read == subject => return,
+            (None, _) | (_, None) => Starts::Maybe,
+            _ if reading
+                .ci
+                .as_ref()
+                .is_some_and(|ci| !ci.pipelines.is_empty()) =>
+            {
+                Starts::Certain
+            }
+            (Some(_), Some(sha)) => {
+                let event = match (open, &self.head, &reading.branch) {
+                    (Some(pr), _, _) => Some(Event::PullRequest { base: &pr.base }),
+                    (None, Head::Branch(branch), _) | (None, Head::Pr(_), Some(branch)) => {
+                        Some(Event::Push { branch })
+                    }
+                    (None, Head::Pr(_), None) => None,
+                };
+                let repo = Repository {
+                    http: &self.http,
+                    api: &self.api,
+                    token,
+                    owner: &self.owner,
+                    name: &self.name,
+                };
+                match event {
+                    Some(event) => {
+                        triggers::starts(&repo, &self.workflows, sha, event, facts).await
+                    }
+                    None => Starts::Maybe,
+                }
+            }
+        };
+        self.starts = Some((subject, starts));
     }
 }
 
@@ -683,7 +742,8 @@ mod tests {
             required: Required::default(),
             queues: Queues::default(),
             memory: Memory::default(),
-            pushed: Pushed::default(),
+            workflows: Workflows::default(),
+            starts: None,
             owner: owner.into(),
             name: "r".into(),
             head: Head::Branch("feat".into()),
@@ -1431,6 +1491,74 @@ mod tests {
         let (target, _) = rx.recv().await.unwrap();
         assert_eq!(target, 2);
         assert_eq!(started(&server), [2, 2, 2]);
+    }
+
+    /// A push on a branch without PR expects a CI only when a workflow at
+    /// the pushed commit runs on it; the first reading asks nothing.
+    #[tokio::test]
+    async fn a_push_expects_a_ci_only_when_a_workflow_runs_on_it() {
+        use base64::Engine as _;
+        let cases = [
+            (
+                "on:\n  push:\n    branches: [main]\n  pull_request:\n",
+                false,
+            ),
+            ("on: push\n", true),
+        ];
+        // A branch read first with a head, or not pushed yet.
+        for (first, (workflow, expected)) in [Some("a"), None]
+            .into_iter()
+            .flat_map(|first| cases.map(|case| (first, case)))
+        {
+            let head = Arc::new(Mutex::new(first));
+            let served = head.clone();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(workflow);
+            let server = Server::start(move |request| {
+                let line = request.lines().next().unwrap_or_default().to_owned();
+                let body = if line.contains("/branches/feat") {
+                    match *served.lock().unwrap() {
+                        Some(sha) => json!({ "commit": { "sha": sha } }),
+                        None => return (404, vec![], String::new()),
+                    }
+                } else if line.contains("/contents/.github/workflows?ref=") {
+                    json!([{ "type": "file", "path": ".github/workflows/ci.yml", "sha": "w" }])
+                } else if line.contains("/actions/workflows?") {
+                    json!({ "workflows": [] })
+                } else if line.contains("/git/blobs/w ") {
+                    json!({ "encoding": "base64", "content": encoded })
+                } else if line.contains("/actions/runs") {
+                    json!({ "workflow_runs": [] })
+                } else if line.contains("/check-runs") {
+                    json!({ "check_runs": [] })
+                } else if line.contains("/status") {
+                    json!({ "statuses": [] })
+                } else {
+                    json!([])
+                };
+                (200, vec![], body.to_string())
+            })
+            .await;
+            let github = provider(&server);
+            let repo = github.recognise("git@github.com:o/r.git").unwrap();
+            let (tx, mut rx) = unbounded_channel();
+            let feat = github.follow(&repo, Head::Branch("feat".into()), Updates::new(1, tx));
+            let _ = rx.recv().await.unwrap();
+            assert_eq!(asked(&server, "/contents/"), 0, "the first reading");
+            *head.lock().unwrap() = Some("b");
+            feat.refresh();
+            let (_, outcome) = rx.recv().await.unwrap();
+            let Ok(Reading::Branch(reading)) = outcome else {
+                panic!("{outcome:?}");
+            };
+            let ci = reading.ci.unwrap();
+            assert_eq!(ci.sha, "b");
+            assert_eq!(
+                ci.expected_until.is_some(),
+                expected,
+                "{first:?} {workflow}"
+            );
+            assert_eq!(asked(&server, "/contents/.github/workflows?ref=b "), 1);
+        }
     }
 
     /// A `refresh` opens the target's own fast window: with nothing moving,
