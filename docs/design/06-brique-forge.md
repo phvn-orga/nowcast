@@ -312,6 +312,13 @@ s'engage aussi sur un comportement :
 Le reste lui appartient : le protocole (REST, GraphQL, autre), le moment de lire, le
 regroupement des lectures entre flux, le cache, la gestion de ses quotas.
 
+**Un journal de débogage**, éteint par défaut, s'allume quand l'environnement du
+service porte `NOWCAST_FORGE_LOG=debug`. La brique écrit alors une ligne par
+`refresh` reçu (le flux ou la portée, les cibles couvertes), par interrogation d'un
+détecteur (la réponse, ce qui a bougé, les cibles réveillées) et par lecture d'une
+cible (son issue, publiée ou inchangée). Les lignes portent les identifiants de dépôt
+normalisés, jamais l'URL d'un remote ni un jeton.
+
 ### Des outils, pas un tronc commun
 
 La brique offre quelques outils, qu'un provider prend s'ils lui vont :
