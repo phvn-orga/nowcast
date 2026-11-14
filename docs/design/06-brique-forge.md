@@ -204,15 +204,23 @@ ceux-là (voir « Les providers »).
    attendue ;
 4. sinon `missing` s'il manque un obligatoire (`required_state` seulement) ;
 5. sinon `waiting` si un élément attend une personne ;
-6. sinon `pass` si un élément passe, `none` si tous ont été sautés.
+6. sinon `pass` si un élément passe ; si tous ont été sautés, `none` pour `state`
+   et `pass` pour `required_state`.
 
 Pour `required_state`, un obligatoire absent donne `running`, pas `missing`, tant
 qu'un élément quelconque tourne ou qu'une CI est attendue : un job obligatoire peut
 attendre un job qui tourne sans l'être. `missing` ne vient qu'une fois que plus rien
 ne tourne.
 
-Un élément sauté ou d'état inconnu ne compte pas. `jobs` compte les jobs terminés et
-le total, pour une progression.
+Des obligatoires tous sautés donnent `pass`, car l'exigence est remplie : GitHub
+tient un contrôle obligatoire sauté pour satisfait, Azure DevOps de même une
+politique `notApplicable`. `state`, lui, reste `none`. Décidé le 2026-11-14 : sur
+une PR de nowcast qui ne changeait qu'un fichier Markdown, `check`,
+`check-agents-md` et `claude-code` étaient sautés et `required_state` valait
+`none`, qui se lit « aucune CI obligatoire ».
+
+Hors ce cas, un élément sauté ou d'état inconnu ne compte pas. `jobs` compte les
+jobs terminés et le total, pour une progression.
 
 ## `forge.issues/v1` et `forge.issue/v1`
 
