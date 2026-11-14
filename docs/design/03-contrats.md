@@ -141,6 +141,12 @@ changement de session (`/clear`, reprise). Tout autre appel avant lui, sauf
 `GET /v1/service` et `GET /v1/status`, répond `428` avec le code
 `session_required`.
 
+Une déclaration remplace la session de l'ancrage. Avec `"replace": false`, elle ne
+vaut que pour un ancrage sans session et laisse sinon celle déjà déclarée, en une
+seule étape : c'est ainsi que l'outil en ligne de commande lancé sans identifiant,
+depuis l'outil Bash d'un agent par exemple, ne remplace pas la session que
+l'agent a déclarée (`02-clients.md`). La réponse est `204` dans les deux cas.
+
 Le service oublie les sessions à chaque arrêt, l'arrêt à vide compris (section 4). Un
 `428` reçu en cours de session signifie donc que le service a été relancé : le client
 déclare à nouveau sa session, puis renvoie sa requête.
