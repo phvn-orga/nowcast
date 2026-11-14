@@ -230,14 +230,17 @@ impl<S: Scope> Watched<S> {
         detectors.retain(|key, _| watchers.values().any(|(i, ..)| S::keys(i).contains(key)));
     }
 
-    /// Wakes the targets one of `moved` touches, and returns their names.
+    /// Wakes the targets one of `moved` touches, and returns their names
+    /// when the debug lines are on, nothing otherwise.
     fn wake(&self, moved: &[S::Moved]) -> Vec<String> {
         let state = self.state.lock().unwrap();
         let mut woken = Vec::new();
         for (interest, label, wake) in state.watchers.values() {
             if moved.iter().any(|m| S::touches(m, interest)) {
                 let _ = wake.send(());
-                woken.push(label.clone());
+                if crate::debug_on() {
+                    woken.push(label.clone());
+                }
             }
         }
         woken
@@ -443,9 +446,12 @@ impl<S: Scope> Poller<S> {
             Polled::Answered { changed, moved } => {
                 self.answered();
                 self.throttle.answered(changed);
-                let woken = match self.watched.upgrade() {
-                    Some(watched) if !moved.is_empty() => watched.wake(&moved),
-                    _ => Vec::new(),
+                let woken = if moved.is_empty() {
+                    Vec::new()
+                } else {
+                    self.watched
+                        .upgrade()
+                        .map_or_else(Vec::new, |watched| watched.wake(&moved))
                 };
                 debug!(
                     "poll {} answer={} moved={moved:?} woke={}",

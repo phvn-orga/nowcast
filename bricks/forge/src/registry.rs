@@ -456,7 +456,10 @@ impl Core {
         debug!(
             "refresh-scope repo={} types={} number={} targets={}",
             repo.id,
-            scope.types.as_ref().map_or("all".into(), |t| t.join(",")),
+            scope
+                .types
+                .as_ref()
+                .map_or("all".into(), |t| crate::list(t.iter())),
             scope.number.map_or("-".into(), |n| n.to_string()),
             crate::list(covered.into_iter().map(label)),
         );

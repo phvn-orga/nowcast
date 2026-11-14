@@ -21,9 +21,11 @@
 //! each line `forge: debug: ...` tells one step, to follow a refresh that
 //! changes nothing:
 //!
-//! - `refresh <flow> target=<target>`, a flow's refresh, and
+//! - `refresh <flow> target=<target>`, a flow's refresh (`refresh <flow>
+//!   unknown` for a flow the brick does not publish), and
 //!   `refresh-scope repo=<repo> types=<kinds> number=<n> targets=<targets>`,
-//!   a scoped one, with the targets it covers;
+//!   a scoped one, with the targets it covers (`refresh-scope on a remote
+//!   no provider recognises` when no provider takes it);
 //! - `poll <detector> answer=<answer> moved=<items> woke=<targets>`, a
 //!   detector's poll: `first`, `changed`, `unchanged` (a `304` on GitHub),
 //!   `no-token` or `failed:<why>`;
