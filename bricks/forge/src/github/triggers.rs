@@ -63,6 +63,54 @@ pub enum Event<'a> {
     },
 }
 
+impl std::fmt::Display for Event<'_> {
+    /// `push:<branch>` or `pr:<base>:<activities>`, the activities joined
+    /// by `+`, as the log names an event.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Event::Push { branch } => write!(f, "push:{branch}"),
+            Event::PullRequest { base, activities } => {
+                write!(f, "pr:{base}:{}", activities.join("+"))
+            }
+        }
+    }
+}
+
+/// An answer, and why when it is `Maybe`, which the log tells.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Answer {
+    starts: Starts,
+    why: &'static str,
+}
+
+const NONE: Answer = Answer {
+    starts: Starts::None,
+    why: "",
+};
+
+const CERTAIN: Answer = Answer {
+    starts: Starts::Certain,
+    why: "",
+};
+
+const fn maybe(why: &'static str) -> Answer {
+    Answer {
+        starts: Starts::Maybe,
+        why,
+    }
+}
+
+impl std::fmt::Display for Answer {
+    /// `none`, `certain` or `maybe:<why>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.starts {
+            Starts::None => f.write_str("none"),
+            Starts::Certain => f.write_str("certain"),
+            Starts::Maybe => write!(f, "maybe:{}", self.why),
+        }
+    }
+}
+
 /// The `on` of each workflow file read, by blob: `None` for a file that
 /// does not parse, or has no `on`. Shared by every branch of every
 /// repository: a blob is the same content wherever it is.
@@ -101,19 +149,54 @@ pub async fn starts(
     events: &[Event<'_>],
     facts: &Facts,
 ) -> Starts {
+    let at = format!(
+        "github.com/{}/{}@{}",
+        repo.owner,
+        repo.name,
+        sha.get(..7).unwrap_or(sha)
+    );
+    let (answer, by_event) = answer(repo, workflows, sha, events, facts, &at).await;
+    debug!(
+        "triggers {at} answer={answer} events={}",
+        crate::list(
+            events
+                .iter()
+                .zip(&by_event)
+                .map(|(event, answer)| format!("{event}={answer}"))
+        )
+    );
+    answer.starts
+}
+
+/// [`starts`], with why, and what the workflows say of each event; `at`
+/// names the repository and commit in the log.
+async fn answer(
+    repo: &Repository<'_>,
+    workflows: &Workflows,
+    sha: &str,
+    events: &[Event<'_>],
+    facts: &Facts,
+    at: &str,
+) -> (Answer, Vec<Answer>) {
     let base = format!("{}/repos/{}/{}", repo.api, repo.owner, repo.name);
-    let get = |url: String| async move { repo.http.get(&url, repo.token, HEADERS).await };
+    let get = |url: String| async move { repo.http.get_changed(&url, repo.token, HEADERS).await };
+    let every = |answer: Answer| (answer, vec![answer; events.len()]);
     let (dir, states) = tokio::join!(
         get(format!("{base}/contents/.github/workflows?ref={sha}")),
         get(format!("{base}/actions/workflows?per_page=100")),
     );
+    debug!("triggers {at} get=contents status={}", status(&dir));
+    debug!("triggers {at} get=workflows status={}", status(&states));
     let dir = match dir {
-        Ok(dir) => dir,
-        Err(Failure::NotFound) => return Starts::None,
-        Err(_) => return Starts::Maybe,
+        Ok((dir, _)) => dir,
+        Err(Failure::NotFound) => return every(NONE),
+        Err(_) => return every(maybe("contents-failed")),
     };
-    let (Some(files), Ok(states)) = (dir.as_array(), states) else {
-        return Starts::Maybe;
+    let Some(files) = dir.as_array() else {
+        return every(maybe("contents-unparsable"));
+    };
+    let Ok((states, _)) = states else {
+        return every(maybe("workflows-failed"));
     };
     // A workflow file not listed yet is active.
     let disabled: HashSet<&str> = states["workflows"]
@@ -123,7 +206,8 @@ pub async fn starts(
         .filter(|w| w["state"] != "active")
         .filter_map(|w| w["path"].as_str())
         .collect();
-    let mut answer = Starts::None;
+    let mut answer = NONE;
+    let mut by_event = vec![NONE; events.len()];
     for file in files {
         let path = file["path"].as_str().unwrap_or_default();
         if file["type"] != "file"
@@ -134,27 +218,44 @@ pub async fn starts(
         }
         let on = match file["sha"].as_str() {
             Some(blob) => match workflows.get(blob) {
-                Some(on) => Some(on),
-                None => match get(format!("{base}/git/blobs/{blob}")).await {
-                    Ok(body) => {
-                        let on = Arc::new(on_of(&body));
-                        workflows.keep(blob, on.clone());
-                        Some(on)
+                Some(on) => {
+                    debug!("triggers {at} blob={path} cache=hit");
+                    Ok(on)
+                }
+                None => {
+                    let body = get(format!("{base}/git/blobs/{blob}")).await;
+                    debug!(
+                        "triggers {at} blob={path} cache=miss status={}",
+                        status(&body)
+                    );
+                    match body {
+                        Ok((body, _)) => {
+                            let on = Arc::new(on_of(&body));
+                            workflows.keep(blob, on.clone());
+                            Ok(on)
+                        }
+                        Err(_) => Err("read-failed"),
                     }
-                    Err(_) => None,
-                },
+                }
             },
-            None => None,
+            None => Err("no-blob"),
         };
-        let starts = match on.as_deref() {
-            Some(Some(on)) => events
-                .iter()
-                .map(|event| workflow_starts(on, *event))
-                .fold(Starts::None, likelier),
-            _ => Starts::Maybe,
+        let (starts, each) = match on.as_deref() {
+            Ok(Some(on)) => {
+                let each: Vec<Answer> = events
+                    .iter()
+                    .map(|event| workflow_starts(on, *event))
+                    .collect();
+                (each.iter().copied().fold(NONE, likelier), each)
+            }
+            Ok(None) => every(maybe("unparsable")),
+            Err(why) => every(maybe(why)),
         };
+        for (kept, starts) in by_event.iter_mut().zip(each) {
+            *kept = likelier(*kept, starts);
+        }
         answer = likelier(answer, starts);
-        if answer == Starts::Certain {
+        if answer.starts == Starts::Certain {
             break;
         }
     }
@@ -162,10 +263,26 @@ pub async fn starts(
         let m = m.to_lowercase();
         SKIP_MARKERS.iter().any(|marker| m.contains(marker))
     });
-    if answer == Starts::Certain && (skipped || facts.conflict) {
-        Starts::Maybe
-    } else {
-        answer
+    let answer = match answer.starts {
+        Starts::Certain if skipped => maybe("skip-marker"),
+        Starts::Certain if facts.conflict => maybe("conflict"),
+        _ => answer,
+    };
+    (answer, by_event)
+}
+
+/// How the log tells a request's answer: never a failure's message, which
+/// may name the URL.
+fn status(answer: &Result<(Arc<Value>, bool), Failure>) -> &'static str {
+    match answer {
+        Ok((_, true)) => "200",
+        Ok((_, false)) => "304",
+        Err(Failure::NotFound) => "404",
+        Err(Failure::Unauthorized) => "failed:unauthorized",
+        Err(Failure::Forbidden) => "failed:forbidden",
+        Err(Failure::Limited(_)) => "failed:limited",
+        Err(Failure::Unreadable(_)) => "failed:unreadable",
+        Err(Failure::Unreachable(_)) => "failed:unreachable",
     }
 }
 
@@ -189,8 +306,8 @@ fn on_of(blob: &Value) -> Option<Value> {
 }
 
 /// Of two answers, the one more likely to start a CI.
-fn likelier(a: Starts, b: Starts) -> Starts {
-    let rank = |s| match s {
+fn likelier(a: Answer, b: Answer) -> Answer {
+    let rank = |a: Answer| match a.starts {
         Starts::None => 0,
         Starts::Maybe => 1,
         Starts::Certain => 2,
@@ -201,48 +318,48 @@ fn likelier(a: Starts, b: Starts) -> Starts {
 /// Whether a workflow whose triggers are `on` runs on `event`. `on` is read
 /// loosely: an event name, a list of them, or a map from event to its
 /// filters; what is not understood is `Maybe`.
-fn workflow_starts(on: &Value, event: Event<'_>) -> Starts {
+fn workflow_starts(on: &Value, event: Event<'_>) -> Answer {
     let names: &[&str] = match event {
         Event::Push { .. } => &["push"],
         Event::PullRequest { .. } => &["pull_request", "pull_request_target"],
     };
     let named = |name: &Value| match name.as_str() {
         Some(name) if names.contains(&name) => at_head(name, filtered(name, &Value::Null, event)),
-        Some(_) => Starts::None,
-        None => Starts::Maybe,
+        Some(_) => NONE,
+        None => maybe("unsupported-trigger"),
     };
     match on {
         Value::String(_) => named(on),
-        Value::Array(list) => list.iter().map(named).fold(Starts::None, likelier),
+        Value::Array(list) => list.iter().map(named).fold(NONE, likelier),
         Value::Object(map) => names
             .iter()
             .filter_map(|name| Some((*name, map.get(*name)?)))
             .map(|(name, filters)| at_head(name, filtered(name, filters, event)))
-            .fold(Starts::None, likelier),
-        _ => Starts::Maybe,
+            .fold(NONE, likelier),
+        _ => maybe("unsupported-trigger"),
     }
 }
 
 /// What the head's workflow says of event `name`, as far as the head tells:
 /// GitHub takes a `pull_request_target` workflow from the base repository's
 /// default branch, so the head's is a hint at most.
-fn at_head(name: &str, starts: Starts) -> Starts {
-    if name == "pull_request_target" && starts == Starts::Certain {
-        Starts::Maybe
+fn at_head(name: &str, answer: Answer) -> Answer {
+    if name == "pull_request_target" && answer.starts == Starts::Certain {
+        maybe("pull_request_target")
     } else {
-        starts
+        answer
     }
 }
 
 /// Whether event `name` with `filters` runs on `event`: a push's branch
 /// filters apply to the pushed branch, a PR's to its base; a push filtered
 /// on tags only runs on no branch.
-fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Starts {
+fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Answer {
     let none = Map::new();
     let filters = match filters {
         Value::Null => &none,
         Value::Object(filters) => filters,
-        _ => return Starts::Maybe,
+        _ => return maybe("unsupported-filter"),
     };
     let (branch, activities) = match event {
         Event::Push { branch } => (branch, &[][..]),
@@ -253,8 +370,8 @@ fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Starts {
     {
         match strings(types) {
             Some(types) if types.iter().any(|t| activities.contains(t)) => {}
-            Some(_) => return Starts::None,
-            None => return Starts::Maybe,
+            Some(_) => return NONE,
+            None => return maybe("unsupported-filter"),
         }
     } else if name != "push"
         && !activities
@@ -262,30 +379,30 @@ fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Starts {
             .any(|a| OPENED.contains(a) || SYNCHRONIZED.contains(a))
     {
         // Without `types`, a PR runs on its opening, reopening and pushes only.
-        return Starts::None;
+        return NONE;
     }
     let on_branch = match (filters.get("branches"), filters.get("branches-ignore")) {
-        (Some(_), Some(_)) => return Starts::Maybe,
+        (Some(_), Some(_)) => return maybe("branches-and-ignore"),
         (Some(patterns), None) => match strings(patterns) {
             Some(patterns) => included(&patterns, branch),
-            None => return Starts::Maybe,
+            None => return maybe("unsupported-filter"),
         },
         (None, Some(patterns)) => match strings(patterns) {
             // GitHub does not say what a negated pattern does there.
             Some(patterns) if patterns.iter().any(|p| p.starts_with('!')) => {
-                return Starts::Maybe;
+                return maybe("negated-ignore");
             }
             Some(patterns) => !patterns.iter().any(|p| glob(p, branch)),
-            None => return Starts::Maybe,
+            None => return maybe("unsupported-filter"),
         },
         (None, None) => !(name == "push" && has_any(filters, &["tags", "tags-ignore"])),
     };
     if !on_branch {
-        Starts::None
+        NONE
     } else if has_any(filters, &["paths", "paths-ignore"]) {
-        Starts::Maybe
+        maybe("path-filter")
     } else {
-        Starts::Certain
+        CERTAIN
     }
 }
 
@@ -490,7 +607,7 @@ mod tests {
     }
 
     fn push(on: &str, branch: &str) -> Starts {
-        workflow_starts(&yaml(on)["on"], Event::Push { branch })
+        workflow_starts(&yaml(on)["on"], Event::Push { branch }).starts
     }
 
     fn pr(on: &str, base: &str) -> Starts {
@@ -498,7 +615,7 @@ mod tests {
     }
 
     fn pr_as(on: &str, base: &str, activities: &[&str]) -> Starts {
-        workflow_starts(&yaml(on)["on"], Event::PullRequest { base, activities })
+        workflow_starts(&yaml(on)["on"], Event::PullRequest { base, activities }).starts
     }
 
     #[test]
@@ -649,6 +766,28 @@ mod tests {
         let tags = "on:\n  pull_request:\n    tags: ['v*']\n";
         assert_eq!(pr(tags, "main"), Starts::Certain, "a PR has no tags");
         assert_eq!(push("on: pull_request", "main"), Starts::None);
+    }
+
+    #[test]
+    fn a_maybe_tells_why() {
+        let why = |on: &str, event| workflow_starts(&yaml(on)["on"], event).to_string();
+        let push = Event::Push { branch: "main" };
+        let pr = Event::PullRequest {
+            base: "main",
+            activities: SYNCHRONIZED,
+        };
+        assert_eq!(why("on: push", push), "certain");
+        assert_eq!(why("on: pull_request", push), "none");
+        assert_eq!(
+            why("on:\n  push:\n    paths: [a]\n", push),
+            "maybe:path-filter"
+        );
+        assert_eq!(
+            why("on: pull_request_target", pr),
+            "maybe:pull_request_target"
+        );
+        assert_eq!(why("on: 3", push), "maybe:unsupported-trigger");
+        assert_eq!(pr.to_string(), "pr:main:synchronize");
     }
 
     /// The repository's workflows, as nowcast has them.

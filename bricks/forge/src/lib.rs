@@ -30,7 +30,17 @@
 //!   detector's poll: `first`, `changed`, `unchanged` (a `304` on GitHub),
 //!   `no-token` or `failed:<why>`;
 //! - `read <target> outcome=<ok or failure> published=<kinds>` or
-//!   `unchanged`, a target's reading.
+//!   `unchanged`, a target's reading;
+//! - `triggers <repo>@<sha> answer=<answer> events=<event>=<answer>,...`,
+//!   whether a GitHub head starts a CI, overall and by event (`push:<branch>`
+//!   or `pr:<base>:<activities>`, as the workflows say before a skip marker
+//!   or a conflict): `none`, `certain` or `maybe:<why>` (`path-filter`,
+//!   `skip-marker`, `conflict`, `pull_request_target`, `unparsable`,
+//!   `read-failed`, `unsupported-trigger`...);
+//! - `triggers <repo>@<sha> get=<contents or workflows> status=<status>`
+//!   and `triggers <repo>@<sha> blob=<path> cache=hit` or `cache=miss
+//!   status=<status>`, the requests of that reading: `200`, `304`, `404`
+//!   or `failed:<kind>`.
 //!
 //! A target reads as `branch/<repo>#<branch>`, `pr/<repo>!<number>`,
 //! `issues/<tracker>` or `issue/<tracker>#<number>`. No line carries a
