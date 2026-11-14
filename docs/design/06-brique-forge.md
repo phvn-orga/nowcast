@@ -1,6 +1,6 @@
 # La brique forge
 
-État au 2026-11-10 : conception refaite, implémentation à reprendre sous #52. Brique
+État au 2026-11-10 : conception refaite sous #52, implémentation dans #125. Brique
 native (`01-briques.md`), qui remplace le premier jet décrit dans `00-cadrage.md`.
 
 La brique est organisée par usages : une PR, des pipelines, des issues. Chaque
@@ -94,7 +94,8 @@ client s'abonne à l'un, à l'autre, ou aux deux, sans lecture de plus.
 - **`dequeued`** dit pourquoi la PR est sortie de la file sans être mergée :
   `{"reason": "…", "at": "…"}`, la raison telle que la forge la donne (CI en échec,
   conflit, retrait à la main). Il disparaît quand la PR rentre dans la file ou
-  change de tête.
+  change de tête. Un retrait antérieur à la dernière entrée de la PR dans la file
+  est ignoré.
 
 ## `forge.pipelines/v1`
 
@@ -189,6 +190,11 @@ ceux-là (voir « Les providers »).
 5. sinon `waiting` si un élément attend une personne ;
 6. sinon `pass` si un élément passe, `none` si tous ont été sautés.
 
+Pour `required_state`, un obligatoire absent donne `running`, pas `missing`, tant
+qu'un élément quelconque tourne ou qu'une CI est attendue : un job obligatoire peut
+attendre un job qui tourne sans l'être. `missing` ne vient qu'une fois que plus rien
+ne tourne.
+
 Un élément sauté ou d'état inconnu ne compte pas. `jobs` compte les jobs terminés et
 le total, pour une progression.
 
@@ -209,7 +215,8 @@ Une issue est un élément de suivi de la forge : une issue sur GitHub, un work 
 sur Azure DevOps.
 
 - `tracker` est le `<suivi>` de la clé ; `mine`, les issues ouvertes assignées au
-  compte qui lit (`account`) ; `others`, les autres. Au plus 200 issues, les plus
+  compte qui lit (`account`, `null` avant la première lecture) ; `others`, les
+  autres. Au plus 200 issues, les plus
   récemment créées, pour voir ce qui vient d'être ouvert ; `truncated` dit qu'il y en a d'autres.
 - `number` est le numéro que la forge affiche ; `type`, le type de l'élément tel que
   la forge le nomme (`Bug`, `User Story`), `null` quand elle n'en donne pas. Les work
@@ -220,7 +227,9 @@ sur Azure DevOps.
 
 `forge.issue/v1` vaut `{"tracker", "number", "title", "type", "state", "url",
 "source"}`, où `state` vaut `open` ou `closed`. Pour un numéro qui n'existe pas, les
-champs valent `null` et `source.status` vaut `not_found`.
+champs valent `null` et `source.status` vaut `not_found`. Une issue lue puis devenue
+`not_found` (supprimée ou plus visible, `410` compris) a aussi ses champs à `null`,
+contrairement aux autres échecs, qui gardent la dernière valeur.
 
 ## `source`
 
@@ -229,8 +238,8 @@ L'état de la lecture, le même pour toutes les sortes : `pending` (pas encore l
 muette), `unauthorized` (jeton refusé), `not_found`
 (dépôt inexistant ou invisible au compte), `rate_limited`, `unreachable` (réseau),
 `unreadable` (réponse dans un format inattendu). `as_of` date la dernière lecture
-réussie. Une erreur garde la dernière valeur lue : le flux reste servi, ce n'est pas
-un `flow-error`.
+réussie. Une erreur garde la dernière valeur lue (sauf le `not_found` d'une issue,
+plus haut) : le flux reste servi, ce n'est pas un `flow-error`.
 
 ## Le cœur et les providers
 
@@ -321,8 +330,11 @@ Pour chaque forge, l'utilisateur choisit d'où vient le jeton : la CLI de la for
 
 - **Le choix se fait à la configuration de la brique** (`nowcast bricks configure
   forge`, que `enable` lance aussi, `03-contrats.md`), forge par forge. La brique
-  garde le mode choisi dans sa propre configuration, non secrète ; un jeton va dans
-  le trousseau du système.
+  garde le mode choisi dans `$XDG_CONFIG_HOME/nowcast/forge/config.toml`, non
+  secret : une table par forge utilisée, `source = "cli"` ou `"token"`.
+- **Un jeton va dans le trousseau Secret Service**, sous les attributs
+  `application=nowcast`, `brick=forge` et `forge=github` ou `forge=azure`. La brique
+  ne déverrouille jamais un trousseau verrouillé ; seul `configure` le fait.
 - **Seule la source choisie est lue.** Si elle ne donne pas de jeton, le flux publie
   `no_credentials` ; si la forge refuse le jeton, `unauthorized`. La brique ne
   bascule jamais d'elle-même vers l'autre source. Une forge non configurée publie
@@ -332,7 +344,8 @@ Pour chaque forge, l'utilisateur choisit d'où vient le jeton : la CLI de la for
   `no_credentials` ou un `unauthorized`, la lecture suivante relit la configuration.
 - **Le service lancé par systemd atteint le trousseau** : `gh auth token`, dont le
   jeton y est rangé, répond depuis une unité `systemd-run --user` (vérifié le
-  2026-11-10). Le jeton propre à la brique passe par le même trousseau.
+  2026-11-10). Le jeton propre à la brique passe par le même trousseau, lu par
+  `oo7` : non vérifié depuis systemd.
 - La brique n'écrit jamais dans la configuration de `gh` ou d'`az`.
 
 ## Les providers
@@ -362,7 +375,7 @@ d'une requête restent identiques d'un appel à l'autre, sinon l'`ETag` ne sert 
 | Les pipelines d'un commit | `actions/runs?head_sha=<sha>&per_page=100` | par commit |
 | Leurs jobs | `commits/<sha>/check-runs?per_page=100`, reliés aux pipelines par `check_suite.id` | par commit |
 | Les statuts de commit | `commits/<sha>/status` | par commit |
-| Les rulesets d'une base | `rules/branches/<base>` | par base |
+| Les rulesets d'une base | `rules/branches/<base>?per_page=100` | par base |
 | Les issues ouvertes | `issues?state=open&sort=created&per_page=100`, deux pages au plus | par dépôt |
 | Une issue | `issues/<numéro>` | non |
 
@@ -379,15 +392,26 @@ Le reste passe par GraphQL, seul à le donner :
   ce que REST ne donne pas, et les regroupe par base.
 - **Obligatoire** : un job l'est quand son nom figure dans la réunion des contrôles
   de la protection de branche (« viewable by non-admins », vérifié le 2026-11-09) et
-  des règles `required_status_checks` des rulesets de la base. Lu à l'abonnement,
-  puis au rythme normal.
-- **Une file se lit par base** : une requête rend toutes ses entrées. Le provider
-  demande à l'abonnement si la base d'une PR a une file, et ne la relit ensuite que
-  pour une base qui en a une : au rythme normal, et toutes les 10 s tant qu'une PR
-  suivie y est (environ 360 points par heure et par base, sur 5 000). La CI de la
-  file se lit par REST, comme celle d'un commit, sur le `sha` de l'entrée, à partir
-  de ses pipelines `merge_queue` (branche temporaire `gh-readonly-queue/<base>/…`).
-  `queue.state` reprend celui de GitHub en minuscules.
+  des règles `required_status_checks` des rulesets de la base. Quand ni l'une ni les
+  autres n'en nomment, la forge ne dit rien : `required` reste `null`. Les noms sont
+  gardés par base et relus au plus une fois par période du rythme normal ; l'échec
+  d'une des deux sources garde ses derniers noms connus et ne fait jamais échouer la
+  lecture. Le `main` de nowcast exige `check`, `check-agents-md` et `claude-code` par
+  la protection de branche, sans ruleset (lu le 2026-11-10 avec un compte
+  administrateur).
+- **Une file se lit par base** : une requête rend toutes ses entrées. Une base sans
+  file est revérifiée au rythme normal, une file pouvant y être ajoutée ; une base
+  qui en a une se relit au rythme normal, et toutes les 10 s tant qu'une PR suivie y
+  est (environ 360 points par heure et par base, sur 5 000). La CI de la file se lit
+  par REST, comme celle d'un commit, sur le `sha` de l'entrée, à partir de ses
+  pipelines `merge_queue` (branche temporaire `gh-readonly-queue/<base>/…`). Elle est
+  attendue pendant 2 min tant que ce commit n'a aucun pipeline. Un échec de lecture
+  de cette CI ne touche ni la PR ni sa CI propre : `queue.ci` garde sa dernière
+  valeur. `queue.state` reprend celui de GitHub en minuscules (`QUEUED`,
+  `AWAITING_CHECKS`, `MERGEABLE`, `UNMERGEABLE`, `LOCKED`, lus par introspection du
+  schéma le 2026-11-10). `estimated_merge_at` vaut l'heure de lecture plus
+  `estimatedTimeToMerge`, nullable dans le schéma, arrondie à la minute. La raison
+  d'une sortie de file est redemandée après un échec.
 - **Le commit d'un pipeline de PR** : l'API REST ne donne pas le commit de merge
   qu'un run `pull_request` a testé ; `sha` reste la tête de la PR, `ref` vaut
   `refs/pull/<n>/merge`.
@@ -395,8 +419,11 @@ Le reste passe par GraphQL, seul à le donner :
   `commits/<sha>/status` : c'est l'absence de statut, pas un statut en attente.
 - **Une check run sans workflow run** (une app qui n'est pas GitHub Actions) forme
   un pipeline au nom de son app.
-- **Issues** : les PR, que l'API des issues mêle aux issues, en sont retirées. `type`
-  est le type d'issue de l'organisation, `null` sans type.
+- **Issues** : les PR, que l'API des issues mêle aux issues, en sont retirées. Elles
+  comptent pourtant dans les pages de GitHub : moins de 200 issues peuvent être
+  listées, et `truncated` vaut `true` quand la deuxième page de 100 est pleine.
+  `type` vient du champ REST `type`, un objet portant `name` quand l'organisation a
+  des types d'issue, `null` sinon (vérifié le 2026-11-10).
 
 | État neutre | GitHub (`status`, `conclusion` ; statut de commit) |
 |---|---|
@@ -429,8 +456,12 @@ pas la casse des noms.
 499b84ac-1321-427f-aa17-267ca6975798`, l'identifiant d'application d'Azure DevOps
 ([documentation](https://learn.microsoft.com/en-us/azure/devops/cli/entra-tokens?view=azure-devops)).
 Par la CLI, le jeton expire : le provider en redemande un avant son échéance
-(`expiresOn`). Par un jeton : un jeton d'accès personnel (PAT), envoyé en
-authentification Basic.
+(`expiresOn`), et l'envoie en `Bearer`. Par un jeton : un jeton d'accès personnel
+(PAT), envoyé en authentification Basic.
+
+**Compte.** `account` vient de `/<organisation>/_apis/connectionData`, non documenté
+et sans `api-version` : `properties.Account.$value`, sinon `providerDisplayName`, en
+minuscules.
 
 **Pas d'`ETag`** (`cache-control: no-store`) : le provider compare le contenu pour
 savoir ce qui a changé. Le budget est de 200 TSTU par fenêtre glissante de
@@ -445,9 +476,9 @@ réel).
 | Les PR actives | `git/repositories/<dépôt>/pullrequests?searchCriteria.status=active` | par dépôt |
 | La PR d'une branche, quand elle quitte la liste | `…/pullrequests?searchCriteria.sourceRefName=refs/heads/<branche>&searchCriteria.status=all` | non |
 | La tête d'une branche sans PR active | `git/repositories/<dépôt>/refs?filter=heads/<branche>` | non |
-| Ce qui est obligatoire, et le build de chaque politique | `policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<projet>/<pr>` | non |
+| Ce qui est obligatoire, et le build de chaque politique | `policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/<GUID du projet>/<pr>` | non |
 | Les pipelines d'une PR hors politique | `build/builds?branchName=refs/pull/<id>/merge`, retenus sur `sourceVersion` égal au `lastMergeCommit` de la PR | non |
-| Les pipelines d'une branche | `build/builds?branchName=refs/heads/<branche>`, retenus sur `sourceVersion` | non |
+| Les pipelines d'une branche, aussi avec une PR active | `build/builds?branchName=refs/heads/<branche>`, retenus sur `sourceVersion` égal à la tête | non |
 | Leurs étapes et jobs | `build/builds/<id>/timeline?changeId=<dernier>` : seuls les enregistrements changés depuis | par build |
 | Les statuts de PR | `git/repositories/<dépôt>/pullRequests/<id>/statuses` | non |
 | Les états d'un type de work item, avec leur catégorie | `wit/workitemtypes/<type>/states` | par projet |
@@ -465,28 +496,40 @@ réel).
   que l'évaluation désigne (`context.buildId`), celui qu'Azure DevOps montre sur la
   PR. Une politique sans build publie un pipeline sans job, à l'état de la
   politique : `queued`, ou `waiting` pour une politique à déclenchement manuel. Une
-  politique dont le filtre de chemins ne correspond pas est `notApplicable`, donc
-  `skipped`. Les autres politiques (relecteurs, commentaires, stratégie de merge)
+  évaluation `queued` dont le `context.buildId` désigne un build terminé publie aussi
+  un pipeline `queued` sans job, le build suivant n'étant pas encore visible : la CI
+  reste attendue. Une politique dont le filtre de chemins ne correspond pas est
+  `notApplicable`, donc `skipped`. Une politique de statut (type
+  `cbdc66da-9728-4af8-aada-9a5a32e4a226`, non vérifié) qui ne s'applique pas ne
+  bloque pas. Les autres politiques (relecteurs, commentaires, stratégie de merge)
   disent si la PR peut être mergée, pas si sa CI passe.
+- **Avec une PR active, les builds de la branche sur sa tête sont lus aussi**, et
+  publiés non obligatoires.
 - **Une politique expirée attend une personne.** Un build réussi cesse de valoir
   après sa durée de validité (`validDuration`) : l'évaluation repasse `queued` avec
   `context.isExpired: true`, et rien ne tourne tant que personne ne relance le build.
   Elle est publiée `waiting`, pas `queued` : sinon la synthèse dirait `running` et le
-  rythme resterait sur « CI en cours » indéfiniment.
+  rythme resterait sur « CI en cours » indéfiniment. Comme une politique à
+  déclenchement manuel, elle forme un pipeline `waiting` sans job, qui porte
+  `required` ; les jobs de l'ancien build ne sont pas publiés.
 - **Ce qu'un pipeline de PR a testé** : `sourceVersion` est le commit de merge de la
   PR (`lastMergeCommit`), `ref` vaut `refs/pull/<id>/merge`.
 - **`trigger`**, d'après `reason` : `individualCI` et `batchedCI` donnent `push`,
   `pullRequest` `pull_request`, `manual` `manual`, `schedule` `schedule`,
-  `resourceTrigger` `downstream`, toute autre valeur `other`.
+  `resourceTrigger` `downstream`, toute autre valeur `other`. `individualCI` et
+  `batchedCI` forment un seul pipeline `push` ; un build `other` se regroupe sur sa
+  `reason` brute.
 - **Du timeline, l'unité de job est l'enregistrement `Phase`**, groupé sous son
   `Stage`. Un job en attente ou sauté n'existe que comme `Phase` ; un `Job` interne
-  sans `Phase` (« Finalize build ») est ignoré ; les tâches ne sont pas gardées. Le
+  sans `Phase` (« Finalize build ») est ignoré ; les tâches ne sont pas gardées. Une
+  approbation en attente (enregistrement `Checkpoint.Approval` `inProgress`) rend
+  `waiting` les `Phase` en attente. Le
   timeline d'un build terminé ne se relit que si son statut change : une relance de
   jobs ou d'étape garde l'identifiant du build.
 - **Les statuts de PR s'accumulent** : une entrée par envoi et par itération. Le
   provider garde le plus récent de chaque contexte (`context.genre`/`context.name`),
-  sur la dernière itération. Un statut qu'un build de la PR pose lui-même
-  (`codecoverage`) ne doit pas reformer un pipeline `external`.
+  sur la dernière itération. Un statut dont le `targetUrl` désigne un build publié
+  (`codecoverage`) appartient à ce build : il ne forme pas de pipeline `external`.
 - **Work items.** WIQL ne filtre pas sur les catégories d'état :
   `[System.StateCategory]` n'existe pas (`TF51005`), et `[System.State] NOT IN GROUP
   'Completed'` est accepté mais ne filtre rien, `IN GROUP` ne visant que les
@@ -496,14 +539,17 @@ réel).
   et construit `[System.State] NOT IN (…)` par type, en excluant les états
   `Completed` et `Removed`. Il écarte les types qui ne sont pas des tickets (Test
   Case, Test Plan, Test Suite, Shared Steps, Code Review, Feedback) par `NOT IN
-  GROUP 'Microsoft.HiddenCategory'` et les catégories de test : sur un projet réel,
-  1 212 éléments ouverts, 547 une fois ceux-là écartés. `[System.AssignedTo] = @Me`
+  GROUP` sur `Microsoft.HiddenCategory`, `Microsoft.TestCaseCategory`,
+  `Microsoft.TestPlanCategory`, `Microsoft.TestSuiteCategory` et
+  `Microsoft.SharedStepCategory` : sur un projet réel, 1 212 éléments ouverts, 547
+  une fois ceux-là écartés. Les types et leurs états sont gardés 30 min. `[System.AssignedTo] = @Me`
   sépare `mine` des autres, le tri se fait sur `System.CreatedDate`, et la requête
   ne rend que des identifiants
   ([documentation](https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax)).
-  `type` est `System.WorkItemType`.
-- Sur un en-tête `Retry-After` ou un budget presque épuisé (`X-RateLimit-Remaining`),
-  le provider ralentit et publie `rate_limited`.
+  `type` est `System.WorkItemType`. Un work item d'un autre projet est `not_found`.
+- **Limite** : une réponse réussie qui porte `Retry-After`, ou un
+  `X-RateLimit-Remaining` sous 10 % de `X-RateLimit-Limit`, donne `rate_limited`.
+  Le provider attend `Retry-After`, sinon jusqu'à `X-RateLimit-Reset`, sinon 120 s.
 
 | État neutre | Azure DevOps (build, enregistrement du timeline, politique, statut de PR) |
 |---|---|
@@ -603,14 +649,17 @@ change.
 
 - Les permissions minimales d'un jeton personnel, sur chaque forge, pour tout ce que
   le provider lit.
-- Sur Azure DevOps, le type d'une approbation en attente dans le timeline, et
-  l'état d'une politique de build à déclenchement manuel : aucun cas réel observé.
-- Comment reconnaître un statut de PR qu'un build de la PR pose lui-même, pour ne
-  pas le publier deux fois.
+- Le provider Azure DevOps, construit d'après cette conception sans avoir tourné sur
+  un projet réel, est à valider depuis une machine qui a accès à un tel projet : les
+  quatre sortes sur un vrai dépôt, les politiques expirées, l'état d'une politique à
+  déclenchement manuel, le filtre des work items, le type de la politique de statut,
+  l'enregistrement d'une approbation en attente, le `targetUrl` d'un statut posé par
+  un build, si une PR active peut manquer de `lastMergeSourceCommit`, et le compte
+  rendu par `connectionData`.
 - La file de merge sur un dépôt qui en a une : la forme des entrées, la branche
   temporaire de leurs pipelines, et la raison d'une sortie de file
   (`RemovedFromMergeQueueEvent.reason`). nowcast n'a pas de file ; seul le schéma
-  GraphQL a été lu.
+  GraphQL a été lu, aucune file réelle.
 - Que `refUpdateRule` rend bien les contrôles obligatoires à un compte sans droits
   d'administration (vérifié seulement avec un compte administrateur).
 

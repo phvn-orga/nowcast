@@ -103,7 +103,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   - **Les briques se cochent dans une liste.** Dans un terminal, sans brique en
     argument, elle propose les briques natives, celles déjà actives cochées ; décocher
     en désactive une. Une brique cochée passe par sa configuration, comme avec
-    `enable`. Sans terminal (un script, une CI), seules les briques nommées en
+    `enable`, et une configuration en échec arrête `setup`, qui n'a pas de
+    `--force`. Sans terminal (un script, une CI), seules les briques nommées en
     argument sont activées. Les briques externes s'installent de leur côté, par
     `nowcast bricks enable`.
   - **`nowcast setup --remove` défait la partie systemd**, avant `brew uninstall` :
