@@ -137,8 +137,24 @@ pub fn configure() -> ExitCode {
     configure::run()
 }
 
+/// Writes a line to the log, its control characters escaped: a string the
+/// brick was handed (a branch name, a scope's type) cannot forge a line.
 fn log(message: impl std::fmt::Display) {
-    eprintln!("{NAME}: {message}");
+    eprintln!("{NAME}: {}", escaped(&message.to_string()));
+}
+
+/// `text` with each control character written as its escape (`\n`,
+/// `\u{1b}`).
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `items` joined by commas, `none` when there is none, for the log.
@@ -263,6 +279,14 @@ async fn send(output: &mut Stdout, messages: Vec<BrickMessage>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_line_escapes_its_control_characters() {
+        assert_eq!(
+            escaped("read branch/r#feat\nforge: debug: x\r\t\u{1b}[31m é"),
+            "read branch/r#feat\\nforge: debug: x\\r\\t\\u{1b}[31m é"
+        );
+    }
 
     #[test]
     fn the_debug_lines_are_off_unless_asked() {
