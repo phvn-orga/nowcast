@@ -342,14 +342,12 @@ impl Branch {
             {
                 Starts::Certain
             }
-            (Some(_), Some(sha)) => {
-                let event = match (open, &self.head, &reading.branch) {
-                    (Some(pr), _, _) => Some(Event::PullRequest { base: &pr.base }),
-                    (None, Head::Branch(branch), _) | (None, Head::Pr(_), Some(branch)) => {
-                        Some(Event::Push { branch })
-                    }
-                    (None, Head::Pr(_), None) => None,
+            (Some((read, _)), Some(sha)) => {
+                let branch = match &self.head {
+                    Head::Branch(branch) => Some(branch.as_str()),
+                    Head::Pr(_) => reading.branch.as_deref(),
                 };
+                let events = events(read, &subject, branch);
                 let repo = Repository {
                     http: &self.http,
                     api: &self.api,
@@ -357,16 +355,38 @@ impl Branch {
                     owner: &self.owner,
                     name: &self.name,
                 };
-                match event {
-                    Some(event) => {
-                        triggers::starts(&repo, &self.workflows, sha, event, facts).await
-                    }
-                    None => Starts::Maybe,
+                if events.is_empty() {
+                    Starts::Maybe
+                } else {
+                    triggers::starts(&repo, &self.workflows, sha, &events, facts).await
                 }
             }
         };
         self.starts = Some((subject, starts));
     }
+}
+
+/// The events that `subject` is after `read`, for the head's `branch` in the
+/// repository, if any: an open PR's opening, or a push on it, or a change of
+/// its base; a push on the branch when its head moved, or when it has no
+/// open PR.
+fn events<'a>(read: &Subject, subject: &'a Subject, branch: Option<&'a str>) -> Vec<Event<'a>> {
+    let pushed = read.0 != subject.0;
+    let mut events = Vec::new();
+    if let Some((number, base)) = &subject.1 {
+        let activities = match &read.1 {
+            Some((before, _)) if before == number && pushed => triggers::SYNCHRONIZED,
+            Some((before, _)) if before == number => triggers::EDITED,
+            _ => triggers::OPENED,
+        };
+        events.push(Event::PullRequest { base, activities });
+    }
+    if let Some(branch) = branch
+        && (pushed || subject.1.is_none())
+    {
+        events.push(Event::Push { branch });
+    }
+    events
 }
 
 /// The token that reads `owner`'s repositories, kept in `tokens` once its
@@ -1491,6 +1511,48 @@ mod tests {
         let (target, _) = rx.recv().await.unwrap();
         assert_eq!(target, 2);
         assert_eq!(started(&server), [2, 2, 2]);
+    }
+
+    /// A push on an open PR's head is a push too; a PR that shows up is
+    /// opened, and one whose base changed is edited.
+    #[test]
+    fn a_new_subject_is_the_events_github_sees() {
+        let pr =
+            |head: &str, n: Option<u64>| (Some(head.to_owned()), n.map(|n| (n, "main".into())));
+        let kinds = |events: Vec<Event>| -> Vec<String> {
+            events
+                .iter()
+                .map(|e| match e {
+                    Event::Push { branch } => format!("push {branch}"),
+                    Event::PullRequest { base, activities } => {
+                        format!("pr {base} {}", activities.join(","))
+                    }
+                })
+                .collect()
+        };
+        let pushed = pr("b", Some(7));
+        assert_eq!(
+            kinds(events(&pr("a", Some(7)), &pushed, Some("feat"))),
+            ["pr main synchronize", "push feat"]
+        );
+        assert_eq!(
+            kinds(events(&pr("a", Some(7)), &pushed, None)),
+            ["pr main synchronize"],
+            "a fork's push is not in the repository"
+        );
+        assert_eq!(
+            kinds(events(&pr("b", None), &pushed, Some("feat"))),
+            ["pr main opened,reopened"]
+        );
+        let rebased = (Some("b".to_owned()), Some((7, "design".to_owned())));
+        assert_eq!(
+            kinds(events(&pushed, &rebased, Some("feat"))),
+            ["pr design edited"]
+        );
+        assert_eq!(
+            kinds(events(&pr("a", None), &pr("b", None), Some("feat"))),
+            ["push feat"]
+        );
     }
 
     /// A push on a branch without PR expects a CI only when a workflow at

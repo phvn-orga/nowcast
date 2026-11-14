@@ -9,11 +9,12 @@
 //! changed only.
 //!
 //! The answer ([`Starts`]) is `None` when no active workflow runs on the
-//! event for that branch (or there is no workflow directory at all),
+//! events for that branch (or there is no workflow directory at all),
 //! `Certain` when one runs without a path filter, and `Maybe` for whatever
 //! cannot be told: path filters, a `[skip ci]`-style marker in the head
 //! commit's message, a PR known to conflict with its base, a trigger not
-//! understood, a read that failed.
+//! understood, a read that failed, a `pull_request_target` workflow (which
+//! GitHub takes from the default branch, not from the head).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -29,8 +30,14 @@ use crate::tools::pace::Starts;
 /// starts again empty.
 const KEPT_MAX: usize = 1024;
 
-/// The activity types of a PR that a push on it, or its opening, is.
-const PR_ACTIVITIES: &[&str] = &["opened", "synchronize", "reopened"];
+/// The activity types of a PR that shows up open: opened, or reopened.
+pub const OPENED: &[&str] = &["opened", "reopened"];
+
+/// The activity type of a push on an open PR's head.
+pub const SYNCHRONIZED: &[&str] = &["synchronize"];
+
+/// The activity type of an open PR whose base changed.
+pub const EDITED: &[&str] = &["edited"];
 
 /// The markers in a commit message that skip the workflow runs of a push or
 /// a PR.
@@ -40,6 +47,8 @@ const SKIP_MARKERS: &[&str] = &[
     "[no ci]",
     "[skip actions]",
     "[actions skip]",
+    "skip-checks:true",
+    "skip-checks: true",
 ];
 
 /// What may start a CI.
@@ -47,8 +56,11 @@ const SKIP_MARKERS: &[&str] = &[
 pub enum Event<'a> {
     /// A push on `branch`.
     Push { branch: &'a str },
-    /// A PR's head pushed, or the PR opened, on `base`.
-    PullRequest { base: &'a str },
+    /// A PR on `base`, of one of the activity types `activities`.
+    PullRequest {
+        base: &'a str,
+        activities: &'a [&'a str],
+    },
 }
 
 /// The `on` of each workflow file read, by blob: `None` for a file that
@@ -80,13 +92,13 @@ pub struct Repository<'a> {
     pub name: &'a str,
 }
 
-/// Whether `event` at commit `sha` starts a CI, with what the reading saw of
-/// that head (`facts`).
+/// Whether any of `events` at commit `sha` starts a CI, with what the
+/// reading saw of that head (`facts`).
 pub async fn starts(
     repo: &Repository<'_>,
     workflows: &Workflows,
     sha: &str,
-    event: Event<'_>,
+    events: &[Event<'_>],
     facts: &Facts,
 ) -> Starts {
     let base = format!("{}/repos/{}/{}", repo.api, repo.owner, repo.name);
@@ -135,7 +147,10 @@ pub async fn starts(
             None => None,
         };
         let starts = match on.as_deref() {
-            Some(Some(on)) => workflow_starts(on, event),
+            Some(Some(on)) => events
+                .iter()
+                .map(|event| workflow_starts(on, *event))
+                .fold(Starts::None, likelier),
             _ => Starts::Maybe,
         };
         answer = likelier(answer, starts);
@@ -192,7 +207,7 @@ fn workflow_starts(on: &Value, event: Event<'_>) -> Starts {
         Event::PullRequest { .. } => &["pull_request", "pull_request_target"],
     };
     let named = |name: &Value| match name.as_str() {
-        Some(name) if names.contains(&name) => Starts::Certain,
+        Some(name) if names.contains(&name) => at_head(name, filtered(name, &Value::Null, event)),
         Some(_) => Starts::None,
         None => Starts::Maybe,
     };
@@ -202,9 +217,20 @@ fn workflow_starts(on: &Value, event: Event<'_>) -> Starts {
         Value::Object(map) => names
             .iter()
             .filter_map(|name| Some((*name, map.get(*name)?)))
-            .map(|(name, filters)| filtered(name, filters, event))
+            .map(|(name, filters)| at_head(name, filtered(name, filters, event)))
             .fold(Starts::None, likelier),
         _ => Starts::Maybe,
+    }
+}
+
+/// What the head's workflow says of event `name`, as far as the head tells:
+/// GitHub takes a `pull_request_target` workflow from the base repository's
+/// default branch, so the head's is a hint at most.
+fn at_head(name: &str, starts: Starts) -> Starts {
+    if name == "pull_request_target" && starts == Starts::Certain {
+        Starts::Maybe
+    } else {
+        starts
     }
 }
 
@@ -212,23 +238,31 @@ fn workflow_starts(on: &Value, event: Event<'_>) -> Starts {
 /// filters apply to the pushed branch, a PR's to its base; a push filtered
 /// on tags only runs on no branch.
 fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Starts {
+    let none = Map::new();
     let filters = match filters {
-        Value::Null => return Starts::Certain,
+        Value::Null => &none,
         Value::Object(filters) => filters,
         _ => return Starts::Maybe,
     };
-    let branch = match event {
-        Event::Push { branch } => branch,
-        Event::PullRequest { base } => base,
+    let (branch, activities) = match event {
+        Event::Push { branch } => (branch, &[][..]),
+        Event::PullRequest { base, activities } => (base, activities),
     };
     if name != "push"
         && let Some(types) = filters.get("types")
     {
         match strings(types) {
-            Some(types) if types.iter().any(|t| PR_ACTIVITIES.contains(t)) => {}
+            Some(types) if types.iter().any(|t| activities.contains(t)) => {}
             Some(_) => return Starts::None,
             None => return Starts::Maybe,
         }
+    } else if name != "push"
+        && !activities
+            .iter()
+            .any(|a| OPENED.contains(a) || SYNCHRONIZED.contains(a))
+    {
+        // Without `types`, a PR runs on its opening, reopening and pushes only.
+        return Starts::None;
     }
     let on_branch = match (filters.get("branches"), filters.get("branches-ignore")) {
         (Some(_), Some(_)) => return Starts::Maybe,
@@ -237,6 +271,10 @@ fn filtered(name: &str, filters: &Value, event: Event<'_>) -> Starts {
             None => return Starts::Maybe,
         },
         (None, Some(patterns)) => match strings(patterns) {
+            // GitHub does not say what a negated pattern does there.
+            Some(patterns) if patterns.iter().any(|p| p.starts_with('!')) => {
+                return Starts::Maybe;
+            }
             Some(patterns) => !patterns.iter().any(|p| glob(p, branch)),
             None => return Starts::Maybe,
         },
@@ -298,7 +336,8 @@ enum Times {
 }
 
 /// Whether `pattern`, in GitHub's filter syntax, matches the whole of
-/// `name`: `*` any characters but `/`, `**` any characters, `?` zero or
+/// `name`: `*` any characters but `/`, `**` any characters (and `**/` no
+/// directory at all, as in `**/README.md` matching `README.md`), `?` zero or
 /// one of the preceding character, `+` one or more of it, `[...]` one
 /// character listed or in a range, `\` escapes the next character.
 fn glob(pattern: &str, name: &str) -> bool {
@@ -393,19 +432,24 @@ fn matches(
         return n == name.len();
     };
     let found = match (atom, times) {
-        // A star takes zero or more characters whatever follows it.
+        // A star takes zero or more characters whatever follows it; `**/`
+        // takes no directory as well.
         (Atom::Star | Atom::Stars, _) => {
+            let no_directory = *atom == Atom::Stars
+                && atoms.get(a + 1) == Some(&(Atom::Char('/'), Times::One))
+                && matches(atoms, name, a + 2, n, failed);
             let mut end = n;
-            loop {
-                if matches(atoms, name, a + 1, end, failed) {
-                    break true;
+            no_directory
+                || loop {
+                    if matches(atoms, name, a + 1, end, failed) {
+                        break true;
+                    }
+                    if end < name.len() && one(atom, name[end]) {
+                        end += 1;
+                    } else {
+                        break false;
+                    }
                 }
-                if end < name.len() && one(atom, name[end]) {
-                    end += 1;
-                } else {
-                    break false;
-                }
-            }
         }
         (_, Times::One) => {
             n < name.len() && one(atom, name[n]) && matches(atoms, name, a + 1, n + 1, failed)
@@ -450,7 +494,11 @@ mod tests {
     }
 
     fn pr(on: &str, base: &str) -> Starts {
-        workflow_starts(&yaml(on)["on"], Event::PullRequest { base })
+        pr_as(on, base, SYNCHRONIZED)
+    }
+
+    fn pr_as(on: &str, base: &str, activities: &[&str]) -> Starts {
+        workflow_starts(&yaml(on)["on"], Event::PullRequest { base, activities })
     }
 
     #[test]
@@ -491,6 +539,10 @@ mod tests {
             ("release\\*", "release*", true),
             ("release\\*", "release1", false),
             ("[ab", "[ab", true),
+            ("**/release", "release", true),
+            ("**/release", "a/b/release", true),
+            ("**/release", "prerelease", false),
+            ("**/*-post", "my-post", true),
             ("**/*/**/*/**", "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p", true),
             (
                 "*a*a*a*a*a*a*a*a*a*b",
@@ -566,12 +618,18 @@ mod tests {
         assert_eq!(push(conflicting, "main"), Starts::Maybe);
         let odd = "on:\n  push:\n    branches: {a: 1}\n";
         assert_eq!(push(odd, "main"), Starts::Maybe);
+        let negated = "on:\n  push:\n    branches-ignore: ['x*', '!xy']\n";
+        assert_eq!(push(negated, "xy"), Starts::Maybe, "undocumented");
     }
 
     #[test]
     fn a_pr_matches_its_base_and_activity() {
         assert_eq!(pr("on: pull_request", "design"), Starts::Certain);
-        assert_eq!(pr("on: pull_request_target", "design"), Starts::Certain);
+        assert_eq!(
+            pr("on: pull_request_target", "design"),
+            Starts::Maybe,
+            "taken from the default branch"
+        );
         let to_main = "on:\n  pull_request:\n    branches: [main]\n";
         assert_eq!(pr(to_main, "main"), Starts::Certain);
         assert_eq!(pr(to_main, "design"), Starts::None);
@@ -579,6 +637,13 @@ mod tests {
         assert_eq!(pr(closed, "main"), Starts::None);
         let pushed = "on:\n  pull_request:\n    types: [synchronize]\n";
         assert_eq!(pr(pushed, "main"), Starts::Certain);
+        assert_eq!(pr_as(pushed, "main", OPENED), Starts::None, "not opened");
+        let opened = "on:\n  pull_request:\n    types: [opened]\n";
+        assert_eq!(pr(opened, "main"), Starts::None, "not a push");
+        assert_eq!(pr_as(opened, "main", OPENED), Starts::Certain);
+        assert_eq!(pr_as("on: pull_request", "main", EDITED), Starts::None);
+        let edited = "on:\n  pull_request:\n    types: [edited]\n";
+        assert_eq!(pr_as(edited, "main", EDITED), Starts::Certain);
         let odd = "on:\n  pull_request:\n    types: {a: 1}\n";
         assert_eq!(pr(odd, "main"), Starts::Maybe);
         let tags = "on:\n  pull_request:\n    tags: ['v*']\n";
@@ -681,7 +746,7 @@ mod tests {
             owner: "o",
             name: "r",
         };
-        starts(&repo, workflows, sha, event, facts).await
+        starts(&repo, workflows, sha, &[event], facts).await
     }
 
     fn blobs(server: &Server) -> usize {
@@ -703,12 +768,18 @@ mod tests {
             ask(&server, &workflows, "main", main).await,
             Starts::Certain
         );
-        let to_main = Event::PullRequest { base: "main" };
+        let to_main = Event::PullRequest {
+            base: "main",
+            activities: SYNCHRONIZED,
+        };
         assert_eq!(
             ask(&server, &workflows, "feat", to_main).await,
             Starts::Certain
         );
-        let to_design = Event::PullRequest { base: "design" };
+        let to_design = Event::PullRequest {
+            base: "design",
+            activities: OPENED,
+        };
         assert_eq!(
             ask(&server, &workflows, "bare", to_design).await,
             Starts::None,
@@ -747,7 +818,10 @@ mod tests {
             ("release.yml", "active"),
         ];
         let server = forge(NOWCAST, DISABLED, &[]).await;
-        let to_main = Event::PullRequest { base: "main" };
+        let to_main = Event::PullRequest {
+            base: "main",
+            activities: SYNCHRONIZED,
+        };
         let starts = ask(&server, &Workflows::default(), "feat", to_main).await;
         assert_eq!(starts, Starts::Maybe, "only the release's path filter");
         assert_eq!(blobs(&server), 1, "a disabled file is not read");
@@ -795,7 +869,10 @@ mod tests {
             message: None,
             conflict: true,
         };
-        let to_main = Event::PullRequest { base: "main" };
+        let to_main = Event::PullRequest {
+            base: "main",
+            activities: SYNCHRONIZED,
+        };
         assert_eq!(
             ask_with(&server, &workflows, "feat", to_main, &conflict).await,
             Starts::Maybe
@@ -806,5 +883,33 @@ mod tests {
             Starts::None,
             "none stays none"
         );
+    }
+
+    /// A push on an open PR's head is a push as well: a workflow on `push`
+    /// alone runs on it.
+    #[tokio::test]
+    async fn every_event_of_a_head_counts() {
+        const PUSH: &[(&str, &str, &str)] = &[("ci.yml", "b5", "on: push\n")];
+        let server = forge(PUSH, &[], &[]).await;
+        let http = Http::new().unwrap();
+        let api = server.base();
+        let repo = Repository {
+            http: &http,
+            api: &api,
+            token: "t",
+            owner: "o",
+            name: "r",
+        };
+        let pr = Event::PullRequest {
+            base: "main",
+            activities: SYNCHRONIZED,
+        };
+        let push = Event::Push { branch: "feat" };
+        let workflows = Workflows::default();
+        let facts = Facts::default();
+        let only_pr = starts(&repo, &workflows, "feat", &[pr], &facts).await;
+        assert_eq!(only_pr, Starts::None);
+        let both = starts(&repo, &workflows, "feat", &[pr, push], &facts).await;
+        assert_eq!(both, Starts::Certain);
     }
 }
