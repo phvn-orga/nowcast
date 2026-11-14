@@ -18,7 +18,7 @@ fn declared(fake: &Fake) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn the_default_session_is_the_process() {
+async fn the_default_session_is_the_process_without_replacing() {
     let fake = Fake::start(Anchoring::PerProcess).await;
     let mut command = nowcast(&fake);
     command
@@ -28,7 +28,10 @@ async fn the_default_session_is_the_process() {
     let pid = child.id().unwrap();
     let output = child.wait_with_output().await.unwrap();
     assert!(output.status.success());
-    assert_eq!(declared(&fake), [json!({ "id": format!("cli-{pid}") })]);
+    assert_eq!(
+        declared(&fake),
+        [json!({ "id": format!("cli-{pid}"), "replace": false })]
+    );
     fake.assert_sessions_first();
 }
 

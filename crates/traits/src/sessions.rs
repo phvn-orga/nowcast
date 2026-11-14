@@ -14,6 +14,10 @@ pub trait Sessions: Send + Sync + 'static {
     /// Declares or replaces the session of `anchor`.
     fn declare(&self, anchor: AnchorId, session: SessionId);
 
+    /// Declares the session of `anchor` only if it has none, in one step: a
+    /// session declared meanwhile is never replaced.
+    fn declare_if_absent(&self, anchor: AnchorId, session: SessionId);
+
     /// `None` until the anchor declares a session: any request but the
     /// declaration is then refused with `session_required`.
     fn current(&self, anchor: AnchorId) -> Option<SessionId>;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use nowcast_traits::{AnchorId, Identity, Router, Sessions};
@@ -52,6 +53,19 @@ impl Sessions for SessionRegistry {
         if first {
             // Fails only once the task has stopped with its runtime, when
             // nothing is watched any more anyway.
+            let _ = self.declared.send(anchor);
+        }
+    }
+
+    fn declare_if_absent(&self, anchor: AnchorId, session: SessionId) {
+        let first = match lock(&self.sessions).entry(anchor) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                entry.insert(session);
+                true
+            }
+        };
+        if first {
             let _ = self.declared.send(anchor);
         }
     }

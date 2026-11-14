@@ -65,6 +65,13 @@ pub struct Server<R, Su, D, I, Se> {
 #[derive(Deserialize)]
 struct DeclareSession {
     id: String,
+    /// `false` declares only for an anchor without a session.
+    #[serde(default = "replace_by_default")]
+    replace: bool,
+}
+
+fn replace_by_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -228,11 +235,15 @@ where
             Route::Service => Ok(json(StatusCode::OK, service(self.started_at)?.to_string())),
             Route::Status => self.status(),
             Route::Session => {
-                let DeclareSession { id } = read_json(body).await?;
+                let DeclareSession { id, replace } = read_json(body).await?;
                 if id.is_empty() {
                     return Err(HttpError::invalid_request("the session id is empty"));
                 }
-                self.sessions.declare(anchor, SessionId::new(id));
+                if replace {
+                    self.sessions.declare(anchor, SessionId::new(id));
+                } else {
+                    self.sessions.declare_if_absent(anchor, SessionId::new(id));
+                }
                 Ok(empty(StatusCode::NO_CONTENT))
             }
             Route::Subscribe => self.subscribe(anchor, read_json(body).await?).await,

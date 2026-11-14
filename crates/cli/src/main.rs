@@ -110,7 +110,7 @@ fn brick(name: &str, configure: bool) -> ExitCode {
 /// A client of the service the options and environment designate.
 fn client(cli: &Cli) -> Result<Client, CliError> {
     let socket = config::socket_path(cli.socket.clone(), std::env::var_os("XDG_RUNTIME_DIR"))?;
-    let session = config::session_id(cli.session.clone(), std::process::id())?;
+    let session = config::session(cli.session.clone(), std::process::id())?;
     Ok(Client::new(socket, session))
 }
 

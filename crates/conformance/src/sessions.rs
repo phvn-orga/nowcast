@@ -36,6 +36,18 @@ pub fn declaring_again_replaces_the_session<S: SessionsSubject>() {
     assert_eq!(sessions.current(A), Some(SessionId::new("two")));
 }
 
+/// A declaration that must not replace sets a missing session and keeps an
+/// existing one: a tool run inside an agent keeps the agent's session.
+pub fn declaring_if_absent_keeps_the_session<S: SessionsSubject>() {
+    let sessions = S::new();
+    sessions.declare_if_absent(A, SessionId::new("one"));
+    assert_eq!(sessions.current(A), Some(SessionId::new("one")));
+    sessions.declare_if_absent(A, SessionId::new("two"));
+    assert_eq!(sessions.current(A), Some(SessionId::new("one")));
+    sessions.declare(A, SessionId::new("three"));
+    assert_eq!(sessions.current(A), Some(SessionId::new("three")));
+}
+
 /// `GET /v1/status` lists every anchor's current session, by anchor.
 pub fn the_declared_sessions_are_listed<S: SessionsSubject>() {
     let sessions = S::new();
@@ -64,6 +76,7 @@ macro_rules! sessions_suite {
                     no_session_before_declaring,
                     declaring_sets_the_anchors_session,
                     declaring_again_replaces_the_session,
+                    declaring_if_absent_keeps_the_session,
                     the_declared_sessions_are_listed,
                 ]
             );
