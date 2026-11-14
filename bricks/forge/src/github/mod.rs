@@ -31,7 +31,7 @@ use crate::credentials::{Credentials, Forge, Source, Stamp};
 use crate::model::{Ci, Dequeued, QueueEntry};
 use crate::provider::{BranchReading, Failure, Head, Provider, Reading, Repo, Updates, Watch};
 use crate::tools::http::{self, Http};
-use crate::tools::pace::{EXPECTED_FOR, Pace, Rhythm};
+use crate::tools::pace::{EXPECTED_FOR, Pace, Pushed, Pushes, Rhythm};
 use crate::tools::remote;
 use detect::{Access, Detected, Detection, Interest};
 use issues::{Accounts, Tracker};
@@ -75,6 +75,7 @@ pub struct GitHub {
     required: Required,
     queues: Queues,
     detection: Detection,
+    pushes: Pushes,
 }
 
 impl GitHub {
@@ -90,6 +91,7 @@ impl GitHub {
             required: Required::default(),
             queues: Queues::default(),
             detection: Detection::default(),
+            pushes: Pushes::default(),
         }
     }
 
@@ -173,6 +175,7 @@ impl Provider for GitHub {
             required: self.required.clone(),
             queues: self.queues.clone(),
             memory: Memory::default(),
+            pushed: self.pushes.of(&repo.id),
             owner,
             name,
             head,
@@ -199,6 +202,8 @@ struct Branch {
     required: Required,
     queues: Queues,
     memory: Memory,
+    /// What the repository's pushes on a branch without PR taught.
+    pushed: Pushed,
     owner: String,
     name: String,
     head: Head,
@@ -215,7 +220,7 @@ impl Branch {
         mut refreshes: UnboundedReceiver<()>,
         mut detected: Detected,
     ) {
-        let mut pace = Pace::default();
+        let mut pace = Pace::new(self.pushed.clone());
         loop {
             let (outcome, wait) = self.read_once().await;
             let now = Instant::now();
@@ -230,6 +235,7 @@ impl Branch {
                             .as_ref()
                             .filter(|p| p.is_open())
                             .map(|p| p.number),
+                        reading.ci.as_ref().map_or(0, |ci| ci.pipelines.len()),
                     );
                     // A PR in the merge queue moves as its queue CI runs.
                     let queued = reading.pr.as_ref().is_some_and(|p| p.queue.is_some());
@@ -677,6 +683,7 @@ mod tests {
             required: Required::default(),
             queues: Queues::default(),
             memory: Memory::default(),
+            pushed: Pushed::default(),
             owner: owner.into(),
             name: "r".into(),
             head: Head::Branch("feat".into()),
