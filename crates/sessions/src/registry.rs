@@ -12,8 +12,9 @@ type Map = Mutex<HashMap<AnchorId, SessionId>>;
 /// The service's session registry: the session of each anchor, held in
 /// memory, and one background task that watches the declared anchors.
 ///
-/// [`Sessions::declare`] and [`Sessions::current`] only take a lock and never
-/// wait, so they need no runtime. An anchor declared for the first time is
+/// [`Sessions::declare`], [`Sessions::declare_if_absent`] and
+/// [`Sessions::current`] only take a lock and never wait, so they need no
+/// runtime. An anchor declared for the first time is
 /// sent to the task, which waits for all the anchors together. When one
 /// exits, the task forgets its session and only then calls
 /// [`Router::remove_anchor`]: once the router has removed an anchor,
@@ -45,15 +46,19 @@ impl SessionRegistry {
         tokio::spawn(watch(identity, router, Arc::clone(&sessions), anchors));
         Self { sessions, declared }
     }
+
+    /// Sends an anchor declared for the first time to the watching task.
+    fn watch_anchor(&self, anchor: AnchorId) {
+        // Fails only once the task has stopped with its runtime, when nothing
+        // is watched any more anyway.
+        let _ = self.declared.send(anchor);
+    }
 }
 
 impl Sessions for SessionRegistry {
     fn declare(&self, anchor: AnchorId, session: SessionId) {
-        let first = lock(&self.sessions).insert(anchor, session).is_none();
-        if first {
-            // Fails only once the task has stopped with its runtime, when
-            // nothing is watched any more anyway.
-            let _ = self.declared.send(anchor);
+        if lock(&self.sessions).insert(anchor, session).is_none() {
+            self.watch_anchor(anchor);
         }
     }
 
@@ -66,7 +71,7 @@ impl Sessions for SessionRegistry {
             }
         };
         if first {
-            let _ = self.declared.send(anchor);
+            self.watch_anchor(anchor);
         }
     }
 

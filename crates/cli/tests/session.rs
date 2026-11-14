@@ -57,9 +57,9 @@ async fn the_session_comes_from_the_flag_or_the_environment() {
     assert_eq!(
         declared(&fake),
         [
-            json!({ "id": "from-flag" }),
-            json!({ "id": "from-env" }),
-            json!({ "id": "flag-wins" }),
+            json!({ "id": "from-flag", "replace": true }),
+            json!({ "id": "from-env", "replace": true }),
+            json!({ "id": "flag-wins", "replace": true }),
         ]
     );
     fake.assert_sessions_first();

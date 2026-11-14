@@ -445,7 +445,12 @@ fn route(
     if (method, path) == ("PUT", "/v1/session") {
         return match body.and_then(|b| b["id"].as_str()) {
             Some(id) if !id.is_empty() => {
-                state.anchor(pid).session = Some(id.to_owned());
+                // `"replace": false` declares only for an anchor without one.
+                let replace = body.and_then(|b| b["replace"].as_bool()).unwrap_or(true);
+                let session = &mut state.anchor(pid).session;
+                if replace || session.is_none() {
+                    *session = Some(id.to_owned());
+                }
                 empty(204)
             }
             _ => error(400, "invalid_request", "{\"id\": <string>} expected"),

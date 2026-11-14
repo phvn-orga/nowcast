@@ -59,12 +59,7 @@ impl Client {
     /// handle, so none can come before it. A session that does not replace
     /// leaves the anchor's own, if it has declared one.
     pub async fn declare(&self) -> Result<Session<'_>, CliError> {
-        let id = self.session.id.as_str();
-        let body = if self.session.replace {
-            json!({ "id": id })
-        } else {
-            json!({ "id": id, "replace": false })
-        };
+        let body = json!({ "id": self.session.id.as_str(), "replace": self.session.replace });
         let reply = self.call(Method::PUT, "/v1/session", Some(body)).await?;
         reply.expect(StatusCode::NO_CONTENT)?;
         Ok(Session { client: self })
