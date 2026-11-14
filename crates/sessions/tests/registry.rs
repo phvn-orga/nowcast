@@ -236,6 +236,28 @@ async fn declaring_again_does_not_watch_the_anchor_twice() {
 }
 
 #[tokio::test]
+async fn an_anchor_declared_if_absent_is_watched_once() {
+    let mut registry = Registry::new();
+    registry
+        .sessions
+        .declare_if_absent(A, SessionId::new("cli-1"));
+    registry
+        .sessions
+        .declare_if_absent(A, SessionId::new("cli-2"));
+    registry.sessions.declare(A, SessionId::new("agent"));
+    registry.router.subscribe(A, flow("x"));
+    registry.settle(B).await;
+    // Each watcher holds the identity: the test, the task and one watcher, A's.
+    assert_eq!(Arc::strong_count(&registry.identity), 3);
+
+    registry.identity.kill(A);
+    assert_eq!(registry.removal().await, A);
+    assert_eq!(registry.router.subscribers(&flow("x")), 0);
+    registry.settle(C).await;
+    assert!(registry.removed.try_recv().is_err(), "A is removed once");
+}
+
+#[tokio::test]
 async fn an_anchor_dead_before_its_declaration_is_removed() {
     let mut registry = Registry::new();
     registry.identity.kill(A);

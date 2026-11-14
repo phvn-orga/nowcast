@@ -20,7 +20,9 @@ pub struct Cli {
 
     /// Session id to declare before any other call [default: cli-<pid>]
     ///
-    /// From an agent's hook, pass the agent's session id.
+    /// From an agent's hook, pass the agent's session id. A given id replaces
+    /// the anchor's session; the default applies only to an anchor without
+    /// one, so a call from inside an agent keeps the agent's.
     #[arg(long, global = true, env = "NOWCAST_SESSION", value_name = "ID")]
     pub session: Option<String>,
 

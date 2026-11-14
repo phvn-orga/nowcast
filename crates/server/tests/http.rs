@@ -370,10 +370,58 @@ fn a_flow_without_a_subscriber_is_left_out_of_the_status() {
 }
 
 #[test]
+fn a_declaration_without_replace_keeps_the_anchors_session() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        async fn session(harness: &Harness<impl Identity>) -> Value {
+            let status = request(harness, "GET", "/v1/status", "").await.json();
+            status["sessions"][0]["id"].clone()
+        }
+        let keep = r#"{"id":"cli-1","replace":false}"#;
+        assert_eq!(
+            request(&harness, "PUT", "/v1/session", keep).await.status,
+            204
+        );
+        assert_eq!(
+            session(&harness).await,
+            "cli-1",
+            "an anchor without a session"
+        );
+        let owner = r#"{"id":"agent"}"#;
+        assert_eq!(
+            request(&harness, "PUT", "/v1/session", owner).await.status,
+            204
+        );
+        assert_eq!(session(&harness).await, "agent", "replacing is the default");
+        let keep = r#"{"id":"cli-2","replace":false}"#;
+        assert_eq!(
+            request(&harness, "PUT", "/v1/session", keep).await.status,
+            204
+        );
+        assert_eq!(session(&harness).await, "agent");
+        let replace = r#"{"id":"cleared","replace":true}"#;
+        assert_eq!(
+            request(&harness, "PUT", "/v1/session", replace)
+                .await
+                .status,
+            204
+        );
+        assert_eq!(session(&harness).await, "cleared");
+    });
+}
+
+#[test]
 fn a_malformed_session_answers_400_invalid_request() {
     run(async {
         let harness = start(ProbeMode::Ready);
-        for body in ["", "not json", "{}", r#"{"id":3}"#, r#"{"id":""}"#] {
+        for body in [
+            "",
+            "not json",
+            "{}",
+            r#"{"id":3}"#,
+            r#"{"id":""}"#,
+            r#"{"id":"s","replace":"no"}"#,
+        ] {
             request(&harness, "PUT", "/v1/session", body)
                 .await
                 .error(400, "invalid_request");

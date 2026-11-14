@@ -15,10 +15,10 @@ use hyper::body::Incoming;
 use hyper::header::{ACCEPT, CONTENT_TYPE, HOST};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use nowcast_types::SessionId;
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
+use crate::config::Declaration;
 use crate::error::CliError;
 use crate::sse::{SseEvent, SseParser};
 
@@ -29,12 +29,12 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Client {
     socket: PathBuf,
-    session: SessionId,
+    session: Declaration,
     timeout: Duration,
 }
 
 impl Client {
-    pub fn new(socket: PathBuf, session: SessionId) -> Self {
+    pub fn new(socket: PathBuf, session: Declaration) -> Self {
         Self {
             socket,
             session,
@@ -56,9 +56,10 @@ impl Client {
     }
 
     /// Declares the session. Every other call goes through the returned
-    /// handle, so none can come before it.
+    /// handle, so none can come before it. A session that does not replace
+    /// leaves the anchor's own, if it has declared one.
     pub async fn declare(&self) -> Result<Session<'_>, CliError> {
-        let body = json!({ "id": self.session.as_str() });
+        let body = json!({ "id": self.session.id.as_str(), "replace": self.session.replace });
         let reply = self.call(Method::PUT, "/v1/session", Some(body)).await?;
         reply.expect(StatusCode::NO_CONTENT)?;
         Ok(Session { client: self })
@@ -457,7 +458,11 @@ mod tests {
                 held.push(stream);
             }
         });
-        let mut client = Client::new(socket, SessionId::new("s"));
+        let session = Declaration {
+            id: nowcast_types::SessionId::new("s"),
+            replace: true,
+        };
+        let mut client = Client::new(socket, session);
         client.timeout = Duration::from_millis(100);
         (dir, client)
     }

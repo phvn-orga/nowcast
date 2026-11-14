@@ -26,6 +26,14 @@ impl Sessions for FakeSessions {
         self.sessions.lock().unwrap().insert(anchor, session);
     }
 
+    fn declare_if_absent(&self, anchor: AnchorId, session: SessionId) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .entry(anchor)
+            .or_insert(session);
+    }
+
     fn current(&self, anchor: AnchorId) -> Option<SessionId> {
         self.sessions.lock().unwrap().get(&anchor).cloned()
     }

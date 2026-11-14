@@ -33,13 +33,26 @@ pub fn socket_path(
     }
 }
 
-/// The session given on the command line or in `NOWCAST_SESSION`, otherwise
-/// `cli-<pid>`: a tool anchored on itself is its own session.
-pub fn session_id(explicit: Option<String>, pid: u32) -> Result<SessionId, CliError> {
+/// The session the tool declares, and whether it replaces the anchor's.
+pub struct Declaration {
+    pub id: SessionId,
+    pub replace: bool,
+}
+
+/// The session given on the command line or in `NOWCAST_SESSION`, which
+/// replaces the anchor's, otherwise `cli-<pid>`: a tool anchored on itself is
+/// its own session, while one run inside an agent keeps the agent's.
+pub fn session(explicit: Option<String>, pid: u32) -> Result<Declaration, CliError> {
     match explicit {
         Some(id) if id.is_empty() => Err(CliError::Usage("the session id is empty".into())),
-        Some(id) => Ok(SessionId::new(id)),
-        None => Ok(SessionId::new(format!("cli-{pid}"))),
+        Some(id) => Ok(Declaration {
+            id: SessionId::new(id),
+            replace: true,
+        }),
+        None => Ok(Declaration {
+            id: SessionId::new(format!("cli-{pid}")),
+            replace: false,
+        }),
     }
 }
 
@@ -74,19 +87,23 @@ mod tests {
     }
 
     #[test]
-    fn the_default_session_names_the_process() {
-        assert_eq!(session_id(None, 4242).unwrap().as_str(), "cli-4242");
+    fn the_default_session_names_the_process_without_replacing() {
+        let declaration = session(None, 4242).unwrap();
+        assert_eq!(declaration.id.as_str(), "cli-4242");
+        assert!(!declaration.replace);
     }
 
     #[test]
-    fn an_explicit_session_wins() {
-        assert_eq!(session_id(Some("abc".into()), 1).unwrap().as_str(), "abc");
+    fn an_explicit_session_wins_and_replaces() {
+        let declaration = session(Some("abc".into()), 1).unwrap();
+        assert_eq!(declaration.id.as_str(), "abc");
+        assert!(declaration.replace);
     }
 
     #[test]
     fn an_empty_session_is_a_usage_error() {
         assert!(matches!(
-            session_id(Some(String::new()), 1),
+            session(Some(String::new()), 1),
             Err(CliError::Usage(_))
         ));
     }
