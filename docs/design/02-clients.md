@@ -3,7 +3,9 @@
 État au 2026-11-08 : architecture des clients, format du flux et déclaration de
 session posés ; mod central et bibliothèque des mods vérifiés, le rechargement à chaud
 et le rafraîchissement aussi en session interactive ; entrée d'un flux et mesures
-des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central.
+des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central ;
+rôles du mod central envers la brique forge et les mods d'affichage revus le
+2026-11-13.
 
 ## Décisions prises
 
@@ -16,8 +18,8 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   ne fait rien perdre dans la limite de cet historique, et au-delà le client en est
   averti (`flow-gap`). Un client ne fait que
   sept choses : déclarer sa session, s'abonner, se désabonner, lire son flux,
-  demander le rafraîchissement immédiat d'un flux ou de tous les flux d'une brique,
-  et envoyer une entrée sur un flux (voir `01-briques.md`). Le service n'exécute aucune action
+  demander le rafraîchissement immédiat d'un flux, de tous les flux d'une brique ou
+  d'une portée qu'elle interprète, et envoyer une entrée sur un flux (voir `01-briques.md`). Le service n'exécute aucune action
   sur une source : un mod qui agit le fait lui-même (voir `01-briques.md`). Ce qui
   n'est pas dans le client n'a pas à être porté d'un agent à l'autre.
 - **Pas d'abonnement sans session déclarée.** Le client déclare sa session au démarrage
@@ -190,12 +192,57 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   en retient (`05-brique-claude-code.md`). Ce flux suit
   l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
   même nom, ce qui remplace l'abonnement à l'ancien.
-- **Le mod central rafraîchit la brique forge après une action de sa session** :
-  après un appel d'outil qui peut changer une PR ou une issue (`git push`, `gh pr`,
-  `az repos pr`, `gh issue`, `az boards work-item`…), il demande le rafraîchissement de tous les flux de la sorte
-  concernée (`06-brique-forge.md`). Une session sur un dépôt qui modifie un autre
-  dépôt rafraîchit ainsi ce que suit une autre session, sans connaître ses flux.
-  Reconnaître ces appels est propre à l'agent, donc au client, pas à la brique.
+- **L'affichage n'est jamais l'affaire du mod central.** Il porte la logique et sert
+  d'interface entre le service et les mods d'affichage, qui montrent ce qu'il tient.
+- **Le mod central rafraîchit la brique forge sur ce que fait son agent.** Il observe
+  les appels d'outils de son agent : `git push`, `gh pr|issue|run|workflow|api`,
+  `az repos|boards|pipelines`, les appels REST (`curl` vers l'API d'une forge) et
+  les outils des serveurs MCP GitHub et Azure DevOps. Il fait de chacun une portée
+  (`{remote, types, number}`), le dépôt tiré des arguments (`-R`, l'URL que `gh`
+  affiche, le chemin de l'API, les paramètres MCP) ou à défaut du répertoire de
+  travail, et demande le rafraîchissement de cette portée (`06-brique-forge.md`, « Ce
+  que reconnaît le client »). Quand le dépôt reste introuvable, il demande celui de
+  tous les flux de la sorte. Une session qui agit sur un autre dépôt rafraîchit ainsi
+  ce que suit une autre session, sans connaître ses flux. Reconnaître ces appels est
+  propre à l'agent, donc au client, pas à la brique. Un service trop ancien pour
+  les portées reçoit la demande par sorte : elles ne font pas relever la plus
+  ancienne version du service que le mod accepte.
+- **Un mod d'affichage demande un rafraîchissement dans les mêmes termes neutres**,
+  par le mod central, sans parler la langue du service :
+  `$.nowcast.refreshForge({remote?, cwd?, types?, number?})`. `cwd` désigne le
+  dépôt par son remote de push, relatif au répertoire de la session, celui-ci par
+  défaut ; `remote` prime sur lui. La demande passe dans la même file que celles de
+  l'observation, avec les mêmes replis (par sorte quand le dépôt reste introuvable
+  ou que le service refuse la portée), et rend l'échec s'il y en a un.
+- **Le mod central traduit chaque worktree de sa session en clés forge** : la branche
+  où `git push` l'enverrait, et l'URL de ce remote, ni l'amont ni le seul `origin`.
+  Il la lit dans `@{push}` (`git rev-parse --abbrev-ref --symbolic-full-name @{push}`
+  donne `<remote>/<branche>`). Quand git ne le résout pas, la clé est le nom local sur
+  le remote de push : `branch.<nom>.pushRemote`, sinon `remote.pushDefault`, sinon le
+  remote de l'amont, sinon `origin`. Une branche pas encore poussée a donc sa clé, et
+  son flux montre `head_sha: null`. La clé est rangée dans l'entrée du worktree
+  (`05-brique-claude-code.md`, « La liste »).
+
+  Vérifié le 2026-11-13 (git 2.56) : `git switch -c <branche> origin/main` donne
+  `origin/main` pour amont jusqu'au premier `git push -u`, d'où l'abandon de l'amont.
+  Avant ce push, `@{push}` échoue avec `push.default` à `simple` (le défaut, où `git
+  push` refuse aussi) comme à `current` (tant que `refs/remotes/origin/<branche>`
+  n'existe pas) : le repli donne `origin/<branche>`. Après, il donne
+  `origin/<branche>` dans les deux cas. À `upstream`, il donne `origin/main`, là où
+  `git push` enverrait vraiment.
+
+  Brique forge activée, il s'abonne aux flux `pr` et `pipelines` de ces clés, dans
+  ses propres abonnements, sous les noms `worktree-pr:<path>` et
+  `worktree-pipelines:<path>` : un mod d'affichage trouve les flux d'un worktree
+  par ces noms. Il s'abonne à nouveau quand la clé change, retire les abonnements
+  d'un worktree sorti de la liste, et tous après un `/clear` ou une reprise. Une
+  clé que la brique refuse (`subscription_refused`, un remote qu'aucun provider ne
+  reconnaît) n'est plus demandée tant qu'elle ne change pas. Une réponse
+  `unknown_brick` arrête jusqu'à la session suivante ce qui l'a reçue : les
+  abonnements des worktrees, ou les rafraîchissements (observation et
+  `refreshForge`). Il voit un `git switch` lancé par son agent
+  (`05-brique-claude-code.md`, « Du fichier au worktree »), pas un lancé dans un
+  terminal, jusqu'à ce que la brique git (#51) lui donne l'état local.
 - **Le mod central relève les worktrees où écrit sa session**, d'après les appels
   d'outils, et les tient dans son état, brique claude-code activée ou non. Une
   session peut écrire dans un autre worktree que le sien : un consommateur qui ne
@@ -212,7 +259,7 @@ des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod c
   l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
 - **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
   mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
-  `subscribe`, `unsubscribe`, `refresh`, `refreshBrick`, `input`, `last` et `history`, typés par le contrat du mod
+  `subscribe`, `unsubscribe`, `refresh`, `refreshBrick`, `refreshForge`, `input`, `last` et `history`, typés par le contrat du mod
   central. `history` lit l'historique d'un flux après un identifiant
   (`GET /v1/flows/{flow}?after=<id>`) : c'est ainsi qu'un mod qui s'abonne en cours de
   session à un flux déjà suivi lit ce qui a précédé. L'état partagé, lui, ne garde que

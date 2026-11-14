@@ -74,7 +74,9 @@ de déclaration et le protocole sont fixés dans `03-contrats.md`.
   les relaie : le rafraîchissement immédiat, typiquement après qu'un mod a agi sur la
   source, et l'entrée (ci-dessous). L'entrée vise un flux auquel il est abonné. Le
   rafraîchissement vise un tel flux, ou tous les flux d'une brique, d'une sorte au
-  besoin : le service les envoie un par un, et la brique n'en sait rien.
+  besoin : le service les envoie un par un, et la brique n'en sait rien. Il peut
+  aussi porter une portée que seule la brique interprète (la forge y lit un dépôt et
+  des sortes), que le service lui relaie telle quelle (`03-contrats.md`).
 - **L'entrée d'un flux : une donnée qu'un client envoie à la brique.** Certaines
   données n'existent que chez le client (les mesures d'une session d'agent, que seul
   son moteur connaît). Un abonné d'un flux peut y envoyer un détail JSON, d'un type
