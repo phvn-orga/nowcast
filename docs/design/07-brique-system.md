@@ -1,7 +1,7 @@
 # La brique system
 
-État au 2026-11-16 : conçue sous #75, sources vérifiées par un spike le même jour.
-Brique native (`01-briques.md`).
+État au 2026-11-16 : conçue sous #75, sources vérifiées par un spike le même jour,
+implémentée dans #140. Brique native (`01-briques.md`).
 
 Elle publie ce que fait la machine, en direct : CPU, mémoire, GPU, disques, réseau,
 températures et pression, pour n'importe quel consommateur (la ligne d'état d'un
@@ -105,6 +105,12 @@ de la brique claude-code (#76).
   VRAM n'est qu'une petite réserve fixe et l'essentiel passe par la GTT : sur la
   machine de développement (Radeon 890M, 2026-11-16), 512 Mo de VRAM presque pleins
   et 2,9 Go de GTT. Un GPU dédié a surtout de la VRAM.
+- **Un GPU endormi le reste.** Un GPU dédié en veille (runtime PM,
+  `power/runtime_status` à `suspended` ou `suspending`) se réveille quand on le lit,
+  et sur un portable hybride, une lecture toutes les 2 s l'empêcherait de se
+  rendormir. Il est donc publié avec `suspended` à `true`, sans mesures, et
+  `nvidia-smi` n'est lancé que si aucune carte NVIDIA ne dort : il les interroge
+  toutes. Un GPU intégré reste `active`.
 
 ### Disques et systèmes de fichiers
 
@@ -168,8 +174,12 @@ fournisseur.
 - **Sans privilège.** La brique ouvre un socket ICMP non privilégié
   (`SOCK_DGRAM`, `IPPROTO_ICMP`), permis quand le groupe du service est dans
   `net.ipv4.ping_group_range`. systemd ouvre ce réglage à tous les groupes
-  (`/usr/lib/sysctl.d/50-default.conf`) ; une distribution qui le referme rend la
-  sonde absente, comme l'absence de route par défaut.
+  (`/usr/lib/sysctl.d/50-default.conf`) ; une distribution qui le referme rend les
+  sondes absentes.
+- **Sans route par défaut**, `gateway` est absente, faute de passerelle à viser, et
+  `internet` reste : ses pings, que le noyau refuse d'envoyer (« network
+  unreachable »), comptent comme perdus. Une coupure du Wi-Fi se lit donc comme une
+  perte de 100 %, pas comme une absence de donnée.
 - **Vérifié le 2026-11-16** depuis un binaire statique lancé par `systemd-run
   --user`, comme le service : 5 pings sur 5 vers la passerelle (environ 1 ms),
   1.1.1.1 (21 ms) et 9.9.9.9 (8,5 ms).
@@ -258,13 +268,16 @@ Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
   comparaison n'épargne des publications que sur une machine calme. À 2 s, les 100
   événements que le service garde par flux couvrent alors un peu plus de 3 minutes.
 - **Un `refresh` fait lire et publier aussitôt**, même sans changement, comme pour
-  les autres briques.
+  les autres briques. Les sondes ne tournent pas plus d'une fois par 1,75 s : à
+  moins de 1,75 s de leur dernier passage, un `refresh` reprend leurs chiffres. Sans
+  cela, chaque `refresh` ajouterait un échantillon et leur fenêtre de 15 échantillons
+  couvrirait bien moins de 30 s chez un client qui rafraîchit souvent.
 
 ## Rangement
 
 `bricks/system/` : la crate `nowcast-brick-system`, `brick.toml` et les schémas
-(`subscription-machine.json`, un objet vide sans propriété permise, et
-`system-machine-v1.json`). Elle passe les tests de conformité du protocole côté
+(`params-machine.json`, un objet vide sans propriété permise, et
+`machine-v1.json`). Elle passe les tests de conformité du protocole côté
 brique, comme les autres briques natives.
 
 ## À trancher
@@ -286,8 +299,8 @@ permettait pas de vérifier :
 
 - `nvidia-smi` : les champs de la requête, leur forme sans unités, et le coût d'un
   lancement toutes les 2 s.
-- `gpu_busy_percent` sur un GPU AMD dédié en veille (runtime PM) : la lecture peut
-  le réveiller ou échouer. Un GPU intégré reste `active`.
+- Qu'un GPU dédié en veille ne se réveille pas à la lecture de
+  `power/runtime_status` et des noms de capteurs, seuls lus pour lui.
 - Les capteurs Intel (`coretemp`), et ceux des GPU dédiés AMD, qui ont aussi
   `junction` et `mem`.
 - Si la lecture de la température du NVMe, qui interroge le disque, l'empêche
