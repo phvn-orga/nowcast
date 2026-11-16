@@ -103,6 +103,8 @@ pub struct Model {
     selected: BTreeMap<String, usize>,
     /// How far the event screen is scrolled.
     pub scroll: u16,
+    /// The tab a flow's screen was opened from, where going back returns.
+    opened_from: Tab,
     pub quit: bool,
 }
 
@@ -116,6 +118,7 @@ impl Model {
             screen: Screen::Tab(Tab::Overview),
             selected: BTreeMap::new(),
             scroll: 0,
+            opened_from: Tab::Flows,
             quit: false,
         }
     }
@@ -293,7 +296,7 @@ impl Model {
     pub fn tab(&self) -> Tab {
         match self.screen {
             Screen::Tab(tab) => tab,
-            Screen::Flow(_) | Screen::Event { .. } => Tab::Flows,
+            Screen::Flow(_) | Screen::Event { .. } => self.opened_from,
         }
     }
 
@@ -336,7 +339,10 @@ impl Model {
             return;
         };
         match self.screen.clone() {
-            Screen::Tab(Tab::Sessions | Tab::Flows) => self.screen = Screen::Flow(row),
+            Screen::Tab(tab @ (Tab::Sessions | Tab::Flows)) => {
+                self.opened_from = tab;
+                self.screen = Screen::Flow(row);
+            }
             Screen::Tab(Tab::Bricks) => {
                 // A brick opens the flows tab, on its first flow.
                 let flows = self.flow_ids();
@@ -357,7 +363,7 @@ impl Model {
     pub fn back(&mut self) {
         self.screen = match &self.screen {
             Screen::Event { flow, .. } => Screen::Flow(flow.clone()),
-            Screen::Flow(_) => Screen::Tab(Tab::Flows),
+            Screen::Flow(_) => Screen::Tab(self.opened_from),
             Screen::Tab(_) => Screen::Tab(Tab::Overview),
         };
     }
@@ -637,6 +643,23 @@ mod tests {
         assert_eq!(model.selected(), 1, "the selection is kept");
         model.back();
         assert_eq!(model.screen, Screen::Tab(Tab::Flows));
+    }
+
+    #[test]
+    fn a_flow_goes_back_to_the_tab_it_was_opened_from() {
+        let sessions =
+            json!([ { "id": "s", "subscriptions": [ { "id": "s-1", "flow": "forge/x" } ] } ]);
+        let mut model = Model::new(state("running", sessions));
+        model.event("update", &update("forge/x", "1"), now());
+        model.show_tab(Tab::Sessions);
+        model.open();
+        assert_eq!(model.screen, Screen::Flow("forge/x".into()));
+        assert_eq!(model.tab(), Tab::Sessions);
+        model.open();
+        assert_eq!(model.tab(), Tab::Sessions, "an event too");
+        model.back();
+        model.back();
+        assert_eq!(model.screen, Screen::Tab(Tab::Sessions));
     }
 
     #[test]
