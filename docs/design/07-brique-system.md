@@ -1,18 +1,20 @@
 # La brique system
 
 État au 2026-11-16 : conçue sous #75, sources vérifiées par un spike le même jour,
-implémentée dans #140. Brique native (`01-briques.md`).
+implémentée dans #140. Sorte `process` conçue sous #76 le même jour, ses sources
+vérifiées par un spike. Brique native (`01-briques.md`).
 
 Elle publie ce que fait la machine, en direct : CPU, mémoire, GPU, disques, réseau,
 températures et pression, pour n'importe quel consommateur (la ligne d'état d'un
-agent, un tableau de bord). Ce que coûte chaque session de Claude Code est l'affaire
-de la brique claude-code (#76).
+agent, un tableau de bord). Elle publie aussi ce que coûte l'arbre de processus d'un
+abonné : pour une session d'agent, ce que coûte la session.
 
 ## Ce qu'elle publie
 
 | Sorte | Clé | Flux | Publie | Accepte en entrée |
 |---|---|---|---|---|
 | `machine` | `{}` | `system/machine` | `system.machine/v1` | rien |
+| `process` | `{}` | `system/process/<pid>` | `system.process/v1` | rien |
 
 - **Un seul flux pour toute la machine.** Un abonnement suffit, et chaque événement
   est un instantané cohérent, tout étant lu au même échantillon. La brique lit donc
@@ -210,6 +212,85 @@ dit si la machine manque d'une ressource, ce que les pourcentages d'usage ne dis
 pas. `cpu` n'a que `some` : au niveau du système, le noyau rend `full` toujours nul.
 Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
 
+## `system.process/v1`
+
+Ce que coûte un processus et tout ce qu'il a lancé : pour un agent, ses shells, ses
+serveurs MCP, ses builds.
+
+```json
+{
+  "pid": 135578,
+  "processes": 8,
+  "cpu": { "usage": 8 },
+  "memory": { "rss_mib": 721 }
+}
+```
+
+### Quel processus
+
+- **Le processus est l'ancrage de l'abonné**, que le service passe à chaque
+  `subscribe` (`03-contrats.md`, « L'ancrage de l'abonné »). La clé est vide :
+  aucun client ne désigne un processus. Le pid entre dans l'identifiant du flux, si
+  bien que deux ancrages n'ont jamais le même flux, et que les abonnés d'un même
+  ancrage le partagent.
+- **La brique ne sait pas ce qu'est ce processus.** Elle mesure un pid, sans rien
+  connaître du type de client. Un mod de Claude Code qui s'abonne reçoit sa session,
+  parce que ses requêtes partent du processus de Claude Code, qui est son ancrage
+  (`02-clients.md`) ; `nowcast watch` lancé d'un terminal recevrait le sien.
+- **Le flux suit le processus, pas une session.** Après un `/clear`, le processus
+  de l'agent reste le même, et ses chiffres continuent.
+- **À la mort de l'ancrage**, le service retire ses abonnements et la brique reçoit
+  `release`. Entre les deux, le pid peut être réattribué : la brique relève
+  l'instant de démarrage du processus au `subscribe` (`/proc/<pid>/stat`, champ 22)
+  et ne publie plus rien dès qu'il change ou que le processus a disparu.
+
+### Les mesures
+
+- **`processes`** compte le processus et ses descendants au moment de la lecture.
+- **`memory.rss_mib`** est la somme de leurs mémoires résidentes (RSS,
+  `/proc/<pid>/stat`, champ 24, en pages). Une page partagée entre deux processus de
+  l'arbre (les bibliothèques de deux serveurs MCP, par exemple) compte deux fois :
+  le total surestime. La PSS, qui répartit ces pages, coûte une lecture de
+  `smaps_rollup` par processus : 10 ms pour le processus de Claude Code, mesuré le
+  2026-11-16, contre 0,02 ms pour `stat`. Sur ce processus seul, 581 Mio de RSS et
+  509 Mio de PSS.
+- **`cpu.usage`** est le temps CPU que l'arbre a pris entre deux lectures, en
+  pourcentage d'un cœur, entier : 250 veut dire deux cœurs et demi, comme dans
+  `top`. C'est la différence, d'une lecture à l'autre, de la somme sur l'arbre de
+  `utime`, `stime`, `cutime` et `cstime` (`/proc/<pid>/stat`, champs 14 à 17).
+- **`cutime` et `cstime` comptent les enfants déjà terminés** : un processus y
+  reçoit le temps de chaque enfant qu'il a attendu, petits-enfants compris. Sans
+  eux, une commande ou une étape de build qui naît et meurt entre deux lectures ne
+  compterait pas. Vérifié le 2026-11-16 : un shell qui enchaîne des enfants de
+  0,3 s, chacun occupant un cœur, se lit 100 % avec eux, entre 0 et 19 % sans ; le
+  processus d'une session Claude Code avait pris 378 s de CPU lui-même et 1 678 s
+  dans ses enfants terminés.
+- **Un processus qui quitte l'arbre** emporte son temps (un double `fork`, un
+  démon rattaché à `init`) : la somme recule. La lecture où cela arrive publie
+  `0`, et ce qu'il prend ensuite n'est plus compté.
+
+### Trouver l'arbre
+
+- **Par les fichiers `children`** : la brique part du pid et lit
+  `/proc/<pid>/task/<tid>/children` de chaque thread de chaque processus trouvé,
+  puis le `stat` de chacun. Mesuré le 2026-11-16 sur une session Claude Code de 7
+  processus : 0,35 ms, contre 5,5 à 6,5 ms pour parcourir tout `/proc` (515
+  processus) et relier chacun à son parent.
+- **Repli sur le parcours complet** quand le noyau n'a pas ces fichiers
+  (`CONFIG_PROC_CHILDREN`, activé sur le noyau Ubuntu de la machine de
+  développement, non vérifié ailleurs) : un seul parcours par lecture, partagé par
+  tous les flux `process`.
+- La documentation du noyau dit `children` fiable seulement quand les enfants sont
+  arrêtés : un enfant créé pendant la lecture peut manquer, et compte à la lecture
+  suivante.
+
+### L'échantillonnage
+
+- **Au rythme de `machine`** : toutes les 2 s tant que le flux a un abonné,
+  première publication 200 ms après l'ouverture, seulement quand le détail change,
+  et un `refresh` fait lire et publier aussitôt (« L'échantillonnage », plus bas).
+- **Rien n'est gardé sur disque.**
+
 ## Les sources
 
 | Domaine | Source |
@@ -224,6 +305,7 @@ Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
 | Sondes | socket ICMP non privilégié ; passerelle par `/proc/net/route` |
 | Températures | `/sys/class/hwmon/hwmon*/` |
 | Pression | `/proc/pressure/{cpu,memory,io}` |
+| Arbre de processus | `/proc/<pid>/task/<tid>/children`, `/proc/<pid>/stat` ; tout `/proc` en repli |
 
 - **Le GPU ne passe pas par `sysinfo`.** Sa fonction `gpu` lit sous Linux les mêmes
   fichiers AMD, sans la GTT, et atteint NVIDIA et les autres par `dlopen` de
@@ -276,8 +358,8 @@ Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
 ## Rangement
 
 `bricks/system/` : la crate `nowcast-brick-system`, `brick.toml` et les schémas
-(`params-machine.json`, un objet vide sans propriété permise, et
-`machine-v1.json`). Elle passe les tests de conformité du protocole côté
+(`params-machine.json` et `params-process.json`, des objets vides sans propriété
+permise, `machine-v1.json` et `process-v1.json`). Elle passe les tests de conformité du protocole côté
 brique, comme les autres briques natives.
 
 ## À trancher
@@ -291,6 +373,13 @@ brique, comme les autres briques natives.
 - **Les processus les plus lourds** (une sorte à part, plus haut).
 - **Les limites d'un cgroup** : une machine dont le service tourne dans un conteneur
   publie la mémoire de l'hôte, pas la sienne.
+- **Un processus désigné par son pid** (`process` avec `{"pid": N}`), pour un
+  tableau de bord qui veut le coût de chaque session sans en être une. Il lui
+  faudrait les pids : la brique claude-code les recevrait par l'ancrage de ses
+  abonnés `session`, et pourrait les publier dans l'entrée de chaque session.
+- **Ce qui quitte l'arbre** (double `fork`, conteneur) n'est pas compté. Un cgroup
+  par session le compterait, mais il faudrait lancer l'agent par une enveloppe de
+  nowcast, qui ne fait qu'observer.
 
 ## À vérifier à l'implémentation
 
