@@ -1,6 +1,7 @@
 # La brique system
 
-État au 2026-11-16 : conçue sous #75. Brique native (`01-briques.md`).
+État au 2026-11-16 : conçue sous #75, sources vérifiées par un spike le même jour.
+Brique native (`01-briques.md`).
 
 Elle publie ce que fait la machine, en direct : CPU, mémoire, GPU, disques, réseau,
 températures et pression, pour n'importe quel consommateur (la ligne d'état d'un
@@ -129,9 +130,10 @@ de la brique claude-code (#76).
   pas celui dont elle dispose. **`errors` et `dropped`** comptent les paquets en
   erreur et les paquets perdus pendant le dernier échantillon, dans les deux sens
   (`statistics/` de l'interface).
-- **`wifi`** est la liaison radio de l'interface connectée : `signal_dbm`, et
-  `rx_mbit_s`, `tx_mbit_s`, le débit que la radio a négocié avec le point d'accès.
-  Lu par netlink (nl80211), sans rien émettre. Absent sans liaison.
+- **`wifi`** est la liaison radio de l'interface connectée : `signal_dbm`, la
+  moyenne que tient le pilote (`SignalAvg`, moins agitée que le signal du dernier
+  paquet), et `rx_mbit_s`, `tx_mbit_s`, le débit que la radio a négocié avec le
+  point d'accès. Lu par netlink (nl80211), sans rien émettre. Absent sans liaison.
 
 ### Latence et pertes
 
@@ -150,8 +152,12 @@ fournisseur.
   pings perdus sur la même fenêtre, en pourcentage entier.
 - **Sans privilège.** La brique ouvre un socket ICMP non privilégié
   (`SOCK_DGRAM`, `IPPROTO_ICMP`), permis quand le groupe du service est dans
-  `net.ipv4.ping_group_range` (tous les groupes sur la machine de développement,
-  2026-11-16). Sinon, ou sans route par défaut, la sonde est absente.
+  `net.ipv4.ping_group_range`. systemd ouvre ce réglage à tous les groupes
+  (`/usr/lib/sysctl.d/50-default.conf`) ; une distribution qui le referme rend la
+  sonde absente, comme l'absence de route par défaut.
+- **Vérifié le 2026-11-16** depuis un binaire statique lancé par `systemd-run
+  --user`, comme le service : 5 pings sur 5 vers la passerelle (environ 1 ms),
+  1.1.1.1 (21 ms) et 9.9.9.9 (8,5 ms).
 
 ### Températures
 
@@ -163,6 +169,12 @@ fournisseur.
 
 En degrés entiers. Les liens entre capteurs et périphériques sont vérifiés sur la
 machine de développement (2026-11-16) pour AMD et NVMe ; `coretemp` ne l'est pas.
+
+**La brique ne lit que ces capteurs.** Certains interrogent le matériel à chaque
+lecture : mesuré le 2026-11-16, 1 ms par lecture pour le NVMe, 1 à 2,5 ms pour ceux
+de la mémoire (`spd5118`), de la puce Wi-Fi et de l'ACPI, contre 0,02 ms pour
+`k10temp` et `amdgpu` une fois lus. Lire tous les capteurs à chaque échantillon
+coûterait une dizaine de millisecondes.
 
 ### Pression
 
@@ -191,8 +203,10 @@ Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
 - **Le GPU ne passe pas par `sysinfo`.** Sa fonction `gpu` lit sous Linux les mêmes
   fichiers AMD, sans la GTT, et atteint NVIDIA et les autres par `dlopen` de
   `libnvidia-ml.so.1` et `libvulkan.so.1` (lu dans les sources de la 0.40.3). Le
-  binaire publié est statique (musl), où `dlopen` ne charge rien. `nvml-wrapper` a la
-  même limite.
+  binaire publié est statique (musl), où `dlopen` ne charge rien : vérifié le
+  2026-11-16 avec le conteneur de la release, `libvulkan.so.1` et même `libc.so.6`
+  répondent « Dynamic loading not supported », alors que le même programme lié à la
+  glibc charge `libvulkan.so.1`. `nvml-wrapper` a la même limite.
 - **NVIDIA passe par `nvidia-smi`**, lancé à chaque échantillon quand une carte
   NVIDIA (vendeur `0x10de`) est présente et que le programme est dans le `PATH` du
   service. Sans lui, la carte est listée sans mesures. Un processus de plus toutes les
@@ -204,6 +218,11 @@ Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
   son périphérique, et écarter les périphériques virtuels selon les règles plus haut.
 - **Pas d'`iw`** pour le Wi-Fi : sa documentation demande de ne pas analyser sa
   sortie.
+- **Vérifié le 2026-11-16, binaire statique lancé par `systemd-run --user`** :
+  `sysinfo` avec `system` seul compile pour musl, et un échantillon CPU et mémoire
+  lui coûte 0,2 à 0,3 ms ; `wl-nl80211` rend le signal, sa moyenne et les deux
+  débits de la station connectée, en 1 à 3 ms par lecture. Il tire `tokio`, déjà
+  dans les briques.
 
 ## L'échantillonnage
 
@@ -247,13 +266,14 @@ brique, comme les autres briques natives.
 
 ## À vérifier à l'implémentation
 
-- Que `dlopen` échoue bien dans le binaire statique musl : c'est ce qui écarte NVML,
-  non testé.
+Ce que la machine de développement (CPU et GPU intégré AMD, NVMe, Wi-Fi) ne
+permettait pas de vérifier :
+
 - `nvidia-smi` : les champs de la requête, leur forme sans unités, et le coût d'un
-  lancement toutes les 2 s. Aucune machine NVIDIA n'était disponible.
-- Que `wl-nl80211` rend le signal et les débits de la station connectée
-  (`NL80211_CMD_GET_STATION`) ; à défaut, `/proc/net/wireless` donne le seul signal.
-- `gpu_busy_percent` sur un GPU AMD en veille (runtime PM) : la lecture peut le
-  réveiller ou échouer.
-- Les capteurs Intel (`coretemp`), et les GPU dédiés AMD, qui ont aussi `junction`
-  et `mem`.
+  lancement toutes les 2 s.
+- `gpu_busy_percent` sur un GPU AMD dédié en veille (runtime PM) : la lecture peut
+  le réveiller ou échouer. Un GPU intégré reste `active`.
+- Les capteurs Intel (`coretemp`), et ceux des GPU dédiés AMD, qui ont aussi
+  `junction` et `mem`.
+- Si la lecture de la température du NVMe, qui interroge le disque, l'empêche
+  d'entrer dans ses états de basse consommation.
