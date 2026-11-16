@@ -278,8 +278,7 @@ serveurs MCP, ses builds.
   processus) et relier chacun à son parent.
 - **Repli sur le parcours complet** quand le noyau n'a pas ces fichiers
   (`CONFIG_PROC_CHILDREN`, activé sur le noyau Ubuntu de la machine de
-  développement, non vérifié ailleurs) : un seul parcours par lecture, partagé par
-  tous les flux `process`.
+  développement, non vérifié ailleurs) : un parcours par flux à chaque lecture.
 - La documentation du noyau dit `children` fiable seulement quand les enfants sont
   arrêtés : un enfant créé pendant la lecture peut manquer, et compte à la lecture
   suivante.
