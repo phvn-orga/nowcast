@@ -68,7 +68,7 @@ de la brique claude-code (#76).
     ],
     "probes": {
       "gateway": { "target": "192.168.1.1", "rtt_ms": 1, "loss": 0 },
-      "internet": { "target": "…", "rtt_ms": 14, "loss": 0 }
+      "internet": { "targets": ["9.9.9.9", "1.1.1.1"], "rtt_ms": 9, "loss": 0 }
     }
   },
   "pressure": {
@@ -143,13 +143,19 @@ Wi-Fi ou le câble, une passerelle saine avec internet en perte désigne le
 fournisseur.
 
 - **Deux sondes**, `gateway` (la passerelle de la route par défaut,
-  `/proc/net/route`) et `internet` (un hôte externe, voir « À trancher »). Chacune
-  envoie un ping ICMP par échantillon, attendu 1 s au plus.
-- **La brique émet du trafic** : une centaine d'octets par sonde toutes les 2 s, tant
-  que le flux a un abonné. C'est sa seule action vers l'extérieur.
-- **`rtt_ms`** est la médiane des réponses sur les 30 dernières secondes, en
-  millisecondes entières, absente si aucune n'a répondu. **`loss`** est la part des
-  pings perdus sur la même fenêtre, en pourcentage entier.
+  `/proc/net/route`) et `internet`. Chaque cible reçoit un ping ICMP par
+  échantillon, attendu 1 s au plus.
+- **`internet` vise deux hôtes fixes**, les résolveurs publics 9.9.9.9 (Quad9) et
+  1.1.1.1 (Cloudflare), d'opérateurs différents. Un échantillon compte comme
+  répondu dès que l'un des deux répond, avec le temps du plus rapide : l'incident
+  d'un seul opérateur ne se lit pas comme une coupure d'internet. Les hôtes ne se
+  configurent pas ; ils le deviendront si un réseau les bloque ou si le besoin
+  apparaît.
+- **La brique émet du trafic** : trois pings d'une centaine d'octets toutes les
+  2 s, tant que le flux a un abonné. C'est sa seule action vers l'extérieur.
+- **`rtt_ms`** est la médiane des échantillons répondus sur les 30 dernières
+  secondes, en millisecondes entières, absente si aucun n'a répondu. **`loss`** est
+  la part des échantillons sans réponse sur la même fenêtre, en pourcentage entier.
 - **Sans privilège.** La brique ouvre un socket ICMP non privilégié
   (`SOCK_DGRAM`, `IPPROTO_ICMP`), permis quand le groupe du service est dans
   `net.ipv4.ping_group_range`. systemd ouvre ce réglage à tous les groupes
@@ -254,9 +260,8 @@ brique, comme les autres briques natives.
 
 ## À trancher
 
-- **L'hôte externe de la sonde `internet`** : un résolveur public (1.1.1.1, 9.9.9.9),
-  qui reçoit alors un ping toutes les 2 s de chaque machine abonnée, ou un hôte que
-  l'utilisateur choisit, ce qui demande une configuration à la brique.
+- **Des hôtes de sonde configurables**, si les hôtes fixes posent un problème un
+  jour (un réseau qui bloque l'ICMP vers l'extérieur, par exemple).
 - **Les interfaces virtuelles qui portent du trafic réel**, un VPN (WireGuard, `tun`)
   par exemple : écartées avec les ponts et les `veth`.
 - **IPv6** : les sondes ne visent que la passerelle et l'hôte IPv4.
