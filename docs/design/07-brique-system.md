@@ -153,6 +153,15 @@ fournisseur.
   apparaît.
 - **La brique émet du trafic** : trois pings d'une centaine d'octets toutes les
   2 s, tant que le flux a un abonné. C'est sa seule action vers l'extérieur.
+- **IPv4 seulement.** Une panne du seul IPv6 (une box qui le perd) ne se voit pas :
+  la machine de développement n'a pas d'IPv6 (ni adresse publique, ni route par
+  défaut, 2026-11-16), et rien ne permettait d'y tester des sondes IPv6.
+- **Un VPN actif est traversé par la sonde `internet`**, pas par `gateway` : les
+  VPN courants (WireGuard, OpenVPN, Tailscale) laissent la route par défaut de la
+  table principale vers la box et font passer le reste par le tunnel (non vérifié,
+  pas de VPN sur la machine de développement). Une passerelle saine avec internet en
+  perte peut alors venir du VPN, pas du fournisseur. Le tunnel lui-même n'est pas
+  publié : son trafic se lit, chiffré, sur l'interface physique.
 - **`rtt_ms`** est la médiane des échantillons répondus sur les 30 dernières
   secondes, en millisecondes entières, absente si aucun n'a répondu. **`loss`** est
   la part des échantillons sans réponse sur la même fenêtre, en pourcentage entier.
@@ -262,9 +271,10 @@ brique, comme les autres briques natives.
 
 - **Des hôtes de sonde configurables**, si les hôtes fixes posent un problème un
   jour (un réseau qui bloque l'ICMP vers l'extérieur, par exemple).
-- **Les interfaces virtuelles qui portent du trafic réel**, un VPN (WireGuard, `tun`)
-  par exemple : écartées avec les ponts et les `veth`.
-- **IPv6** : les sondes ne visent que la passerelle et l'hôte IPv4.
+- **Les tunnels VPN** (WireGuard, `tun`), publiés avec un `kind` à `vpn`, si leur
+  débit ou leur état manque un jour.
+- **Des sondes IPv6**, actives quand la machine a une route IPv6 par défaut, à
+  concevoir sur une machine qui en a une.
 - **Les processus les plus lourds** (une sorte à part, plus haut).
 - **Les limites d'un cgroup** : une machine dont le service tourne dans un conteneur
   publie la mémoire de l'hôte, pas la sienne.
