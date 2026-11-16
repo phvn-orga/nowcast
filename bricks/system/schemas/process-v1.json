@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "description": "What a process and everything it started cost, read at one sample.",
+  "required": ["pid", "processes", "cpu", "memory"],
+  "properties": {
+    "pid": {
+      "type": "integer",
+      "description": "The process measured: the anchor of the flow's subscribers."
+    },
+    "processes": {
+      "type": "integer",
+      "description": "The process and its descendants at the sample."
+    },
+    "cpu": {
+      "type": "object",
+      "required": ["usage"],
+      "properties": {
+        "usage": {
+          "type": "integer",
+          "description": "CPU time the tree took since the previous sample, percent of one core: 250 is two and a half cores. It counts the children that ended and were waited for in between; a process that left the tree takes its time with it, and that sample counts 0."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": ["rss_mib"],
+      "properties": {
+        "rss_mib": {
+          "type": "integer",
+          "description": "Sum of the resident memories of the tree, MiB. A page shared by two of its processes counts twice."
+        }
+      }
+    }
+  }
+}

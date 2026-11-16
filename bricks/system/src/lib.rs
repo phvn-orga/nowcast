@@ -1,26 +1,31 @@
 //! The system brick, native to nowcast: what the machine is doing, CPU,
 //! memory, GPUs, disks, network, temperatures and pressure, as one flow,
-//! `machine` (`system.machine/v1`). The `nowcast` binary runs it as `nowcast
-//! brick system`; its declaration and schemas are [`FILES`].
+//! `machine` (`system.machine/v1`); and what the process tree of a
+//! subscriber's anchor costs, as one flow per anchor, `process/<pid>`
+//! (`system.process/v1`). The brick only sees a pid, whatever the client.
+//! The `nowcast` binary runs it as `nowcast brick system`; its declaration
+//! and schemas are [`FILES`].
 //!
-//! While the flow has a subscriber, the brick samples the machine every 2 s,
-//! the first time 200 ms after the flow opens, and publishes when the
-//! rounded detail changes, and after every `refresh`. It reads `/proc` and
-//! `/sys`, runs `nvidia-smi` for an NVIDIA card, asks nl80211 for the Wi-Fi
-//! link, and pings the gateway and two public resolvers (9.9.9.9, 1.1.1.1):
-//! its only traffic.
+//! While a flow has a subscriber, the brick samples it every 2 s, the first
+//! time 200 ms after the flow opens, and publishes when the rounded detail
+//! changes, and after every `refresh`. It reads `/proc` and `/sys`, runs
+//! `nvidia-smi` for an NVIDIA card, asks nl80211 for the Wi-Fi link, and
+//! pings the gateway and two public resolvers (9.9.9.9, 1.1.1.1): its only
+//! traffic.
 
 mod disk;
 mod gpu;
 mod net;
 mod pressure;
 mod probe;
+mod process;
 mod sample;
 mod sensors;
 mod state;
 #[cfg(test)]
 mod testing;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -31,8 +36,9 @@ use tokio::io::{Stdout, stdin, stdout};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::Instant;
 
+use crate::process::{Tracker, Units};
 use crate::sample::Sampler;
-use crate::state::{Sampling, State};
+use crate::state::{Sampling, State, Target};
 
 /// The brick's name, as its declaration gives it.
 pub const NAME: &str = "system";
@@ -52,13 +58,22 @@ pub const FILES: &[(&str, &str)] = &[
         "schemas/machine-v1.json",
         include_str!("../schemas/machine-v1.json"),
     ),
+    (
+        "schemas/params-process.json",
+        include_str!("../schemas/params-process.json"),
+    ),
+    (
+        "schemas/process-v1.json",
+        include_str!("../schemas/process-v1.json"),
+    ),
 ];
 
 /// Time between two samples.
 const PERIOD: Duration = Duration::from_secs(2);
 
 /// Time between the reading a flow opens with and its first sample: the
-/// shortest that gives a CPU usage (`sysinfo`'s minimum).
+/// shortest that gives a CPU usage (`sysinfo`'s minimum), for the machine as
+/// for a process tree.
 const FIRST: Duration = sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
 
 /// Runs the brick on standard input and output until `shutdown` or the end
@@ -85,10 +100,32 @@ fn log(message: impl std::fmt::Display) {
 }
 
 /// A sampler and when it was primed or last sampled.
-struct Running {
-    sampler: Sampler,
+struct Running<S> {
+    sampler: S,
     read_at: Instant,
     due: Instant,
+}
+
+impl<S> Running<S> {
+    fn primed(sampler: S, now: Instant) -> Self {
+        Self {
+            sampler,
+            read_at: now,
+            due: now + FIRST,
+        }
+    }
+
+    /// Samples as soon as a usage can be computed again.
+    fn hurry(&mut self) {
+        self.due = self.due.min((self.read_at + FIRST).max(Instant::now()));
+    }
+
+    /// Marks a sample starting now; the next comes at a fixed pace.
+    fn read(&mut self) -> Instant {
+        self.read_at = Instant::now();
+        self.due = self.read_at + PERIOD;
+        self.read_at
+    }
 }
 
 async fn serve() -> ExitCode {
@@ -112,10 +149,16 @@ async fn serve() -> ExitCode {
     });
     let mut output = stdout();
     let mut state = State::default();
-    let mut running: Option<Running> = None;
+    let mut machine: Option<Running<Sampler>> = None;
+    let mut processes: HashMap<u32, Running<Tracker>> = HashMap::new();
+    let units = Units::of_system();
 
     loop {
-        let due = running.as_ref().map(|r| r.due);
+        let due = machine
+            .iter()
+            .map(|r| r.due)
+            .chain(processes.values().map(|r| r.due))
+            .min();
         tokio::select! {
             msg = from_service.recv() => {
                 let Some(msg) = msg else { return ExitCode::SUCCESS };
@@ -127,29 +170,45 @@ async fn serve() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 match sampling {
-                    Sampling::Start => {
+                    Sampling::Start(Target::Machine) => {
                         let mut sampler = Sampler::new(Path::new("/"));
                         sampler.prime();
-                        let now = Instant::now();
-                        running = Some(Running { sampler, read_at: now, due: now + FIRST });
+                        machine = Some(Running::primed(sampler, Instant::now()));
                     }
-                    Sampling::Stop => running = None,
-                    Sampling::Now => {
-                        if let Some(r) = running.as_mut() {
-                            r.due = r.due.min((r.read_at + FIRST).max(Instant::now()));
-                        }
+                    Sampling::Start(Target::Process(pid)) => {
+                        let now = Instant::now();
+                        let mut tracker = Tracker::new(Path::new("/"), pid, units);
+                        // The first reading only primes the CPU usage.
+                        tracker.read(now.into_std());
+                        processes.insert(pid, Running::primed(tracker, now));
+                    }
+                    Sampling::Stop(Target::Machine) => machine = None,
+                    Sampling::Stop(Target::Process(pid)) => {
+                        processes.remove(&pid);
+                    }
+                    Sampling::Now(Target::Machine) => machine.iter_mut().for_each(Running::hurry),
+                    Sampling::Now(Target::Process(pid)) => {
+                        processes.get_mut(&pid).into_iter().for_each(Running::hurry);
                     }
                     Sampling::Unchanged => {}
                 }
             }
             () = sleep_until(due) => {
-                let Some(r) = running.as_mut() else { continue };
-                r.read_at = Instant::now();
-                let detail = r.sampler.sample().await;
-                // A fixed pace, from the sample's start.
-                r.due = r.read_at + PERIOD;
-                if !send(&mut output, state.on_sample(&detail)).await {
-                    return ExitCode::FAILURE;
+                let now = Instant::now();
+                if let Some(r) = machine.as_mut().filter(|r| r.due <= now) {
+                    r.read();
+                    let detail = r.sampler.sample().await;
+                    if !send(&mut output, state.on_sample(Target::Machine, &detail)).await {
+                        return ExitCode::FAILURE;
+                    }
+                }
+                for (&pid, r) in processes.iter_mut().filter(|(_, r)| r.due <= now) {
+                    let at = r.read();
+                    // Nothing once the process is gone: its `release` follows.
+                    let Some(detail) = r.sampler.read(at.into_std()) else { continue };
+                    if !send(&mut output, state.on_sample(Target::Process(pid), &detail)).await {
+                        return ExitCode::FAILURE;
+                    }
                 }
             }
         }
