@@ -26,6 +26,8 @@ pub struct Card {
     pub device: Option<u16>,
     /// The real path of the card's PCI device.
     real: PathBuf,
+    /// Asleep (runtime power management): reading it would wake it.
+    pub suspended: bool,
 }
 
 /// The graphics cards under `root` (PCI class `0x03`), by address.
@@ -55,6 +57,7 @@ pub fn cards(root: &Path) -> Vec<Card> {
                 device: fs::read_to_string(device.join("device"))
                     .ok()
                     .and_then(|d| hex(&d)),
+                suspended: suspended(&real),
                 real,
             })
         })
@@ -62,6 +65,13 @@ pub fn cards(root: &Path) -> Vec<Card> {
     cards.sort_by(|a, b| a.id.cmp(&b.id));
     cards.dedup_by(|a, b| a.id == b.id);
     cards
+}
+
+/// Whether the device at `real` is asleep or falling asleep. A GPU that
+/// has no runtime power management reads `unsupported` or has no file.
+fn suspended(real: &Path) -> bool {
+    fs::read_to_string(real.join("power/runtime_status"))
+        .is_ok_and(|s| matches!(s.trim(), "suspended" | "suspending"))
 }
 
 fn hex(text: &str) -> Option<u16> {
@@ -169,12 +179,16 @@ pub async fn run_nvidia_smi() -> Option<HashMap<String, NvidiaReading>> {
         .then(|| parse_nvidia_smi(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Whether one of `cards` is NVIDIA's, which is what `nvidia-smi` is run for.
-pub fn any_nvidia(cards: &[Card]) -> bool {
-    cards.iter().any(|c| c.vendor == NVIDIA)
+/// Whether to run `nvidia-smi`: for an NVIDIA card, unless one of them is
+/// asleep, which `nvidia-smi` would wake.
+pub fn wants_nvidia_smi(cards: &[Card]) -> bool {
+    let mut nvidia = cards.iter().filter(|c| c.vendor == NVIDIA).peekable();
+    nvidia.peek().is_some() && nvidia.all(|c| !c.suspended)
 }
 
-/// A card's entry in the detail. `name` comes from `pci.ids`.
+/// A card's entry in the detail. `name` comes from `pci.ids`. An asleep
+/// card is marked `suspended` and has no measures: reading them would wake
+/// it.
 pub fn entry(
     card: &Card,
     name: Option<&str>,
@@ -196,6 +210,10 @@ pub fn entry(
         .or_else(|| nvidia.and_then(|n| n.name.clone()))
     {
         entry.insert("name".into(), json!(name));
+    }
+    if card.suspended {
+        entry.insert("suspended".into(), json!(true));
+        return Value::Object(entry);
     }
     let mut put = |key: &str, value: Option<i64>| {
         if let Some(value) = value {
@@ -324,6 +342,49 @@ C 00  Unclassified device
     }
 
     #[test]
+    fn an_asleep_card_is_marked_and_not_read() {
+        let tree = Tree::new();
+        let device = card(&tree, "card0", "0000:01:00.0", "0x030000\n", "0x1002\n");
+        let base = "sys/devices/pci0000:00/0000:01:00.0";
+        tree.file(&format!("{base}/power/runtime_status"), "suspended\n");
+        tree.file(&format!("{base}/gpu_busy_percent"), "0\n");
+        tree.sensor(
+            "hwmon0",
+            "amdgpu",
+            Some(&device),
+            &[(1, Some("edge"), "40000")],
+        );
+        let cards = cards(tree.root());
+        assert!(cards[0].suspended);
+        let sensors = sensors::list(tree.root());
+        assert_eq!(
+            entry(&cards[0], Some("Navi"), &sensors, None),
+            json!({ "id": "0000:01:00.0", "vendor": "amd", "name": "Navi", "suspended": true })
+        );
+        tree.file(&format!("{base}/power/runtime_status"), "active\n");
+        assert!(!super::cards(tree.root())[0].suspended);
+    }
+
+    #[test]
+    fn nvidia_smi_runs_only_with_every_nvidia_card_awake() {
+        let nvidia = |suspended| Card {
+            id: "0000:01:00.0".into(),
+            vendor: NVIDIA,
+            device: None,
+            real: PathBuf::from("/nowhere"),
+            suspended,
+        };
+        let amd = Card {
+            vendor: AMD,
+            ..nvidia(false)
+        };
+        assert!(wants_nvidia_smi(&[amd.clone(), nvidia(false)]));
+        assert!(!wants_nvidia_smi(&[amd.clone(), nvidia(true)]));
+        assert!(!wants_nvidia_smi(&[nvidia(false), nvidia(true)]));
+        assert!(!wants_nvidia_smi(&[amd]));
+    }
+
+    #[test]
     fn nvidia_smi_output_maps_to_sysfs_addresses() {
         let output = "00000000:01:00.0, NVIDIA GeForce RTX 4090, 12, 1024, 24564, 41\n\
                       00000000:02:00.0, [N/A], [N/A], [Not Supported], 8192, 39\n\
@@ -359,6 +420,7 @@ C 00  Unclassified device
             vendor: NVIDIA,
             device: None,
             real: PathBuf::from("/nowhere"),
+            suspended: false,
         };
         assert_eq!(
             entry(&card, None, &[], None),

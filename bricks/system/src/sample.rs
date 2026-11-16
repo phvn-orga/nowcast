@@ -15,6 +15,11 @@ use crate::{disk, gpu, net, pressure, sensors};
 /// Where distributions keep `pci.ids`, relative to the root.
 const PCI_IDS: [&str; 2] = ["usr/share/hwdata/pci.ids", "usr/share/misc/pci.ids"];
 
+/// The shortest time between two probe samples. A `refresh` between two
+/// regular samples reuses the last figures, so that the probes' window keeps
+/// covering 30 s; a bit under the 2 s pace, to absorb its jitter.
+const PROBE_EVERY: Duration = Duration::from_millis(1750);
+
 /// The counters of the previous reading.
 struct Previous {
     at: Instant,
@@ -34,6 +39,9 @@ pub struct Sampler {
     gateway_window: Window,
     internet_window: Window,
     seq: u16,
+    /// When the probes last ran, and what they gave.
+    probed_at: Option<Instant>,
+    probes: Option<Value>,
 }
 
 impl Sampler {
@@ -49,6 +57,8 @@ impl Sampler {
             gateway_window: Window::default(),
             internet_window: Window::default(),
             seq: 0,
+            probed_at: None,
+            probes: None,
         }
     }
 
@@ -92,7 +102,7 @@ impl Sampler {
 
         let cards = gpu::cards(&self.root);
         let nvidia = async {
-            if gpu::any_nvidia(&cards) {
+            if gpu::wants_nvidia_smi(&cards) {
                 gpu::run_nvidia_smi().await
             } else {
                 None
@@ -217,9 +227,21 @@ impl Sampler {
         name
     }
 
+    /// The probes' figures: the last ones within [`PROBE_EVERY`] of the
+    /// previous run, a new run otherwise.
+    async fn probe(&mut self) -> Option<Value> {
+        let now = Instant::now();
+        if !probe_due(self.probed_at, now) {
+            return self.probes.clone();
+        }
+        self.probed_at = Some(now);
+        self.probes = self.run_probes().await;
+        self.probes.clone()
+    }
+
     /// Pings the gateway and the internet hosts together. `None` when the
     /// machine does not permit unprivileged ICMP.
-    async fn probe(&mut self) -> Option<Value> {
+    async fn run_probes(&mut self) -> Option<Value> {
         let route = fs::read_to_string(self.root.join("proc/net/route")).unwrap_or_default();
         let gateway = probe::gateway(&route);
         if gateway != self.gateway {
@@ -261,6 +283,11 @@ impl Sampler {
         probes.insert("internet".into(), Value::Object(entry));
         Some(Value::Object(probes))
     }
+}
+
+/// Whether the probes run again, the last run being at `last`.
+fn probe_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.duration_since(last) >= PROBE_EVERY)
 }
 
 fn percent(usage: f32) -> i64 {
@@ -465,6 +492,16 @@ mod tests {
                 "rx_kib_s": 0, "tx_kib_s": 0, "errors": 0, "dropped": 0
             })
         );
+    }
+
+    #[test]
+    fn a_refresh_between_two_samples_does_not_probe() {
+        let start = Instant::now();
+        assert!(probe_due(None, start));
+        // A refresh 1 s after a sample, then the next sample on its pace.
+        assert!(!probe_due(Some(start), start + Duration::from_secs(1)));
+        assert!(probe_due(Some(start), start + Duration::from_millis(1990)));
+        assert!(probe_due(Some(start), start + Duration::from_secs(3)));
     }
 
     #[test]

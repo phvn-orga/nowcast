@@ -79,6 +79,10 @@
           "name": {
             "type": "string"
           },
+          "suspended": {
+            "const": true,
+            "description": "The card is asleep (runtime power management) and is not read, which would wake it: no measures."
+          },
           "usage": {
             "type": "integer",
             "description": "GPU busy, percent."
