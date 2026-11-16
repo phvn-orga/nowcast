@@ -49,6 +49,7 @@ async fn without_a_terminal_it_points_to_status_and_watch() {
         "bricks": [], "sessions": [], "flows": [],
     });
     fake.can("/v1/status", 200, "application/json", &status.to_string());
+    fake.can("/v1/observe", 200, "text/event-stream", ": open\n\n");
     let output = run(&mut nowcast(&fake), &["live"]).await;
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let message = stderr(&output);
@@ -62,5 +63,25 @@ async fn without_a_terminal_it_points_to_status_and_watch() {
     );
     // No session declared: live belongs to none.
     let calls: Vec<_> = fake.log().into_iter().map(|r| r.path).collect();
-    assert_eq!(calls, ["/v1/status"]);
+    assert_eq!(calls, ["/v1/status", "/v1/observe"]);
+}
+
+#[tokio::test]
+async fn a_service_without_the_observe_route_says_to_reload() {
+    let fake = Fake::start(Anchoring::PerProcess).await;
+    let status = json!({
+        "service": { "version": "0.0.1", "started_at": "2026-11-08T16:41:00Z", "path": null },
+        "bricks": [], "sessions": [], "flows": [],
+    });
+    fake.can("/v1/status", 200, "application/json", &status.to_string());
+    let error = json!({ "error": { "code": "not_found", "message": "no such route" } });
+    fake.can("/v1/observe", 404, "application/json", &error.to_string());
+    let output = run(&mut nowcast(&fake), &["live"]).await;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let message = stderr(&output);
+    assert!(
+        message.starts_with("nowcast: service_too_old: "),
+        "{message}"
+    );
+    assert!(message.contains("nowcast reload"), "{message}");
 }

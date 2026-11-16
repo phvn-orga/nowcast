@@ -315,7 +315,15 @@ impl Client {
     /// session.
     pub async fn observe(&self) -> Result<EventStream, CliError> {
         let headers = [(ACCEPT.as_str(), "text/event-stream")];
-        self.open_stream("/v1/observe", &headers).await
+        match self.open_stream("/v1/observe", &headers).await {
+            Err(CliError::Api { code, .. }) if code == "not_found" => Err(CliError::Api {
+                code: "service_too_old".into(),
+                message: "the running service predates `nowcast live`: run `nowcast reload` \
+                          to run the installed version"
+                    .into(),
+            }),
+            opened => opened,
+        }
     }
 
     /// Opens an event stream at `path`.

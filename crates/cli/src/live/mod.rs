@@ -44,6 +44,9 @@ pub async fn live(client: &Client, ask_systemd: bool) -> Result<(), CliError> {
             });
         }
     };
+    // Opened before the screen, so that a service without the route says so
+    // in plain text.
+    let stream = client.observe().await?;
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
         return Err(CliError::Usage(
             "nowcast live needs a terminal: nowcast status prints the state once, \
@@ -59,7 +62,7 @@ pub async fn live(client: &Client, ask_systemd: bool) -> Result<(), CliError> {
         hook(info);
     }));
     let result = match execute!(io::stdout(), EnableMouseCapture) {
-        Ok(()) => run(client, ask_systemd, status, &mut terminal).await,
+        Ok(()) => run(client, ask_systemd, status, stream, &mut terminal).await,
         Err(e) => Err(CliError::Io(e)),
     };
     let _ = execute!(io::stdout(), DisableMouseCapture);
@@ -88,13 +91,14 @@ async fn run(
     client: &Client,
     ask_systemd: bool,
     status: Value,
+    stream: EventStream,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> Result<(), CliError> {
     let (tx, mut rx) = unbounded_channel();
     read_input(tx.clone());
     let mut model = Model::new(status);
     let mut hits = Hits::default();
-    let mut service = std::pin::pin!(follow(client, ask_systemd, tx));
+    let mut service = std::pin::pin!(follow(client, ask_systemd, stream, tx));
     while !model.quit {
         terminal
             .draw(|frame| hits = ui::draw(frame, &model, Timestamp::now()))
@@ -131,10 +135,15 @@ fn read_input(tx: UnboundedSender<Message>) {
 /// Follows the service until `tx` closes: its state every [`POLL`], its
 /// events as they come. Asks systemd before each connection, so that a
 /// stopped service stays stopped.
-async fn follow(client: &Client, ask_systemd: bool, tx: UnboundedSender<Message>) {
+async fn follow(
+    client: &Client,
+    ask_systemd: bool,
+    stream: EventStream,
+    tx: UnboundedSender<Message>,
+) {
     let mut poll = tokio::time::interval(POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut stream: Option<EventStream> = None;
+    let mut stream = Some(stream);
     loop {
         let sent = tokio::select! {
             _ = poll.tick() => match running(client, ask_systemd).await {
