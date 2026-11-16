@@ -145,6 +145,18 @@ pub enum Command {
     /// "current" | "outdated" | "missing", null when it cannot tell}.
     Status,
 
+    /// Show what the service does, as it does it, full screen
+    ///
+    /// Views: an overview with the recent changes, the bricks, the sessions
+    /// and their subscriptions, the flows and their events, one event's
+    /// detail. Keyboard and mouse. It counts as no subscriber and launches
+    /// no brick.
+    ///
+    /// Never starts the service, like status: it fails when the service is
+    /// stopped. When the service goes away while shown, it says so and waits
+    /// for it to run again. Needs a terminal.
+    Live,
+
     /// Restart the service systemd runs, so that it runs the installed binary
     ///
     /// Prints the service's version before and after; it restarts even when

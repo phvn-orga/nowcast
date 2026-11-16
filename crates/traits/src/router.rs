@@ -128,6 +128,14 @@ pub trait Router: Send + Sync + 'static {
     /// removed.
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent>;
 
+    /// Opens a stream of every flow, belonging to no anchor: first the last
+    /// value of each flow, in increasing id order, then every `update`,
+    /// `flow-error` and `flow-ended` of every flow, flows created later
+    /// included. It subscribes to nothing, so it changes no count and keeps
+    /// no flow alive. `flow-ended` comes only when the flow itself ends, not
+    /// when one anchor unsubscribes from it.
+    fn observe(&self) -> UnboundedReceiver<StreamEvent>;
+
     /// How many subscriptions `flow` has, from every anchor.
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize;
 

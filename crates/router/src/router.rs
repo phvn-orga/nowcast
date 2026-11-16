@@ -102,6 +102,10 @@ impl Router for FlowRouter {
         self.state().stream(anchor, since)
     }
 
+    fn observe(&self) -> UnboundedReceiver<StreamEvent> {
+        self.state().observe()
+    }
+
     fn subscribers(&self, flow: &QualifiedFlowId) -> usize {
         self.state().subscribers(flow)
     }

@@ -31,6 +31,8 @@ pub(crate) enum Route<'a> {
     BrickRefresh(&'a str),
     /// `GET /v1/stream`
     Stream,
+    /// `GET /v1/observe`
+    Observe,
 }
 
 impl<'a> Route<'a> {
@@ -54,6 +56,7 @@ impl<'a> Route<'a> {
             ["flows", flow, "input"] => (Self::Input(flow), Method::POST),
             ["bricks", brick, "refresh"] => (Self::BrickRefresh(brick), Method::POST),
             ["stream"] => (Self::Stream, Method::GET),
+            ["observe"] => (Self::Observe, Method::GET),
             _ => return Err(HttpError::not_found()),
         };
         if *method == allowed {
@@ -175,6 +178,7 @@ mod tests {
             Ok(Route::BrickRefresh("forge"))
         );
         assert_eq!(parse(Method::GET, "/v1/stream"), Ok(Route::Stream));
+        assert_eq!(parse(Method::GET, "/v1/observe"), Ok(Route::Observe));
     }
 
     #[test]

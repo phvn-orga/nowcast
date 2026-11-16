@@ -235,8 +235,10 @@ where
             HttpError::internal(format!("cannot identify the connected process: {e}"))
         })?;
         // What the service says of itself belongs to no session.
-        if !matches!(route, Route::Session | Route::Service | Route::Status)
-            && self.sessions.current(anchor).is_none()
+        if !matches!(
+            route,
+            Route::Session | Route::Service | Route::Status | Route::Observe
+        ) && self.sessions.current(anchor).is_none()
         {
             return Err(HttpError::session_required());
         }
@@ -281,6 +283,7 @@ where
             Route::Input(flow) => self.input(anchor, &flow_id(flow)?, body).await,
             Route::BrickRefresh(brick) => self.refresh_brick(brick, body).await,
             Route::Stream => self.stream(anchor, &parts.headers),
+            Route::Observe => Ok(sse_response(SseBody::without_ids(self.router.observe()))),
         }
     }
 
@@ -583,12 +586,16 @@ where
             self.router.remove_anchor(anchor);
             return Err(HttpError::session_required());
         }
-        let mut response = Response::new(SseBody::new(events).boxed());
-        let headers = response.headers_mut();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-        Ok(response)
+        Ok(sse_response(SseBody::new(events)))
     }
+}
+
+fn sse_response(body: SseBody) -> Response<Body> {
+    let mut response = Response::new(body.boxed());
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 /// Sleeps until `deadline`, or forever without one.
