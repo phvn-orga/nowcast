@@ -7,7 +7,7 @@ mod input;
 mod refresh;
 mod reload;
 pub mod setup;
-mod status;
+pub(crate) mod status;
 mod subscribe;
 mod watch;
 

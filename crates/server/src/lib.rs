@@ -13,9 +13,10 @@
 //! | `POST /v1/bricks/{brick}/refresh` | `202` | `400` `invalid_request` / `invalid_scope`, `404` `unknown_brick` / `unknown_kind`, `405` `scope_not_accepted` |
 //! | `POST /v1/flows/{flow}/input` | `202` | `400` `invalid_input`, `404` `unknown_flow`, `405` `input_not_accepted`, `503` `brick_unavailable` |
 //! | `GET /v1/stream` | `200` `text/event-stream` | |
+//! | `GET /v1/observe` | `200` `text/event-stream` | |
 //!
-//! Every route but the first three answers `428` `session_required` until the
-//! anchor declares its session. Errors always read
+//! Every route but the first three and `GET /v1/observe` answers `428`
+//! `session_required` until the anchor declares its session. Errors always read
 //! `{"error": {"code": "...", "message": "..."}}`. Beyond the contract's
 //! codes, the server answers `400` / `413` `invalid_request` for a malformed
 //! request, `404` `not_found` and `405` `method_not_allowed` for a wrong route,

@@ -88,6 +88,8 @@ pub(crate) struct State {
     flows: HashMap<QualifiedFlowId, Flow>,
     anchors: HashMap<AnchorId, Anchor>,
     empty_watchers: Vec<UnboundedSender<QualifiedFlowId>>,
+    /// The streams of [`State::observe`], which receive every flow's events.
+    observers: Vec<UnboundedSender<StreamEvent>>,
     /// Whether any subscription exists, updated by every operation that adds
     /// or drops one.
     has_subscriptions: watch::Sender<bool>,
@@ -180,6 +182,7 @@ impl State {
                 anchor.deliver(&update);
             }
         }
+        self.notify_observers(&update);
         Ok(event)
     }
 
@@ -233,6 +236,7 @@ impl State {
                 anchor.deliver(&event);
             }
         }
+        self.notify_observers(&event);
     }
 
     pub(crate) fn end_flow(&mut self, flow_id: &QualifiedFlowId) {
@@ -254,6 +258,7 @@ impl State {
             }
             self.forget_if_unused(anchor);
         }
+        self.notify_observers(&event);
     }
 
     pub(crate) fn stream(
@@ -297,6 +302,24 @@ impl State {
         entry.streams.retain(|s| !s.is_closed());
         entry.streams.push(tx);
         rx
+    }
+
+    pub(crate) fn observe(&mut self) -> UnboundedReceiver<StreamEvent> {
+        let (tx, rx) = unbounded_channel();
+        let mut last: Vec<&Event> = self.flows.values().filter_map(Flow::last).collect();
+        last.sort_by_key(|event| event.id);
+        for event in last {
+            // The receiver is still in hand: the send cannot fail.
+            let _ = tx.send(StreamEvent::Update(event.clone()));
+        }
+        self.observers.retain(|s| !s.is_closed());
+        self.observers.push(tx);
+        rx
+    }
+
+    /// Sends `event` to every observer, forgetting the closed ones.
+    fn notify_observers(&mut self, event: &StreamEvent) {
+        self.observers.retain(|s| s.send(event.clone()).is_ok());
     }
 
     pub(crate) fn flows(&self) -> Vec<FlowSummary> {

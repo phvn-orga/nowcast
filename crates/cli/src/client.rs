@@ -42,6 +42,11 @@ impl Client {
         }
     }
 
+    /// The socket the service listens on.
+    pub fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
     /// Fails with [`CliError::Unreachable`] when `future` takes longer than
     /// the answer timeout: a stuck service must not hold a hook forever.
     async fn within<T>(
@@ -301,15 +306,37 @@ impl Session<'_> {
         if let Some(id) = last_event_id {
             headers.push(("last-event-id", id));
         }
+        self.client.open_stream("/v1/stream", &headers).await
+    }
+}
+
+impl Client {
+    /// `GET /v1/observe`: every flow's events, as no subscriber. Needs no
+    /// session.
+    pub async fn observe(&self) -> Result<EventStream, CliError> {
+        let headers = [(ACCEPT.as_str(), "text/event-stream")];
+        match self.open_stream("/v1/observe", &headers).await {
+            Err(CliError::Api { code, .. }) if code == "not_found" => Err(CliError::Api {
+                code: "service_too_old".into(),
+                message: "the running service predates `nowcast live`: run `nowcast reload` \
+                          to run the installed version"
+                    .into(),
+            }),
+            opened => opened,
+        }
+    }
+
+    /// Opens an event stream at `path`.
+    async fn open_stream(
+        &self,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<EventStream, CliError> {
         // Only the headers and an error body are bounded: an open stream
         // may stay quiet for as long as no flow publishes.
         let response = self
-            .client
             .within(async {
-                let response = self
-                    .client
-                    .send(Method::GET, "/v1/stream", None, &headers)
-                    .await?;
+                let response = self.send(Method::GET, path, None, headers).await?;
                 if response.status() == StatusCode::OK {
                     return Ok(response);
                 }
@@ -318,7 +345,7 @@ impl Session<'_> {
                     .into_body()
                     .collect()
                     .await
-                    .map_err(|e| self.client.unreachable(e))?
+                    .map_err(|e| self.unreachable(e))?
                     .to_bytes();
                 Err(Reply { status, body }.into_error())
             })
@@ -334,7 +361,7 @@ impl Session<'_> {
             )));
         }
         Ok(EventStream {
-            socket: self.client.socket.clone(),
+            socket: self.socket.clone(),
             body: response.into_body(),
             parser: SseParser::default(),
             ready: VecDeque::new(),
@@ -342,7 +369,7 @@ impl Session<'_> {
     }
 }
 
-/// The session's open event stream.
+/// An open event stream: a session's, or the observer's.
 pub struct EventStream {
     socket: PathBuf,
     body: Incoming,

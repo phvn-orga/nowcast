@@ -33,12 +33,19 @@ async fn prints_the_state_without_declaring_a_session() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(
-        text.starts_with(&format!(
-            "service    {INSTALLED}, running since 2026-11-08T16:41:00Z\ninstalled  {INSTALLED}\n"
-        )),
+        text.starts_with(&format!("service    {INSTALLED}, up ")),
         "{text}"
     );
-    assert!(text.contains("  probe  running, pid 4242\n"), "{text}");
+    assert!(
+        text.contains(&format!("\ninstalled  {INSTALLED}\n")),
+        "{text}"
+    );
+    // Piped: no colour.
+    assert!(text.contains("\n  ● probe  running  pid 4242\n"), "{text}");
+    assert!(
+        text.contains("\n  s\n    probe/a  1 subscriber, "),
+        "{text}"
+    );
 
     let output = run(&mut nowcast(&fake), &["status", "--json"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -62,15 +69,9 @@ async fn flags_a_service_running_another_version() {
     );
     let output = run(&mut nowcast(&fake), &["status"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let expected = format!(
-        "service    0.0.1, running since 2026-11-08T16:41:00Z\n\
-         installed  {INSTALLED}, not the service's: restart the service to run it\n"
-    );
-    assert!(
-        stdout(&output).starts_with(&expected),
-        "{}",
-        stdout(&output)
-    );
+    let expected =
+        format!("\ninstalled  {INSTALLED}, not the service's: restart the service to run it\n");
+    assert!(stdout(&output).contains(&expected), "{}", stdout(&output));
 }
 
 #[tokio::test]

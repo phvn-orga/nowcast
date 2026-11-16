@@ -56,6 +56,7 @@ struct State {
     subscriptions: HashMap<SubscriptionId, (AnchorId, QualifiedFlowId)>,
     streams: HashMap<AnchorId, Vec<UnboundedSender<StreamEvent>>>,
     empty: Vec<UnboundedSender<QualifiedFlowId>>,
+    observers: Vec<UnboundedSender<StreamEvent>>,
     has_subscriptions: watch::Sender<bool>,
 }
 
@@ -64,6 +65,10 @@ impl State {
         if let Some(streams) = self.streams.get_mut(&anchor) {
             streams.retain(|s| s.send(event.clone()).is_ok());
         }
+    }
+
+    fn notify_observers(&mut self, event: &StreamEvent) {
+        self.observers.retain(|s| s.send(event.clone()).is_ok());
     }
 
     /// Publishes whether any subscription is left, after an operation.
@@ -169,6 +174,7 @@ impl Router for FakeRouter {
         for anchor in entry.anchors() {
             state.deliver(anchor, &update);
         }
+        state.notify_observers(&update);
         Ok(event)
     }
 
@@ -208,6 +214,7 @@ impl Router for FakeRouter {
         for anchor in anchors {
             state.deliver(anchor, &event);
         }
+        state.notify_observers(&event);
     }
 
     fn end_flow(&self, flow: &QualifiedFlowId) {
@@ -223,6 +230,7 @@ impl Router for FakeRouter {
         for anchor in removed.anchors() {
             state.deliver(anchor, &event);
         }
+        state.notify_observers(&event);
     }
 
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
@@ -255,6 +263,18 @@ impl Router for FakeRouter {
             let _ = tx.send(StreamEvent::Update(event));
         }
         state.streams.entry(anchor).or_default().push(tx);
+        rx
+    }
+
+    fn observe(&self) -> UnboundedReceiver<StreamEvent> {
+        let (tx, rx) = unbounded_channel();
+        let mut state = self.state.lock().unwrap();
+        let mut last: Vec<_> = state.flows.values().filter_map(Flow::last).collect();
+        last.sort_by_key(|e| e.id);
+        for event in last {
+            let _ = tx.send(StreamEvent::Update(event));
+        }
+        state.observers.push(tx);
         rx
     }
 

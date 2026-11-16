@@ -4,10 +4,13 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::process::Command;
 
+use console::Style;
+use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use crate::client::Client;
 use crate::commands::setup::{Units, units_state};
+use crate::display::{self, Health};
 use crate::error::CliError;
 
 /// This tool's version: the installed binary's.
@@ -33,7 +36,16 @@ pub async fn status(
             json!({ "installed": INSTALLED, "running": running, "setup": setup })
         )?;
     } else {
-        out.write_all(readable(INSTALLED, running.as_ref(), setup, ask_systemd).as_bytes())?;
+        let colors = console::colors_enabled();
+        let text = readable(
+            INSTALLED,
+            running.as_ref(),
+            setup,
+            ask_systemd,
+            Timestamp::now(),
+            colors,
+        );
+        out.write_all(text.as_bytes())?;
     }
     Ok(())
 }
@@ -59,12 +71,15 @@ pub(crate) fn waits_for_a_connection(states: &str) -> bool {
 /// The status for a human, `running` being the service's `GET /v1/status`
 /// answer, `None` when it is stopped, and `setup` the state of the units,
 /// shown when `nowcast setup` has to run. `systemd` says whether the socket
-/// is the one systemd holds, which `nowcast reload` restarts.
+/// is the one systemd holds, which `nowcast reload` restarts. Times read
+/// relative to `now`; `colors` colours the bricks' states.
 fn readable(
     installed: &str,
     running: Option<&Value>,
     setup: Option<Units>,
     systemd: bool,
+    now: Timestamp,
+    colors: bool,
 ) -> String {
     let mut text = String::new();
     let Some(status) = running else {
@@ -75,10 +90,16 @@ fn readable(
     };
     let service = &status["service"];
     let version = service["version"].as_str();
-    let since = service["started_at"].as_str().unwrap_or("an unknown time");
+    let up = service["started_at"]
+        .as_str()
+        .and_then(|time| display::since(time, now))
+        .map_or_else(
+            || "up for an unknown time".to_owned(),
+            |d| format!("up {}", display::duration(d)),
+        );
     let _ = writeln!(
         text,
-        "service    {}, running since {since}",
+        "service    {}, {up}",
         version.unwrap_or("unknown version")
     );
     if version.is_some_and(|v| v != installed) {
@@ -95,59 +116,113 @@ fn readable(
     setup_line(&mut text, setup);
 
     let bricks = items(&status["bricks"]);
+    section(&mut text, "bricks", bricks.is_empty());
     let width = bricks
         .iter()
         .map(|b| str(&b["name"]).len())
         .max()
         .unwrap_or(0);
-    section(&mut text, "bricks", bricks.is_empty());
+    let state_width = bricks
+        .iter()
+        .map(|b| str(&b["state"]).len())
+        .max()
+        .unwrap_or(0);
     for brick in bricks {
-        let mut line = format!("  {:width$}  {}", str(&brick["name"]), str(&brick["state"]));
+        let state = str(&brick["state"]);
+        let style = health_style(Health::of(state), colors);
+        let mut details = Vec::new();
         if let Some(pid) = brick["pid"].as_u64() {
-            let _ = write!(line, ", pid {pid}");
+            details.push(format!("pid {pid}"));
         }
         match brick["crashes"].as_u64() {
             Some(0) | None => {}
-            Some(1) => line.push_str(", 1 crash in a row"),
-            Some(n) => {
-                let _ = write!(line, ", {n} crashes in a row");
-            }
+            Some(1) => details.push("1 crash in a row".to_owned()),
+            Some(n) => details.push(format!("{n} crashes in a row")),
         }
-        let _ = writeln!(text, "{line}");
+        let line = format!(
+            "  {} {:width$}  {}  {}",
+            style.apply_to(Health::of(state).symbol()),
+            str(&brick["name"]),
+            style.apply_to(format!("{state:state_width$}")),
+            details.join(", "),
+        );
+        let _ = writeln!(text, "{}", line.trim_end());
     }
 
+    let flows: Vec<&Value> = items(&status["flows"]).iter().collect();
+    let flow = |id: &str| flows.iter().find(|f| str(&f["id"]) == id).copied();
     let sessions = items(&status["sessions"]);
     section(&mut text, "sessions", sessions.is_empty());
+    let mut shown = Vec::new();
     for session in sessions {
-        let _ = writeln!(text, "  {}", str(&session["id"]));
-        let subscriptions = items(&session["subscriptions"]);
-        if subscriptions.is_empty() {
+        let id = str(&session["id"]);
+        let _ = writeln!(text, "  {}", display::short_session(id));
+        let subscribed: Vec<&str> = items(&session["subscriptions"])
+            .iter()
+            .map(|s| str(&s["flow"]))
+            .collect();
+        if subscribed.is_empty() {
             let _ = writeln!(text, "    no subscription");
         }
-        for subscription in subscriptions {
-            let (flow, id) = (str(&subscription["flow"]), str(&subscription["id"]));
-            let _ = writeln!(text, "    {flow} ({id})");
+        let names: Vec<String> = subscribed
+            .iter()
+            .map(|f| display::flow_in_session(f, id))
+            .collect();
+        let width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+        for (id, name) in subscribed.iter().zip(&names) {
+            let _ = writeln!(text, "    {name:width$}  {}", flow_line(flow(id), now));
+            shown.push(*id);
         }
     }
-
-    let flows = items(&status["flows"]);
-    section(&mut text, "flows", flows.is_empty());
-    for flow in flows {
-        let subscribers = match flow["subscribers"].as_u64() {
-            Some(1) => "1 subscriber".to_owned(),
-            n => format!("{} subscribers", n.unwrap_or(0)),
-        };
-        let last = match &flow["last_event"] {
-            Value::Null => "nothing published yet".to_owned(),
-            event => format!(
-                "last event {} at {}",
-                str(&event["id"]),
-                str(&event["time"])
-            ),
-        };
-        let _ = writeln!(text, "  {}  {subscribers}, {last}", str(&flow["id"]));
+    // A flow no listed session holds: an anchor that died meanwhile.
+    let others: Vec<&&Value> = flows
+        .iter()
+        .filter(|f| !shown.contains(&str(&f["id"])))
+        .collect();
+    if !others.is_empty() {
+        section(&mut text, "other flows", false);
+        let width = others
+            .iter()
+            .map(|f| str(&f["id"]).chars().count())
+            .max()
+            .unwrap_or(0);
+        for f in others {
+            let _ = writeln!(
+                text,
+                "  {:width$}  {}",
+                str(&f["id"]),
+                flow_line(Some(f), now)
+            );
+        }
     }
     text
+}
+
+/// A flow's subscribers and last event, as `status` lists it.
+fn flow_line(flow: Option<&Value>, now: Timestamp) -> String {
+    let Some(flow) = flow else {
+        return "not published yet".to_owned();
+    };
+    let subscribers = match flow["subscribers"].as_u64() {
+        Some(1) => "1 subscriber".to_owned(),
+        n => format!("{} subscribers", n.unwrap_or(0)),
+    };
+    let last = match flow["last_event"]["time"].as_str() {
+        Some(time) => format!("last event {}", display::ago(time, now)),
+        None => "nothing published yet".to_owned(),
+    };
+    format!("{subscribers}, {last}")
+}
+
+/// The colour of a brick's state, none unless `colors`.
+fn health_style(health: Health, colors: bool) -> Style {
+    let style = match health {
+        Health::Up => Style::new().green(),
+        Health::Moving => Style::new().yellow(),
+        Health::Idle => Style::new().dim(),
+        Health::Failing => Style::new().red(),
+    };
+    style.force_styling(colors)
 }
 
 /// The line saying to run `nowcast setup`, when the units need it.
@@ -160,9 +235,10 @@ fn setup_line(text: &mut String, setup: Option<Units>) {
     let _ = writeln!(text, "setup      {why}");
 }
 
-/// A section's heading, `none` beside it when it is empty.
+/// A section's heading after a blank line, `none` beside it when it is
+/// empty.
 fn section(text: &mut String, name: &str, empty: bool) {
-    let _ = writeln!(text, "{name}{}", if empty { "  none" } else { "" });
+    let _ = writeln!(text, "\n{name}{}", if empty { "  none" } else { "" });
 }
 
 fn items(value: &Value) -> &[Value] {
@@ -176,6 +252,25 @@ fn str(value: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: &str = "2026-11-08T16:45:12Z";
+
+    /// [`readable`] at [`NOW`], without colours.
+    fn readable(
+        installed: &str,
+        running: Option<&Value>,
+        setup: Option<Units>,
+        systemd: bool,
+    ) -> String {
+        super::readable(
+            installed,
+            running,
+            setup,
+            systemd,
+            NOW.parse().unwrap(),
+            false,
+        )
+    }
 
     #[test]
     fn a_socket_held_by_systemd_without_its_service_waits_for_a_connection() {
@@ -206,45 +301,69 @@ mod tests {
 
     #[test]
     fn a_running_service_shows_its_state() {
+        let session = "5f1c2e9a-0b1c-4d2e-8f3a-4b5c6d7e8f90";
+        let own = format!("claude-code/session/{session}");
         let status = json!({
-            "service": { "version": "0.2.0", "started_at": "2026-11-08T16:41:00Z", "path": null },
+            "service": { "version": "0.2.0", "started_at": "2026-11-08T14:41:00Z", "path": null },
             "bricks": [
                 { "name": "claude-code", "state": "running", "pid": 868412, "crashes": 0 },
                 { "name": "forge", "state": "stopped", "pid": null, "crashes": 0 },
                 { "name": "gh", "state": "waiting", "pid": null, "crashes": 2 },
             ],
             "sessions": [
-                { "id": "5f1c", "subscriptions": [ { "id": "s-12", "flow": "claude-code/session/5f1c" } ] },
+                { "id": session, "subscriptions": [
+                    { "id": "s-12", "flow": own },
+                    { "id": "s-13", "flow": "forge/x" },
+                ] },
                 { "id": "9a0b", "subscriptions": [] },
             ],
             "flows": [
                 {
-                    "id": "claude-code/session/5f1c",
+                    "id": own,
                     "subscribers": 1,
-                    "last_event": { "id": "42", "time": "2026-11-08T16:45:12Z" },
+                    "last_event": { "id": "42", "time": "2026-11-08T16:45:09Z" },
                 },
                 { "id": "forge/x", "subscribers": 2, "last_event": null },
+                { "id": "forge/orphan", "subscribers": 1, "last_event": null },
             ],
         });
         assert_eq!(
             readable("0.2.0", Some(&status), None, true),
             "\
-service    0.2.0, running since 2026-11-08T16:41:00Z
+service    0.2.0, up 2 h 04 min
 installed  0.2.0
+
 bricks
-  claude-code  running, pid 868412
-  forge        stopped
-  gh           waiting, 2 crashes in a row
+  ● claude-code  running  pid 868412
+  ○ forge        stopped
+  ▲ gh           waiting  2 crashes in a row
+
 sessions
-  5f1c
-    claude-code/session/5f1c (s-12)
+  5f1c2e9a
+    claude-code/session/…  1 subscriber, last event 3 s ago
+    forge/x                2 subscribers, nothing published yet
   9a0b
     no subscription
-flows
-  claude-code/session/5f1c  1 subscriber, last event 42 at 2026-11-08T16:45:12Z
-  forge/x  2 subscribers, nothing published yet
+
+other flows
+  forge/orphan  1 subscriber, nothing published yet
 "
         );
+    }
+
+    #[test]
+    fn colours_show_only_when_asked() {
+        let status = json!({
+            "service": { "version": "0.2.0", "started_at": NOW, "path": null },
+            "bricks": [ { "name": "b", "state": "running", "pid": 1, "crashes": 0 } ],
+            "sessions": [],
+            "flows": [],
+        });
+        let plain = readable("0.2.0", Some(&status), None, true);
+        assert!(!plain.contains('\x1b'), "{plain}");
+        let now = NOW.parse().unwrap();
+        let coloured = super::readable("0.2.0", Some(&status), None, true, now, true);
+        assert!(coloured.contains("\x1b[32m"), "{coloured:?}");
     }
 
     #[test]
@@ -258,12 +377,13 @@ flows
         assert_eq!(
             readable("0.2.0", Some(&status), Some(Units::Outdated), true),
             "\
-service    0.1.0, running since 2026-11-08T16:41:00Z
+service    0.1.0, up 4 min
 installed  0.2.0, not the service's: run nowcast setup, then nowcast reload
 setup      outdated: run nowcast setup again
+
 bricks  none
+
 sessions  none
-flows  none
 "
         );
         let second = |text: String| text.lines().nth(1).unwrap().to_owned();

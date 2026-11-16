@@ -85,6 +85,10 @@ impl Router for Spy {
         self.router.end_flow(flow);
     }
 
+    fn observe(&self) -> UnboundedReceiver<StreamEvent> {
+        self.router.observe()
+    }
+
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {
         self.router.stream(anchor, since)
     }

@@ -370,6 +370,62 @@ fn a_flow_without_a_subscriber_is_left_out_of_the_status() {
 }
 
 #[test]
+fn observing_needs_no_session_and_counts_as_no_subscriber() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        let response = send(&harness.socket, "GET", "/v1/observe", &[], "").await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut body = response.into_body();
+
+        declare(&harness).await;
+        let flow = qualified(&subscribe(&harness, "a").await);
+        let event = harness
+            .router
+            .publish(&flow, probe::TYPE.into(), b"{}".to_vec())
+            .unwrap();
+        let frame = timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("an event within a second")
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let block = std::str::from_utf8(&frame).unwrap();
+        // The observer does not resume: no `id` to resume from.
+        assert!(block.starts_with("event: update\ndata: {"), "{block}");
+        assert!(
+            block.contains(&format!("\"id\":\"{}\"", event.id)),
+            "{block}"
+        );
+
+        let status = request(&harness, "GET", "/v1/status", "").await.json();
+        assert_eq!(status["flows"][0]["subscribers"], 1);
+    });
+}
+
+#[test]
+fn an_observer_starts_with_the_last_values() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        declare(&harness).await;
+        let flow = qualified(&subscribe(&harness, "a").await);
+        harness
+            .router
+            .publish(&flow, probe::TYPE.into(), br#"{"n":1}"#.to_vec())
+            .unwrap();
+        harness
+            .router
+            .publish(&flow, probe::TYPE.into(), br#"{"n":2}"#.to_vec())
+            .unwrap();
+        let response = send(&harness.socket, "GET", "/v1/observe", &[], "").await;
+        let observed = updates(response, 2).await;
+        assert_eq!(observed.len(), 1, "{observed:?}");
+        assert_eq!(observed[0]["data"], json!({ "n": 2 }));
+    });
+}
+
+#[test]
 fn a_declaration_without_replace_keeps_the_anchors_session() {
     run(async {
         let harness = start(ProbeMode::Ready);
@@ -1035,6 +1091,10 @@ impl Router for DyingOnStream {
 
     fn end_flow(&self, flow: &QualifiedFlowId) {
         self.inner.end_flow(flow);
+    }
+
+    fn observe(&self) -> UnboundedReceiver<StreamEvent> {
+        self.inner.observe()
     }
 
     fn stream(&self, anchor: AnchorId, since: Option<EventId>) -> UnboundedReceiver<StreamEvent> {

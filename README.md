@@ -42,6 +42,8 @@ cargo install --root ~/.local --path crates/cli
 
 `nowcast status` tells what runs: the service's version beside the installed one, its bricks, sessions and flows. After an upgrade, the running service keeps the old version until it restarts: `nowcast reload` restarts it on the installed binary.
 
+`nowcast live` shows the same, full screen and as it happens: the bricks, the sessions, the flows and each event they publish. It never starts a stopped service, and waits for it through a restart.
+
 ## Bricks
 
 A brick runs only once enabled, and only while something subscribes to it. The bricks this repository ships are built into the binary: `nowcast setup` offers them in a list to check, and they are enabled by name too, there (`nowcast setup claude-code`, the way to go without a terminal) or on their own:

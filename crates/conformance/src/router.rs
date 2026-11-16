@@ -443,6 +443,71 @@ pub async fn the_router_tells_whether_any_subscription_exists<S: RouterSubject>(
     assert!(!*router.has_subscriptions().borrow());
 }
 
+/// An observer first gets the last value of every flow, whoever subscribes
+/// to it, in increasing id order.
+pub async fn an_observer_starts_with_every_last_value<S: RouterSubject>() {
+    let router = S::new();
+    router.subscribe(A, flow("x"));
+    router.subscribe(B, flow("y"));
+    router.subscribe(A, flow("empty"));
+    publish(&router, &flow("x"), "1");
+    let y = publish(&router, &flow("y"), "1");
+    let x = publish(&router, &flow("x"), "2");
+    let mut observer = router.observe();
+    assert_eq!(update(next(&mut observer).await), y);
+    assert_eq!(update(next(&mut observer).await), x);
+    assert_quiet(&mut observer);
+}
+
+/// An observer gets every flow's events as they come, flows created after it
+/// opened included, without counting as a subscriber.
+pub async fn an_observer_follows_every_flow<S: RouterSubject>() {
+    let router = S::new();
+    let mut observer = router.observe();
+    router.subscribe(A, flow("x"));
+    router.subscribe(B, flow("y"));
+    assert_eq!(router.subscribers(&flow("x")), 1);
+    let x = publish(&router, &flow("x"), "1");
+    let y = publish(&router, &flow("y"), "1");
+    assert_eq!(update(next(&mut observer).await), x);
+    assert_eq!(update(next(&mut observer).await), y);
+    router.flow_error(&flow("y"), "down".into());
+    assert_eq!(
+        next(&mut observer).await,
+        StreamEvent::FlowError {
+            flow: flow("y"),
+            message: "down".into()
+        }
+    );
+    router.end_flow(&flow("x"));
+    assert_eq!(
+        next(&mut observer).await,
+        StreamEvent::FlowEnded { flow: flow("x") }
+    );
+    assert_quiet(&mut observer);
+}
+
+/// An anchor unsubscribing ends the flow for that anchor only: the flow goes
+/// on, and the observer is not told it ended.
+pub async fn an_observer_ignores_an_unsubscription<S: RouterSubject>() {
+    let router = S::new();
+    let (id, _) = router.subscribe(A, flow("x"));
+    router.subscribe(B, flow("x"));
+    let mut observer = router.observe();
+    router.unsubscribe(A, &id).unwrap();
+    assert_quiet(&mut observer);
+}
+
+/// An observer changes nothing the router counts: no subscription, and
+/// nothing that would keep the service from stopping.
+pub async fn an_observer_is_no_subscription<S: RouterSubject>() {
+    let router = S::new();
+    let has_subscriptions = router.has_subscriptions();
+    let _observer = router.observe();
+    assert!(!*has_subscriptions.borrow());
+    assert_eq!(router.flows(), vec![]);
+}
+
 /// `GET /v1/status` reads each anchor's subscriptions, and every flow with its
 /// subscribers and last event, an empty flow kept included until it ends.
 pub async fn the_router_tells_its_flows_and_subscriptions<S: RouterSubject>() {
@@ -521,6 +586,10 @@ macro_rules! router_suite {
                     removing_an_anchor_drops_its_subscriptions,
                     the_router_tells_whether_any_subscription_exists,
                     the_router_tells_its_flows_and_subscriptions,
+                    an_observer_starts_with_every_last_value,
+                    an_observer_follows_every_flow,
+                    an_observer_ignores_an_unsubscription,
+                    an_observer_is_no_subscription,
                 ]
             );
         }

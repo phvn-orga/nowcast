@@ -1,4 +1,4 @@
-//! The session's event stream, as Server-Sent Events.
+//! The event streams, a session's and the observer's, as Server-Sent Events.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -27,12 +27,13 @@ pub(crate) fn last_event_id(header: Option<&[u8]>) -> Option<EventId> {
     value.trim().parse().ok().map(EventId)
 }
 
-/// One SSE block. Only `update` carries an `id`: the signals are not replayed.
-/// `None` for an event that cannot be written, which is logged and skipped.
-pub(crate) fn encode(event: &StreamEvent) -> Option<Bytes> {
+/// One SSE block. Only `update` carries an `id`, and only when `ids` is set:
+/// the signals are not replayed, nor is the observer's stream. `None` for an
+/// event that cannot be written, which is logged and skipped.
+pub(crate) fn encode(event: &StreamEvent, ids: bool) -> Option<Bytes> {
     let (id, data) = match event {
         StreamEvent::Update(update) => match CloudEvent::new(update) {
-            Ok(cloud) => (Some(update.id), to_line(&cloud)),
+            Ok(cloud) => (ids.then_some(update.id), to_line(&cloud)),
             Err(e) => {
                 tracing::warn!("skipping an update on the stream: {e}");
                 return None;
@@ -68,13 +69,29 @@ pub(crate) fn encode(event: &StreamEvent) -> Option<Bytes> {
 pub(crate) struct SseBody {
     events: UnboundedReceiver<StreamEvent>,
     keep_alive: Interval,
+    /// Whether an `update` carries its `id`, which a session resumes from.
+    ids: bool,
 }
 
 impl SseBody {
+    /// A session's stream, whose updates carry their `id`.
     pub fn new(events: UnboundedReceiver<StreamEvent>) -> Self {
+        Self::with_ids(events, true)
+    }
+
+    /// The observer's stream, which does not resume: no `id`.
+    pub fn without_ids(events: UnboundedReceiver<StreamEvent>) -> Self {
+        Self::with_ids(events, false)
+    }
+
+    fn with_ids(events: UnboundedReceiver<StreamEvent>, ids: bool) -> Self {
         let mut keep_alive = interval_at(Instant::now() + KEEP_ALIVE, KEEP_ALIVE);
         keep_alive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        Self { events, keep_alive }
+        Self {
+            events,
+            keep_alive,
+            ids,
+        }
     }
 }
 
@@ -88,7 +105,7 @@ impl Body for SseBody {
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         loop {
             match self.events.poll_recv(cx) {
-                Poll::Ready(Some(event)) => match encode(&event) {
+                Poll::Ready(Some(event)) => match encode(&event, self.ids) {
                     Some(block) => {
                         self.keep_alive.reset();
                         return Poll::Ready(Some(Ok(Frame::data(block))));
@@ -133,7 +150,7 @@ mod tests {
     }
 
     fn text(event: &StreamEvent) -> String {
-        String::from_utf8(encode(event).unwrap().to_vec()).unwrap()
+        String::from_utf8(encode(event, true).unwrap().to_vec()).unwrap()
     }
 
     #[test]
@@ -146,6 +163,13 @@ mod tests {
              \"dataschema\":\"nowcast://bricks/probe/types/probe.item/v1\",\
              \"data\":{\"n\":1}}\n\n"
         );
+    }
+
+    #[test]
+    fn an_observed_update_carries_no_id() {
+        let block = encode(&update(b"{}"), false).unwrap();
+        let block = std::str::from_utf8(&block).unwrap();
+        assert!(block.starts_with("event: update\ndata: {"), "{block}");
     }
 
     #[test]
@@ -172,7 +196,7 @@ mod tests {
 
     #[test]
     fn an_unwritable_update_is_skipped() {
-        assert_eq!(encode(&update(b"not json")), None);
+        assert_eq!(encode(&update(b"not json"), true), None);
     }
 
     #[test]
