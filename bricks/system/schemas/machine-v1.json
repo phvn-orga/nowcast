@@ -1,0 +1,323 @@
+{
+  "type": "object",
+  "description": "One snapshot of the machine. A field the machine cannot give is absent, never zero. Percentages are integers from 0 to 100, sizes in MiB, rates in KiB/s over the last sample.",
+  "required": [
+    "cpu",
+    "memory",
+    "gpus",
+    "disks",
+    "filesystems",
+    "network"
+  ],
+  "properties": {
+    "cpu": {
+      "type": "object",
+      "properties": {
+        "usage": {
+          "type": "integer",
+          "description": "Usage of all cores, percent."
+        },
+        "cores": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Usage of each core, percent."
+        },
+        "load": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Load average over 1, 5 and 15 minutes."
+        },
+        "temp_c": {
+          "type": "integer",
+          "description": "Package temperature, degrees Celsius."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "total_mib": {
+          "type": "integer"
+        },
+        "available_mib": {
+          "type": "integer",
+          "description": "MemAvailable: what the system can give without swapping. Used memory is total minus available."
+        },
+        "swap_total_mib": {
+          "type": "integer"
+        },
+        "swap_used_mib": {
+          "type": "integer"
+        }
+      }
+    },
+    "gpus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "vendor"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "PCI address."
+          },
+          "vendor": {
+            "enum": [
+              "amd",
+              "nvidia",
+              "intel",
+              "other"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "suspended": {
+            "const": true,
+            "description": "The card is asleep (runtime power management) and is not read, which would wake it: no measures."
+          },
+          "usage": {
+            "type": "integer",
+            "description": "GPU busy, percent."
+          },
+          "temp_c": {
+            "type": "integer"
+          },
+          "vram_used_mib": {
+            "type": "integer"
+          },
+          "vram_total_mib": {
+            "type": "integer"
+          },
+          "gtt_used_mib": {
+            "type": "integer",
+            "description": "System memory the GPU holds."
+          },
+          "gtt_total_mib": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "disks": {
+      "type": "array",
+      "description": "Physical disks: no loop or device-mapper device.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "read_kib_s": {
+            "type": "integer"
+          },
+          "write_kib_s": {
+            "type": "integer"
+          },
+          "busy": {
+            "type": "integer",
+            "description": "Share of the time the disk had an operation in flight, percent."
+          },
+          "temp_c": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "filesystems": {
+      "type": "array",
+      "description": "Mounted block devices, at their first mount point, squashfs excluded.",
+      "items": {
+        "type": "object",
+        "required": [
+          "mount",
+          "total_mib",
+          "available_mib"
+        ],
+        "properties": {
+          "mount": {
+            "type": "string"
+          },
+          "total_mib": {
+            "type": "integer"
+          },
+          "available_mib": {
+            "type": "integer",
+            "description": "What an unprivileged user can still write."
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "required": [
+        "interfaces"
+      ],
+      "properties": {
+        "interfaces": {
+          "type": "array",
+          "description": "Physical interfaces.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "kind",
+              "link"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "wifi",
+                  "ethernet"
+                ]
+              },
+              "link": {
+                "type": "string",
+                "description": "The kernel's operstate: up, down, or another of its values."
+              },
+              "rx_kib_s": {
+                "type": "integer"
+              },
+              "tx_kib_s": {
+                "type": "integer"
+              },
+              "errors": {
+                "type": "integer",
+                "description": "Packets in error during the last sample, both directions."
+              },
+              "dropped": {
+                "type": "integer",
+                "description": "Packets dropped during the last sample, both directions."
+              },
+              "wifi": {
+                "type": "object",
+                "description": "The radio link to the access point.",
+                "properties": {
+                  "signal_dbm": {
+                    "type": "integer"
+                  },
+                  "rx_mbit_s": {
+                    "type": "integer",
+                    "description": "Negotiated rate."
+                  },
+                  "tx_mbit_s": {
+                    "type": "integer",
+                    "description": "Negotiated rate."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "probes": {
+          "type": "object",
+          "description": "ICMP probes over the last 30 s. Absent when the machine does not allow unprivileged ICMP.",
+          "properties": {
+            "gateway": {
+              "$ref": "#/$defs/gateway"
+            },
+            "internet": {
+              "$ref": "#/$defs/internet"
+            }
+          }
+        }
+      }
+    },
+    "pressure": {
+      "type": "object",
+      "description": "Share of the last 10 s during which tasks waited on a resource (avg10 of /proc/pressure), percent. some: at least one task waited; full: all did.",
+      "properties": {
+        "cpu": {
+          "type": "object",
+          "properties": {
+            "some": {
+              "type": "integer"
+            }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "properties": {
+            "some": {
+              "type": "integer"
+            },
+            "full": {
+              "type": "integer"
+            }
+          }
+        },
+        "io": {
+          "type": "object",
+          "properties": {
+            "some": {
+              "type": "integer"
+            },
+            "full": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gateway": {
+      "type": "object",
+      "required": [
+        "target",
+        "loss"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "The gateway of the default route."
+        },
+        "rtt_ms": {
+          "type": "integer",
+          "description": "Median round trip of the answered samples. Absent when none answered."
+        },
+        "loss": {
+          "type": "integer",
+          "description": "Samples with no answer, percent."
+        }
+      }
+    },
+    "internet": {
+      "type": "object",
+      "required": [
+        "targets",
+        "loss"
+      ],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "A sample is answered when any target answers, with the fastest reply."
+        },
+        "rtt_ms": {
+          "type": "integer",
+          "description": "Median round trip of the answered samples. Absent when none answered."
+        },
+        "loss": {
+          "type": "integer",
+          "description": "Samples with no answer, percent."
+        }
+      }
+    }
+  }
+}

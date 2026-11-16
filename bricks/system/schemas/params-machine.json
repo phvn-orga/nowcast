@@ -1,0 +1,5 @@
+{
+  "type": "object",
+  "description": "No key: the machine is one.",
+  "additionalProperties": false
+}

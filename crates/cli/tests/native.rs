@@ -69,6 +69,29 @@ mod forge {
     nowcast_conformance::brick_suite!(Forge);
 }
 
+struct System;
+
+impl BrickSubject for System {
+    fn command() -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nowcast"));
+        command.args(["brick", "system"]);
+        command
+    }
+
+    fn name() -> BrickName {
+        BrickName::new("system").unwrap()
+    }
+
+    fn subscription() -> (String, Vec<u8>) {
+        ("machine".into(), b"{}".to_vec())
+    }
+}
+
+mod system {
+    use super::*;
+    nowcast_conformance::brick_suite!(System);
+}
+
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn bricks(config: &Path, data: &Path) -> tokio::process::Command {

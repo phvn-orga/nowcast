@@ -35,6 +35,15 @@ pub const NATIVES: &[Native] = &[
         run: nowcast_brick_forge::run,
         configure: Some(nowcast_brick_forge::configure),
     },
+    Native {
+        files: NativeFiles {
+            name: nowcast_brick_system::NAME,
+            files: nowcast_brick_system::FILES,
+        },
+        description: "What the machine is doing: CPU, memory, GPUs, disks, network, temperatures and pressure.",
+        run: nowcast_brick_system::run,
+        configure: None,
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Native> {

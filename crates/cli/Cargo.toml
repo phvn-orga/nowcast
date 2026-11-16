@@ -17,6 +17,7 @@ hyper = { version = "1.12.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 nowcast-brick-claude-code = { path = "../../bricks/claude-code" }
 nowcast-brick-forge = { path = "../../bricks/forge" }
+nowcast-brick-system = { path = "../../bricks/system" }
 nowcast-daemon = { path = "../daemon" }
 nowcast-discovery = { path = "../discovery" }
 nowcast-supervisor = { path = "../supervisor" }
