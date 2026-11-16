@@ -125,6 +125,11 @@ impl Model {
     pub fn status(&mut self, status: Value, now: Timestamp) {
         if self.link != Link::Up {
             self.link = Link::Up;
+            // A flow that ended while the link was down, or with a service
+            // that restarted, never says so: only the state's are kept, and
+            // the reopened stream sends every live flow's last value again.
+            let live = names(&status["flows"], "id");
+            self.flows.retain(|id, _| live.contains(id));
             self.note(now, "connected to the service".to_owned());
         }
         if let Some(old) = &self.status {
@@ -174,7 +179,14 @@ impl Model {
                 if log.events.len() > FLOW_EVENTS {
                     log.events.pop_front();
                 }
-                self.note(now, format!("{label} published {}", text(data, "type")));
+                // The selected event stays selected as newer ones come on top.
+                if let Some(row) = self.selected.get_mut(&flow_key(&flow)) {
+                    *row += 1;
+                }
+                // When it was published: the last values sent on opening are
+                // not news.
+                let at = text(data, "time").parse().unwrap_or(now);
+                self.note(at, format!("{label} published {}", text(data, "type")));
             }
             "flow-error" => {
                 let message = text(data, "message");
@@ -258,7 +270,7 @@ impl Model {
     fn key(&self) -> String {
         match &self.screen {
             Screen::Tab(tab) => tab.title().to_owned(),
-            Screen::Flow(flow) => format!("flow {flow}"),
+            Screen::Flow(flow) => flow_key(flow),
             Screen::Event { flow, id } => format!("event {flow} {id}"),
         }
     }
@@ -349,6 +361,11 @@ impl Model {
             Screen::Tab(_) => Screen::Tab(Tab::Overview),
         };
     }
+}
+
+/// The key of a flow's screen, where its selected event is kept.
+fn flow_key(flow: &str) -> String {
+    format!("flow {flow}")
 }
 
 /// The brick a flow id belongs to: what comes before its first `/`.
@@ -511,6 +528,38 @@ mod tests {
                 "lost the service: the service closed the stream"
             ]
         );
+    }
+
+    #[test]
+    fn a_reconnection_forgets_the_flows_gone_meanwhile() {
+        let mut model = Model::new(state("running", json!([])));
+        model.event("update", &update("forge/x", "1"), now());
+        model.event("update", &update("forge/gone", "2"), now());
+        model.down("the service closed the connection".into(), now());
+        model.status(state("running", json!([])), now());
+        assert_eq!(model.flow_ids(), ["forge/x"]);
+    }
+
+    #[test]
+    fn a_published_event_dates_from_its_time() {
+        let mut model = Model::new(state("running", json!([])));
+        model.event("update", &update("forge/x", "1"), now());
+        assert_eq!(
+            model.recent[0].at,
+            "2026-11-08T16:45:00Z".parse::<Timestamp>().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_selected_event_stays_as_newer_ones_come() {
+        let mut model = Model::new(state("running", json!([])));
+        model.event("update", &update("forge/x", "1"), now());
+        model.event("update", &update("forge/x", "2"), now());
+        model.screen = Screen::Flow("forge/x".into());
+        model.move_by(1);
+        assert_eq!(model.rows()[model.selected()], "1");
+        model.event("update", &update("forge/x", "3"), now());
+        assert_eq!(model.rows()[model.selected()], "1");
     }
 
     #[test]

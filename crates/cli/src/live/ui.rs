@@ -44,9 +44,10 @@ pub fn draw(frame: &mut Frame, model: &Model, now: Timestamp) -> Hits {
     match &model.screen {
         Screen::Tab(Tab::Overview) => overview(frame, body, model, status, now),
         Screen::Tab(Tab::Bricks) => {
+            let flows = model.flow_ids();
             let rows = items(&status["bricks"])
                 .iter()
-                .map(|brick| brick_row(brick, model))
+                .map(|brick| brick_row(brick, &flows))
                 .collect();
             hits.list = list(frame, body, "Bricks", rows, model.selected());
         }
@@ -215,7 +216,7 @@ fn overview(frame: &mut Frame, area: Rect, model: &Model, status: &Value, now: T
     }
 }
 
-fn brick_row(brick: &Value, model: &Model) -> ListItem<'static> {
+fn brick_row(brick: &Value, flows: &[String]) -> ListItem<'static> {
     let name = text(brick, "name");
     let mut spans = vec![
         Span::raw(format!("{name:<16}")),
@@ -228,11 +229,7 @@ fn brick_row(brick: &Value, model: &Model) -> ListItem<'static> {
         Some(0) | None => {}
         Some(n) => spans.push(Span::raw(format!("  {n} crashes in a row")).red()),
     }
-    let flows = model
-        .flow_ids()
-        .into_iter()
-        .filter(|f| brick_of(f) == name)
-        .count();
+    let flows = flows.iter().filter(|f| brick_of(f) == name).count();
     let plural = if flows == 1 { "" } else { "s" };
     spans.push(Span::raw(format!("  serves {flows} flow{plural}")).dark_gray());
     ListItem::new(Line::from(spans))

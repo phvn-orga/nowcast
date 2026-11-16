@@ -443,8 +443,6 @@ pub async fn the_router_tells_whether_any_subscription_exists<S: RouterSubject>(
     assert!(!*router.has_subscriptions().borrow());
 }
 
-/// `GET /v1/status` reads each anchor's subscriptions, and every flow with its
-/// subscribers and last event, an empty flow kept included until it ends.
 /// An observer first gets the last value of every flow, whoever subscribes
 /// to it, in increasing id order.
 pub async fn an_observer_starts_with_every_last_value<S: RouterSubject>() {
@@ -510,6 +508,8 @@ pub async fn an_observer_is_no_subscription<S: RouterSubject>() {
     assert_eq!(router.flows(), vec![]);
 }
 
+/// `GET /v1/status` reads each anchor's subscriptions, and every flow with its
+/// subscribers and last event, an empty flow kept included until it ends.
 pub async fn the_router_tells_its_flows_and_subscriptions<S: RouterSubject>() {
     let router = S::new();
     assert_eq!(router.flows(), vec![]);

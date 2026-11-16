@@ -18,12 +18,13 @@ pub fn short_session(id: &str) -> &str {
     }
 }
 
-/// A flow id as shown under `session`: the session id it repeats becomes `…`.
+/// A flow id as shown under `session`: a segment repeating the session id
+/// becomes `…`. Only whole segments: a short id must not cut into a name.
 pub fn flow_in_session(flow: &str, session: &str) -> String {
-    if session.is_empty() {
-        return flow.to_owned();
-    }
-    flow.replace(session, "…")
+    flow.split('/')
+        .map(|segment| if segment == session { "…" } else { segment })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// How long ago `time`, an RFC 3339 timestamp, was at `now`; `None` when it
@@ -108,6 +109,10 @@ mod tests {
         );
         assert_eq!(flow_in_session("forge/x", "5f1c"), "forge/x");
         assert_eq!(flow_in_session("forge/x", ""), "forge/x");
+        assert_eq!(
+            flow_in_session("forge/dev-branch", "dev"),
+            "forge/dev-branch"
+        );
     }
 
     #[test]

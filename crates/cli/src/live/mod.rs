@@ -54,7 +54,14 @@ pub async fn live(client: &Client, ask_systemd: bool) -> Result<(), CliError> {
                 .into(),
         ));
     }
-    let mut terminal = ratatui::try_init().map_err(CliError::Io)?;
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(e) => {
+            // It may have failed halfway, raw mode on.
+            let _ = ratatui::try_restore();
+            return Err(CliError::Io(e));
+        }
+    };
     // `try_init`'s panic hook restores the screen; the mouse is ours.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -72,9 +79,16 @@ pub async fn live(client: &Client, ask_systemd: bool) -> Result<(), CliError> {
 
 /// The service's state, `None` when it is stopped. Under systemd, a service
 /// a connection would start counts as stopped, and is left alone.
+/// `systemctl` runs off the runtime: it blocks, and a stuck one must not
+/// freeze the screen.
 async fn running(client: &Client, ask_systemd: bool) -> Result<Option<Value>, CliError> {
-    if ask_systemd && waits_for_a_connection(&systemd_states()) {
-        return Ok(None);
+    if ask_systemd {
+        let states = tokio::task::spawn_blocking(systemd_states)
+            .await
+            .unwrap_or_default();
+        if waits_for_a_connection(&states) {
+            return Ok(None);
+        }
     }
     client.status().await
 }
