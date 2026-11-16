@@ -328,7 +328,7 @@ désigne l'entrée. Toutes sont relues quand ce répertoire reste inconnu, quand
 `git branch` nomme une autre branche que la courante (un autre worktree peut la
 porter), et après `git worktree add`, `move`, `remove` ou `prune`. Une commande
 qui a échoué compte aussi : elle a pu changer de branche avant d'échouer. Une
-relecture fait sortir une entrée dont le worktree n'existe plus. La brique git
+relecture fait sortir toute entrée dont le worktree n'existe plus. La brique git
 (#51) pourra remplacer ces appels.
 
 ### La liste
@@ -358,8 +358,12 @@ relecture fait sortir une entrée dont le worktree n'existe plus. La brique git
 - **Au plus 16 worktrees.** Au-delà, celui dont l'écriture est la plus ancienne
   sort. Aucun délai : une fenêtre de temps (les worktrees des dix dernières
   minutes, par exemple) est l'affaire du consommateur, qui a les dates.
-- **Un worktree dont la racine n'existe plus sort de la liste**, vérifié à chaque
-  écriture relevée et à chaque relecture.
+- **Un worktree dont la racine n'existe plus sort de la liste**, quoi qui l'ait
+  supprimé : vérifié à chaque écriture relevée, à chaque relecture, et au début et
+  à la fin de chaque tour du fil principal. Les tours prennent ce qu'aucune
+  commande relevée ne dit : `wt remove`, qui supprime en arrière-plan, un terminal,
+  une autre session. Le contrôle ne demande que l'existence de chaque racine, sans
+  appel à git.
 - **Vide tant que la session n'a rien écrit** : un consommateur se rabat alors sur
   le répertoire de la session.
 - **Elle appartient à la session.** Après un `/clear`, la nouvelle session part
