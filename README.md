@@ -50,7 +50,7 @@ A brick runs only once enabled, and only while something subscribes to it. The b
 nowcast bricks enable claude-code
 ```
 
-`claude-code` publishes the quotas of the Claude Code account and the measures of its running sessions. Any other brick is enabled by the path of its declaration file (`nowcast bricks enable path/to/brick.toml`), and `nowcast bricks disable <name>` turns one off.
+`claude-code` publishes the quotas of the Claude Code account and the measures of its running sessions. `system` publishes what the machine is doing (CPU, memory, GPUs, disks, network, temperatures, pressure); while subscribed, it pings the gateway and two public resolvers (9.9.9.9 and 1.1.1.1) every 2 s. Any other brick is enabled by the path of its declaration file (`nowcast bricks enable path/to/brick.toml`), and `nowcast bricks disable <name>` turns one off.
 
 A brick that needs a configuration (credentials, for one) declares a command for it in `[configure]`: enabling the brick runs it in your terminal first, and `nowcast bricks configure <name>` runs it again later. Without a terminal, the brick is enabled unconfigured.
 
