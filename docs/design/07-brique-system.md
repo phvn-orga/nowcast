@@ -2,9 +2,10 @@
 
 État au 2026-11-16 : conçue sous #75. Brique native (`01-briques.md`).
 
-Elle publie ce que fait la machine, en direct : CPU, mémoire, GPU et pression, pour
-n'importe quel consommateur (la ligne d'état d'un agent, un tableau de bord). Ce que
-coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76).
+Elle publie ce que fait la machine, en direct : CPU, mémoire, GPU, disques, réseau,
+températures et pression, pour n'importe quel consommateur (la ligne d'état d'un
+agent, un tableau de bord). Ce que coûte chaque session de Claude Code est l'affaire
+de la brique claude-code (#76).
 
 ## Ce qu'elle publie
 
@@ -13,9 +14,9 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
 | `machine` | `{}` | `system/machine` | `system.machine/v1` | rien |
 
 - **Un seul flux pour toute la machine.** Un abonnement suffit, et chaque événement
-  est un instantané cohérent : CPU, mémoire, GPU et pression lus au même
-  échantillon. La brique lit donc tout dès qu'un client lit quoi que ce soit ; ces
-  lectures sont des fichiers de `/proc` et de `/sys`, qui coûtent peu.
+  est un instantané cohérent, tout étant lu au même échantillon. La brique lit donc
+  tout dès qu'un client lit quoi que ce soit, sondes réseau comprises (voir
+  « Latence et pertes »). Le reste se lit dans `/proc` et `/sys`, qui coûtent peu.
 - **Un domaine coûteux aura sa propre sorte.** Les processus les plus lourds, s'ils
   viennent, demandent de parcourir tout `/proc` : ils ne grossiront pas `machine`,
   pour ne pas peser sur un client qui n'affiche que le CPU.
@@ -28,7 +29,8 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
   "cpu": {
     "usage": 23,
     "cores": [12, 40, 8, 31],
-    "load": [1.52, 1.10, 0.95]
+    "load": [1.52, 1.10, 0.95],
+    "temp_c": 54
   },
   "memory": {
     "total_mib": 30682,
@@ -39,11 +41,35 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
   "gpus": [
     {
       "id": "0000:65:00.0", "vendor": "amd", "name": "Strix [Radeon 880M / 890M]",
-      "usage": 33,
+      "usage": 33, "temp_c": 50,
       "vram_used_mib": 471, "vram_total_mib": 512,
       "gtt_used_mib": 2951, "gtt_total_mib": 15341
     }
   ],
+  "disks": [
+    { "name": "nvme0n1", "read_kib_s": 0, "write_kib_s": 340, "busy": 2, "temp_c": 25 }
+  ],
+  "filesystems": [
+    { "mount": "/", "total_mib": 934912, "available_mib": 807936 },
+    { "mount": "/boot", "total_mib": 2048, "available_mib": 1740 }
+  ],
+  "network": {
+    "interfaces": [
+      {
+        "name": "wlp99s0", "kind": "wifi", "link": "up",
+        "rx_kib_s": 120, "tx_kib_s": 8, "errors": 0, "dropped": 0,
+        "wifi": { "signal_dbm": -32, "rx_mbit_s": 206, "tx_mbit_s": 287 }
+      },
+      {
+        "name": "eno1", "kind": "ethernet", "link": "down",
+        "rx_kib_s": 0, "tx_kib_s": 0, "errors": 0, "dropped": 0
+      }
+    ],
+    "probes": {
+      "gateway": { "target": "192.168.1.1", "rtt_ms": 1, "loss": 0 },
+      "internet": { "target": "…", "rtt_ms": 14, "loss": 0 }
+    }
+  },
   "pressure": {
     "cpu": { "some": 0 },
     "memory": { "some": 0, "full": 0 },
@@ -53,7 +79,13 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
 ```
 
 - **Un champ que la machine ne donne pas est absent**, jamais à zéro : un zéro est
-  une mesure. Un GPU dont le pilote ne dit rien n'a que `id`, `vendor` et `name`.
+  une mesure. Un GPU dont le pilote ne dit rien n'a que `id`, `vendor` et `name` ;
+  une machine sans capteur n'a pas de `temp_c`.
+- **Les débits** (`*_kib_s`) et **`busy`** se calculent entre deux échantillons,
+  comme l'usage du CPU.
+
+### CPU et mémoire
+
 - **`cpu.usage`** est l'usage de tous les cœurs, `cores` celui de chacun, en
   pourcentage entier. **`load`** est la charge moyenne sur 1, 5 et 15 minutes
   (`/proc/loadavg`), à deux décimales comme le noyau la donne.
@@ -61,6 +93,9 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
   sans swapper. La mémoire utilisée vaut `total_mib - available_mib` (le calcul de
   `sysinfo`) ; elle n'est pas publiée à part. Une machine sans swap publie
   `swap_total_mib` à `0`.
+
+### GPU
+
 - **`gpus`** a une entrée par carte graphique (`/sys/class/drm/card*`, classe PCI
   `0x03`), identifiée par son adresse PCI, vide sans GPU. `vendor` vaut `amd`,
   `nvidia`, `intel` ou `other` ; `name` vient de `/usr/share/hwdata/pci.ids`, absent
@@ -69,12 +104,74 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
   VRAM n'est qu'une petite réserve fixe et l'essentiel passe par la GTT : sur la
   machine de développement (Radeon 890M, 2026-11-16), 512 Mo de VRAM presque pleins
   et 2,9 Go de GTT. Un GPU dédié a surtout de la VRAM.
-- **`pressure`** est la part du temps où des tâches ont attendu une ressource, sur
-  les 10 dernières secondes (`avg10` de `/proc/pressure/*`), en pourcentage entier.
-  `some` : au moins une tâche attendait ; `full` : toutes les tâches attendaient. Elle
-  dit si la machine manque d'une ressource, ce que les pourcentages d'usage ne disent
-  pas. `cpu` n'a que `some` : au niveau du système, le noyau rend `full` toujours nul.
-  Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
+
+### Disques et systèmes de fichiers
+
+- **`disks`** a une entrée par disque physique : un périphérique de `/sys/block` dont
+  le chemin réel n'est pas sous `/sys/devices/virtual`, ce qui écarte les `loop` (les
+  snaps) et les `dm` (LVM, chiffrement). `read_kib_s` et `write_kib_s` viennent des
+  secteurs lus et écrits (`/sys/block/<disque>/stat`, secteurs de 512 octets).
+  `busy` est la part du temps où le disque avait une opération en cours, en
+  pourcentage entier (le `%util` d'`iostat`).
+- **`filesystems`** a une entrée par périphérique bloc monté, au premier point de
+  montage (`/proc/self/mountinfo`), hors `squashfs` (les snaps, toujours pleins).
+  `available_mib` est ce qu'un utilisateur sans privilège peut encore écrire
+  (`f_bavail` de `statvfs`), ce que montre `df`. Un système de fichiers ne se relie
+  pas à son disque : sous LVM, il en est séparé par un `dm`.
+
+### Réseau
+
+- **`interfaces`** a une entrée par interface physique (`/sys/class/net/<nom>/device`
+  existe), ce qui écarte `lo`, les ponts et les `veth` de Docker. `kind` vaut `wifi`
+  quand l'interface a un répertoire `wireless`, `ethernet` sinon. `link` reprend
+  `operstate` (`up`, `down`, ou la valeur du noyau).
+- **`rx_kib_s` et `tx_kib_s`** sont le débit que la machine utilise, reçu et envoyé,
+  pas celui dont elle dispose. **`errors` et `dropped`** comptent les paquets en
+  erreur et les paquets perdus pendant le dernier échantillon, dans les deux sens
+  (`statistics/` de l'interface).
+- **`wifi`** est la liaison radio de l'interface connectée : `signal_dbm`, et
+  `rx_mbit_s`, `tx_mbit_s`, le débit que la radio a négocié avec le point d'accès.
+  Lu par netlink (nl80211), sans rien émettre. Absent sans liaison.
+
+### Latence et pertes
+
+Un débit nul ne dit pas si la connexion a sauté ou si la machine ne télécharge rien.
+Les sondes le disent, et situent la panne : une passerelle qui répond mal désigne le
+Wi-Fi ou le câble, une passerelle saine avec internet en perte désigne le
+fournisseur.
+
+- **Deux sondes**, `gateway` (la passerelle de la route par défaut,
+  `/proc/net/route`) et `internet` (un hôte externe, voir « À trancher »). Chacune
+  envoie un ping ICMP par échantillon, attendu 1 s au plus.
+- **La brique émet du trafic** : une centaine d'octets par sonde toutes les 2 s, tant
+  que le flux a un abonné. C'est sa seule action vers l'extérieur.
+- **`rtt_ms`** est la médiane des réponses sur les 30 dernières secondes, en
+  millisecondes entières, absente si aucune n'a répondu. **`loss`** est la part des
+  pings perdus sur la même fenêtre, en pourcentage entier.
+- **Sans privilège.** La brique ouvre un socket ICMP non privilégié
+  (`SOCK_DGRAM`, `IPPROTO_ICMP`), permis quand le groupe du service est dans
+  `net.ipv4.ping_group_range` (tous les groupes sur la machine de développement,
+  2026-11-16). Sinon, ou sans route par défaut, la sonde est absente.
+
+### Températures
+
+| Où | Capteur (`/sys/class/hwmon`) |
+|---|---|
+| `cpu.temp_c` | `k10temp`, `Tctl` (AMD) ; `coretemp`, `Package id 0` (Intel) |
+| `gpus[].temp_c` | `amdgpu`, `edge`, relié à la carte par le `device` du capteur ; NVIDIA par `nvidia-smi` |
+| `disks[].temp_c` | `nvme`, `Composite`, relié au disque par son contrôleur |
+
+En degrés entiers. Les liens entre capteurs et périphériques sont vérifiés sur la
+machine de développement (2026-11-16) pour AMD et NVMe ; `coretemp` ne l'est pas.
+
+### Pression
+
+**`pressure`** est la part du temps où des tâches ont attendu une ressource, sur les
+10 dernières secondes (`avg10` de `/proc/pressure/*`), en pourcentage entier.
+`some` : au moins une tâche attendait ; `full` : toutes les tâches attendaient. Elle
+dit si la machine manque d'une ressource, ce que les pourcentages d'usage ne disent
+pas. `cpu` n'a que `some` : au niveau du système, le noyau rend `full` toujours nul.
+Sans `/proc/pressure` (noyau sans PSI), `pressure` est absent.
 
 ## Les sources
 
@@ -82,7 +179,13 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
 |---|---|
 | CPU, mémoire, swap, charge | `sysinfo`, sans ses fonctions par défaut, avec `system` seulement |
 | GPU AMD | `/sys/class/drm/card*/device/` : `gpu_busy_percent`, `mem_info_vram_used`, `mem_info_vram_total`, `mem_info_gtt_used`, `mem_info_gtt_total` |
-| GPU NVIDIA | `nvidia-smi --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits` |
+| GPU NVIDIA | `nvidia-smi --query-gpu=pci.bus_id,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits` |
+| Disques | `/sys/block/<disque>/stat` |
+| Systèmes de fichiers | `/proc/self/mountinfo`, `statvfs` |
+| Interfaces | `/sys/class/net/<nom>/` (`operstate`, `statistics/`) |
+| Wi-Fi | nl80211, par `wl-nl80211` (0.9.0, du projet rust-netlink) |
+| Sondes | socket ICMP non privilégié ; passerelle par `/proc/net/route` |
+| Températures | `/sys/class/hwmon/hwmon*/` |
 | Pression | `/proc/pressure/{cpu,memory,io}` |
 
 - **Le GPU ne passe pas par `sysinfo`.** Sa fonction `gpu` lit sous Linux les mêmes
@@ -96,20 +199,25 @@ coûte chaque session de Claude Code est l'affaire de la brique claude-code (#76
   2 s.
 - **Intel et les autres** sont listés sans mesures : le pilote i915 n'expose pas
   d'occupation simple dans `/sys`.
+- **Disques, réseau et températures se lisent directement**, sans les fonctions
+  `disk`, `network` et `component` de `sysinfo` : il faut relier chaque capteur à
+  son périphérique, et écarter les périphériques virtuels selon les règles plus haut.
+- **Pas d'`iw`** pour le Wi-Fi : sa documentation demande de ne pas analyser sa
+  sortie.
 
 ## L'échantillonnage
 
 - **Toutes les 2 s, à rythme fixe**, tant que le flux a un abonné. Rien ne se
   règle : un client qui veut moins souvent ignore des événements.
-- **L'usage du CPU demande deux lectures** espacées d'au moins 200 ms (le minimum de
-  `sysinfo`). La première publication part à la deuxième lecture, 200 ms après
-  l'ouverture du flux ; les suivantes toutes les 2 s.
-- **Publié seulement quand le détail change.** Les valeurs sont arrondies (pourcentages
-  entiers, mémoire au Mio, charge à deux décimales) et la brique compare le détail à
-  celui qu'elle a publié en dernier. Le détail ne porte pas d'instant de lecture, qui
-  le changerait à chaque fois : tant que le flux vit sans `flow-error`, l'absence
-  d'événement veut dire que rien n'a bougé, et le `time` de l'événement date le
-  dernier changement.
+- **Les usages et les débits demandent deux lectures** espacées d'au moins 200 ms (le
+  minimum de `sysinfo` pour le CPU). La première publication part à la deuxième
+  lecture, 200 ms après l'ouverture du flux ; les suivantes toutes les 2 s. Les
+  sondes n'ont alors qu'une réponse.
+- **Publié seulement quand le détail change.** Les valeurs sont arrondies (entiers,
+  sauf la charge à deux décimales) et la brique compare le détail à celui qu'elle a
+  publié en dernier. Le détail ne porte pas d'instant de lecture, qui le changerait à
+  chaque fois : tant que le flux vit sans `flow-error`, l'absence d'événement veut
+  dire que rien n'a bougé, et le `time` de l'événement date le dernier changement.
 - **Sur une machine de bureau, presque chaque échantillon change.** Mesuré le
   2026-11-16 sur la machine de développement, 10 lectures à 2 s d'écart :
   `MemAvailable` bougeait de 30 à 950 Mio, l'occupation du GPU de 0 à 4 points. La
@@ -127,8 +235,13 @@ brique, comme les autres briques natives.
 
 ## À trancher
 
-- **D'autres domaines**, si le besoin apparaît : disques, réseau, températures, les
-  processus les plus lourds (une sorte à part, plus haut).
+- **L'hôte externe de la sonde `internet`** : un résolveur public (1.1.1.1, 9.9.9.9),
+  qui reçoit alors un ping toutes les 2 s de chaque machine abonnée, ou un hôte que
+  l'utilisateur choisit, ce qui demande une configuration à la brique.
+- **Les interfaces virtuelles qui portent du trafic réel**, un VPN (WireGuard, `tun`)
+  par exemple : écartées avec les ponts et les `veth`.
+- **IPv6** : les sondes ne visent que la passerelle et l'hôte IPv4.
+- **Les processus les plus lourds** (une sorte à part, plus haut).
 - **Les limites d'un cgroup** : une machine dont le service tourne dans un conteneur
   publie la mémoire de l'hôte, pas la sienne.
 
@@ -138,5 +251,9 @@ brique, comme les autres briques natives.
   non testé.
 - `nvidia-smi` : les champs de la requête, leur forme sans unités, et le coût d'un
   lancement toutes les 2 s. Aucune machine NVIDIA n'était disponible.
+- Que `wl-nl80211` rend le signal et les débits de la station connectée
+  (`NL80211_CMD_GET_STATION`) ; à défaut, `/proc/net/wireless` donne le seul signal.
 - `gpu_busy_percent` sur un GPU AMD en veille (runtime PM) : la lecture peut le
   réveiller ou échouer.
+- Les capteurs Intel (`coretemp`), et les GPU dédiés AMD, qui ont aussi `junction`
+  et `mem`.
