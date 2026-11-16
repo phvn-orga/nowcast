@@ -339,6 +339,8 @@ test('a worktree removed however leaves the list at the start or the end of a tu
   expect(await listed(w)).toEqual([entry('main', 1_000_000), entry('other', 1_000_000)])
 
   files.splice(files.indexOf(ROOT('other')), 1)
+  await $.turn.start({ text: 'hi', turnId: 't-2', agentId: 'agent-1' })
+  expect(await listed(w)).toHaveLength(2)
   await $.turn.start({ text: 'hi', turnId: 't-2' })
   expect(await listed(w)).toEqual([entry('main', 1_000_000)])
 })

@@ -60,7 +60,7 @@ export function registerWorktrees(on: On): void {
 
 /**
  * Queues a check that each worktree of the list still exists: one removed by
- * anything else than a write or a command seen (`wt remove`, which removes in
+ * anything other than a write or a command seen (`wt remove`, which removes in
  * the background, a terminal, another session) leaves. Called at the start and
  * the end of each turn of the main thread, whose hooks live in `register.ts`
  * and `measures.ts`: a mod registers an event once without a matcher.
