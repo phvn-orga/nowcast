@@ -5,7 +5,8 @@ session posés ; mod central et bibliothèque des mods vérifiés, le rechargeme
 et le rafraîchissement aussi en session interactive ; entrée d'un flux et mesures
 des sessions Claude Code ajoutées ; abonnements nommés et gardés par le mod central ;
 rôles du mod central envers la brique forge et les mods d'affichage revus le
-2026-11-13.
+2026-11-13 ; `nowcast live` et l'affichage de `nowcast status` ajoutés le 2026-11-16
+(issue #126).
 
 ## Décisions prises
 
@@ -52,7 +53,8 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   JSON lu sur l'entrée standard), `nowcast bricks enable <nom>`,
   `nowcast bricks disable <nom>` (activer ou désactiver une brique) et `nowcast bricks
   configure <nom>` (la configurer à nouveau), `nowcast status`
-  (ce qui tourne, voir plus bas), `nowcast reload` (redémarrer le service sur le
+  (ce qui tourne, voir plus bas), `nowcast live` (ce que fait le service, en
+  continu, voir plus bas), `nowcast reload` (redémarrer le service sur le
   binaire installé, voir plus bas). La reconnexion et la conduite à tenir
   quand le service est absent sont écrites une fois, là.
 - **L'outil ne remplace la session de son ancrage que si on lui en donne une.** Il
@@ -73,12 +75,47 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   "current" | "outdated" | "missing"}`,
   `running` à `null` pour un service arrêté, `setup` à `null` quand il ne peut le dire. Arrêté est un état, pas une erreur :
   status sort en 0.
+- **L'affichage lisible de `nowcast status` se lit d'un coup d'œil**, dans l'esprit
+  de `setup` : identifiants courts (le début d'un identifiant de session, et pas sa
+  répétition dans l'identifiant d'un flux de la même session), temps relatifs
+  (« il y a 3 s »), état des briques en couleur dans un terminal, flux regroupés
+  sous la session qui y est abonnée. Il n'est pas un format : un programme lit
+  `--json`, qui ne change pas.
 - **`nowcast status` ne réveille pas un service arrêté.** Quand systemd tient le
   socket (`nowcast.socket` actif) sans que `nowcast.service` tourne, s'y connecter
   le démarrerait : status le dit arrêté sans se connecter. Sans systemd, sans unité
   socket active, ou avec un socket donné explicitement (`--socket`,
   `NOWCAST_SOCKET`, qui n'est pas celui de systemd), il se connecte directement, et
   un socket où rien n'écoute veut dire arrêté.
+- **`nowcast live` montre ce que fait le service, à mesure qu'il le fait.** C'est
+  une application plein écran, au clavier et à la souris, en plusieurs vues : une
+  vue d'ensemble (le service et sa version, les briques activées et lancées, les
+  sessions, les flux, ce qui vient de changer) ; les briques (état, pid,
+  plantages, les flux que chacune sert) ; les sessions (leurs abonnements, les flux
+  qu'elles reçoivent) ; les flux (leurs abonnés, leurs événements à mesure qu'ils
+  arrivent) ; un événement (son détail complet, lisible).
+  - **Il observe sans peser.** L'état vient de `GET /v1/status`, lu chaque seconde,
+    et les événements de `GET /v1/observe` (`03-contrats.md` section 3), qui ne
+    compte comme abonné nulle part et ne lance aucune brique. S'abonner comme une
+    session aurait ajouté des abonnés que `live` lui-même afficherait, et ne se
+    peut pas de toute façon : `GET /v1/status` donne l'identifiant d'un flux, pas
+    la brique, la sorte et les paramètres qu'un abonnement demande.
+  - **Il ne réveille pas un service arrêté**, comme `status`. Lancé quand systemd
+    tient le socket sans que le service tourne, il dit le service arrêté et sort en
+    erreur, sans ouvrir son écran. Sans systemd, ou avec un socket donné
+    explicitement, il se connecte directement, et un socket où rien n'écoute veut
+    dire arrêté.
+  - **Il tient pendant un redémarrage, et le dit.** Quand le service disparaît en
+    cours de route, un bandeau le signale ; `live` demande alors à systemd, sans
+    se connecter, si le service tourne, et ne se reconnecte qu'une fois qu'il
+    tourne à nouveau. Un `nowcast reload` se voit ainsi passer, et un service
+    arrêté pour de bon n'est pas réveillé.
+  - **Ouvert, il garde le service éveillé.** Ses connexions comptent pour l'arrêt
+    à vide (`03-contrats.md` section 4) : un service lancé le reste tant qu'on le
+    regarde.
+  - **Il rend le terminal tel qu'il l'a trouvé** en sortant, même sur une erreur.
+  - **Sans terminal, il refuse** et renvoie à `nowcast status` (un instantané) et à
+    `nowcast watch` (les événements, une ligne chacun).
 - **`nowcast watch` se lit par programme.** `--last-event-id <ID>` reprend le flux
   après cet identifiant : chaque événement gardé depuis, plutôt que toutes les
   dernières valeurs.

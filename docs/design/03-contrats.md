@@ -2,7 +2,8 @@
 
 État au 2026-11-07 : contrats décidés, délais fixés, arrêt du service à vide décrit,
 historique borné des flux ; entrée d'un flux et briques natives en premier jet.
-Rafraîchissement par portée ajouté le 2026-11-13, implémenté dans #132.
+Rafraîchissement par portée ajouté le 2026-11-13, implémenté dans #132. Route
+d'observation ajoutée le 2026-11-16 (issue #126).
 
 Ce document fixe les contrats dont dépend le développement en parallèle : le fichier
 de déclaration d'une brique, la découverte des briques, l'API des clients, le
@@ -142,7 +143,7 @@ contenir `/`).
 
 C'est le premier appel obligatoire pour un processus d'ancrage, répété à chaque
 changement de session (`/clear`, reprise). Tout autre appel avant lui, sauf
-`GET /v1/service` et `GET /v1/status`, répond `428` avec le code
+`GET /v1/service`, `GET /v1/status` et `GET /v1/observe`, répond `428` avec le code
 `session_required`.
 
 Une déclaration remplace la session de l'ancrage. Avec `"replace": false`, elle ne
@@ -379,6 +380,23 @@ Attributs de l'événement :
 | `time` | Instant de la publication, RFC 3339. |
 | `dataschema` | Le schéma du type, tiré du fichier de déclaration. |
 | `data` | Le détail JSON de la brique, injecté tel quel après la vérification de sa syntaxe. |
+
+### Observation
+
+`GET /v1/observe` avec `Accept: text/event-stream` ouvre un flux SSE de tous les flux
+que le service tient, sans session déclarée, pour l'outil `nowcast live`
+(`02-clients.md`). Comme `GET /v1/status`, il couvre toutes les sessions.
+
+Il ne fait qu'observer : il ne compte pas comme abonné (`subscribers` de
+`GET /v1/status` ne bouge pas), ne lance aucune brique et ne retient pas un flux que
+plus personne ne suit. Sa connexion compte en revanche pour l'arrêt à vide, comme
+toute connexion (section 4) : le service ne s'arrête pas tant qu'on l'observe.
+
+Il porte `update`, `flow-error` et `flow-ended`, sous la forme du flux d'une session.
+À l'ouverture, le service envoie la dernière valeur de chaque flux, par identifiant
+croissant, puis tout ce que publient les flux, ceux créés ensuite compris. Il ne
+reprend pas après un identifiant : il n'envoie ni `id` SSE ni `flow-gap`, et un
+client qui se reconnecte reçoit à nouveau les dernières valeurs.
 
 ### Clients à base de hooks
 
