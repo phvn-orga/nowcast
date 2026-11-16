@@ -15,7 +15,7 @@ import { registerMeasures } from './measures'
 import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
 import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
-import { registerWorktrees } from './worktrees'
+import { checkWorktrees, registerWorktrees } from './worktrees'
 
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
 
@@ -95,11 +95,13 @@ export const register: Register = on => {
   // What the agent changes on a forge, refreshed in the forge brick.
   registerForge(on)
 
-  // A backstop: a turn always runs under the session the service knows.
+  // A backstop: a turn always runs under the session the service knows. Its
+  // worktrees are checked too, as at the end of a turn (`measures.ts`).
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const session = await $.session.id()
       if (watch?.session !== session) void follow($, session)
+      checkWorktrees($)
     }
     return next(e)
   })
