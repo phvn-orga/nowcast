@@ -22,7 +22,7 @@
 import type { EngineInterface, On } from 'claude-code'
 import { input } from './client'
 import { subscribeFor } from './subscriptions'
-import { worktrees } from './worktrees'
+import { checkWorktrees, worktrees } from './worktrees'
 
 type $ = EngineInterface
 
@@ -161,6 +161,7 @@ export function registerMeasures(on: On): void {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
+    if (e.agentId === undefined) checkWorktrees($)
     if (e.agentId === undefined && current !== undefined) {
       const m = current
       void cacheTtl($, m.id)

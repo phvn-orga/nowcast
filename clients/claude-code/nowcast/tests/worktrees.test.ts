@@ -317,3 +317,28 @@ test('git worktree reads every worktree again: one removed leaves the list', asy
 
   expect(await listed(w)).toEqual([entry('main', 1_000_000)])
 })
+
+test('a worktree removed however leaves the list at the start or the end of a turn of the main thread', async ($, on) => {
+  const files = [ROOT('main'), ROOT('feature'), ROOT('other')]
+  const w = world(on, { git: repository(), files })
+  tools(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start(START)
+  await edit($, `${ROOT('other')}/a.ts`)
+  await edit($, `${ROOT('feature')}/a.ts`)
+  await edit($, `${ROOT('main')}/a.ts`)
+  await w.clock.settle()
+  const complete = (agentId?: string) =>
+    $.turn.complete({ turnId: 't', agentId, answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+
+  // Removed in the background by `wt remove`, or from a terminal: no command of the session says so.
+  files.splice(files.indexOf(ROOT('feature')), 1)
+  await complete('agent-1')
+  expect(await listed(w)).toHaveLength(3)
+  await complete()
+  expect(await listed(w)).toEqual([entry('main', 1_000_000), entry('other', 1_000_000)])
+
+  files.splice(files.indexOf(ROOT('other')), 1)
+  await $.turn.start({ text: 'hi', turnId: 't-2' })
+  expect(await listed(w)).toEqual([entry('main', 1_000_000)])
+})

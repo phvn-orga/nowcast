@@ -58,6 +58,17 @@ export function registerWorktrees(on: On): void {
   })
 }
 
+/**
+ * Queues a check that each worktree of the list still exists: one removed by
+ * anything else than a write or a command seen (`wt remove`, which removes in
+ * the background, a terminal, another session) leaves. Called at the start and
+ * the end of each turn of the main thread, whose hooks live in `register.ts`
+ * and `measures.ts`: a mod registers an event once without a matcher.
+ */
+export function checkWorktrees($: $): void {
+  reread($, [])
+}
+
 /** Records `file` when the call that wrote it succeeded; the call's result unchanged. */
 function marked<R extends { deny?: string; isError?: true }>($: $, file: string, result: R): R {
   if (result.deny === undefined && result.isError !== true) record($, file)
@@ -83,8 +94,8 @@ function record($: $, file: string): void {
 
 /**
  * Queues a new reading of the worktrees under `dirs`, any of them for an
- * undefined one: their branch and key, or their leaving when gone. Order
- * and dates stay.
+ * undefined one: their branch and key. Every worktree gone leaves, under
+ * `dirs` or not. Order and dates stay.
  */
 function reread($: $, dirs: Array<string | undefined>): void {
   const asked = $.session.id()
@@ -98,9 +109,8 @@ function reread($: $, dirs: Array<string | undefined>): void {
       const under = (path: string) => dirs.some(dir => dir === undefined || dir === path || dir.startsWith(`${path}/`))
       const read = await Promise.all(
         mine.list.map(async worktree => {
-          if (!under(worktree.path)) return worktree
           if (!(await $.fs.exists(worktree.path).catch(() => true))) return undefined
-          return { ...worktree, ...(await describe($, worktree.path)) }
+          return under(worktree.path) ? { ...worktree, ...(await describe($, worktree.path)) } : worktree
         }),
       )
       const next = read.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
