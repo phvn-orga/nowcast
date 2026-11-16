@@ -37,6 +37,7 @@ pub fn service_messages() -> Vec<ServiceMessage> {
             req: BIG_REQ,
             kind: "pr".into(),
             params: br#"{"remote":"git@github.com:org/repo.git","branch":"main"}"#.to_vec(),
+            anchor: u32::MAX,
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },

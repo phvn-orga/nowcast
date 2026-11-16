@@ -21,4 +21,7 @@ pub struct Anchor {
     pub id: AnchorId,
     /// `None` when no process matched and the connected process anchors itself.
     pub kind: Option<ClientKindName>,
+    /// The pid of the anchor process when it was identified. Only the id
+    /// names the process for good: the pid may be reused once it exits.
+    pub pid: u32,
 }

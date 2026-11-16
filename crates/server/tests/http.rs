@@ -588,6 +588,21 @@ fn deleting_an_unknown_subscription_answers_404() {
 }
 
 #[test]
+fn a_subscription_passes_the_anchors_pid_to_the_supervisor() {
+    run(async {
+        let harness = start(ProbeMode::Ready);
+        harness.identity.set_anchor(Anchor {
+            id: AnchorId(2),
+            kind: None,
+            pid: 4242,
+        });
+        declare(&harness).await;
+        subscribe(&harness, "a").await;
+        assert_eq!(harness.supervisor.pids(), [4242]);
+    });
+}
+
+#[test]
 fn another_anchors_subscription_is_unknown() {
     run(async {
         let harness = start(ProbeMode::Ready);
@@ -596,6 +611,7 @@ fn another_anchors_subscription_is_unknown() {
         harness.identity.set_anchor(Anchor {
             id: AnchorId(2),
             kind: None,
+            pid: 2,
         });
         declare(&harness).await;
         let path = format!(
@@ -625,6 +641,7 @@ fn a_brick_refresh_reaches_another_anchors_flows() {
         harness.identity.set_anchor(Anchor {
             id: AnchorId(2),
             kind: None,
+            pid: 2,
         });
         declare(&harness).await;
         let path = format!("/v1/bricks/{}/refresh", probe::NAME);
@@ -696,6 +713,7 @@ fn the_session_is_per_anchor() {
         harness.identity.set_anchor(Anchor {
             id: AnchorId(2),
             kind: None,
+            pid: 2,
         });
         request(&harness, "GET", "/v1/stream", "")
             .await
@@ -964,13 +982,14 @@ impl Supervisor for DyingAnchor {
     fn resolve(
         &self,
         anchor: AnchorId,
+        pid: u32,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
     ) -> impl Future<Output = Result<Resolved, ResolveError>> + Send {
         self.sessions.forget(anchor);
         self.router.remove_anchor(anchor);
-        self.inner.resolve(anchor, brick, kind, params)
+        self.inner.resolve(anchor, pid, brick, kind, params)
     }
 
     fn refresh(&self, flow: &QualifiedFlowId) -> Result<(), UnknownFlow> {

@@ -24,12 +24,14 @@ fn all_service_messages() -> Vec<ServiceMessage> {
             req: RequestId(0),
             kind: String::new(),
             params: Vec::new(),
+            anchor: 0,
         },
         ServiceMessage::Subscribe {
             req: RequestId(u64::MAX),
             kind: "pr".into(),
             // The codec carries the bytes, it does not check they are JSON.
             params: vec![0xff, 0x00, b'{'],
+            anchor: u32::MAX,
         },
         ServiceMessage::Hello {
             name: BrickName::new("a-0").unwrap(),
@@ -319,6 +321,7 @@ fn an_oversized_message_is_not_encoded() {
         req: RequestId(1),
         kind: "pr".into(),
         params: vec![0; MAX_FRAME_LEN],
+        anchor: 1,
     };
     assert!(matches!(
         encode_service(&subscribe),
@@ -483,6 +486,8 @@ fn fields_of_the_wrong_type_are_refused() {
         ("params as a string", service("params", Value::from("{}"))),
         ("params as a map", service("params", Value::Map(vec![]))),
         ("kind as an integer", service("kind", Value::from(1))),
+        ("anchor as a string", service("anchor", Value::from("42"))),
+        ("negative anchor", service("anchor", Value::from(-1))),
     ];
     for (case, decoded) in cases {
         assert!(
@@ -509,6 +514,12 @@ fn field_values_outside_the_contract_are_refused() {
         decode_service(&service_frame(
             &hello,
             "protocol",
+            Some(Value::from(u64::from(u32::MAX) + 1)),
+        ))
+        .map(|_| ()),
+        decode_service(&service_frame(
+            &subscribe(),
+            "anchor",
             Some(Value::from(u64::from(u32::MAX) + 1)),
         ))
         .map(|_| ()),

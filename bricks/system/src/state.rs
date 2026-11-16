@@ -106,6 +106,7 @@ mod tests {
             req: RequestId(1),
             kind: kind.into(),
             params: b"{}".to_vec(),
+            anchor: 4242,
         })
     }
 

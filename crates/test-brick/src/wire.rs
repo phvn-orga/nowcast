@@ -70,6 +70,7 @@ pub enum Received {
         req: u64,
         kind: String,
         params: Vec<u8>,
+        anchor: u32,
     },
     Release {
         flow: String,
@@ -103,10 +104,16 @@ impl From<&ServiceMessage> for Received {
                 name: name.as_str().to_owned(),
                 protocol: *protocol,
             },
-            ServiceMessage::Subscribe { req, kind, params } => Self::Subscribe {
+            ServiceMessage::Subscribe {
+                req,
+                kind,
+                params,
+                anchor,
+            } => Self::Subscribe {
                 req: req.0,
                 kind: kind.clone(),
                 params: params.clone(),
+                anchor: *anchor,
             },
             ServiceMessage::Release { flow } => Self::Release {
                 flow: flow.as_str().to_owned(),
@@ -146,10 +153,16 @@ impl TryFrom<Received> for ServiceMessage {
                 name: BrickName::new(name).map_err(|e| e.to_string())?,
                 protocol,
             },
-            Received::Subscribe { req, kind, params } => Self::Subscribe {
+            Received::Subscribe {
+                req,
+                kind,
+                params,
+                anchor,
+            } => Self::Subscribe {
                 req: RequestId(req),
                 kind,
                 params,
+                anchor,
             },
             Received::Release { flow: id } => Self::Release { flow: flow(id)? },
             Received::Refresh { flow: id } => Self::Refresh { flow: flow(id)? },
@@ -238,6 +251,7 @@ mod tests {
                 req: RequestId(3),
                 kind: "item".into(),
                 params: br#"{"id":"a"}"#.to_vec(),
+                anchor: 4242,
             },
             ServiceMessage::Release {
                 flow: FlowId::new("a").unwrap(),

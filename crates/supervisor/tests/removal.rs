@@ -112,7 +112,7 @@ impl World {
         let params = probe::params(id);
         tokio::spawn(async move {
             let resolved = supervisor
-                .resolve(anchor, &probe::name(), probe::KIND, &params)
+                .resolve(anchor, 1, &probe::name(), probe::KIND, &params)
                 .await;
             resolved.map(|r| r.flow)
         })

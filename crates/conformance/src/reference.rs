@@ -91,12 +91,18 @@ pub fn service_value(msg: &ServiceMessage) -> Value {
                 ("protocol", Value::from(*protocol)),
             ],
         ),
-        ServiceMessage::Subscribe { req, kind, params } => map(
+        ServiceMessage::Subscribe {
+            req,
+            kind,
+            params,
+            anchor,
+        } => map(
             t,
             vec![
                 ("req", Value::from(req.0)),
                 ("kind", s(kind)),
                 ("params", Value::Binary(params.clone())),
+                ("anchor", Value::from(*anchor)),
             ],
         ),
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
@@ -239,6 +245,7 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, String> {
             req: f.req()?,
             kind: f.str("kind")?,
             params: f.bin("params")?,
+            anchor: u32::try_from(f.u64("anchor")?).map_err(|e| e.to_string())?,
         },
         "release" => ServiceMessage::Release { flow: f.flow()? },
         "refresh" => ServiceMessage::Refresh { flow: f.flow()? },

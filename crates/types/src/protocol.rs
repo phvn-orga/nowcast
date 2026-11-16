@@ -19,6 +19,9 @@ pub enum ServiceMessage {
         kind: String,
         /// The JSON bytes of the subscription params.
         params: Vec<u8>,
+        /// The pid of the subscriber's anchor process, in the brick's pid
+        /// namespace. It may be reused once the anchor dies.
+        anchor: u32,
     },
     /// The last subscriber of the flow left.
     Release { flow: FlowId },

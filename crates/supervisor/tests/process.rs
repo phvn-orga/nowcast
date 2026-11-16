@@ -93,7 +93,7 @@ impl Harness {
         timeout(
             WAIT,
             self.supervisor
-                .resolve(A, &probe::name(), probe::KIND, &params),
+                .resolve(A, 1, &probe::name(), probe::KIND, &params),
         )
         .await
         .expect("resolve answers")

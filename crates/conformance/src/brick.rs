@@ -114,8 +114,13 @@ impl Running {
     async fn subscribe<S: BrickSubject>(&mut self, req: u64) -> FlowId {
         let (kind, params) = S::subscription();
         let req = RequestId(req);
-        self.send(&ServiceMessage::Subscribe { req, kind, params })
-            .await;
+        self.send(&ServiceMessage::Subscribe {
+            req,
+            kind,
+            params,
+            anchor: std::process::id(),
+        })
+        .await;
         match self.recv_answer().await {
             BrickMessage::Subscribed {
                 req: answered,

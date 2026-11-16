@@ -78,6 +78,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
     fn resolve(
         &self,
         anchor: AnchorId,
+        pid: u32,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
@@ -89,7 +90,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
         let reply = self.inner.update(|state, router| {
             discovery
                 .brick(brick)
-                .map(|_| state.resolve(anchor, brick, kind, params, router))
+                .map(|_| state.resolve(anchor, pid, brick, kind, params, router))
         });
         let answer = match reply {
             Some(reply) => Ok(Answer {

@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use crate::{Anchor, AnchorId, Identity};
 
 /// Answers every connection with the anchor the test set, `AnchorId(1)` with no
-/// kind by default.
+/// kind and pid 1 by default.
 pub struct FakeIdentity {
     anchor: Mutex<Anchor>,
     dead: watch::Sender<HashSet<AnchorId>>,
@@ -21,6 +21,7 @@ impl Default for FakeIdentity {
             anchor: Mutex::new(Anchor {
                 id: AnchorId(1),
                 kind: None,
+                pid: 1,
             }),
             dead: watch::Sender::new(HashSet::new()),
         }

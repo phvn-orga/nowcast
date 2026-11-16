@@ -97,9 +97,13 @@ impl Identity for PeerIdentity {
             .matcher()
             .attach(Ancestors::of(connected), |process| process.exe.as_deref())
             .ok_or_else(|| io::Error::other("no process to anchor the connection"))?;
+        // A live process's pid, as the kernel gives it in the service's pid
+        // namespace, is positive.
+        let pid = anchor.pid as u32;
         Ok(Anchor {
             id: self.anchors().register(anchor),
             kind,
+            pid,
         })
     }
 

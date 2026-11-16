@@ -17,6 +17,7 @@ struct State {
     scoped_refreshes: Vec<(BrickName, Vec<u8>)>,
     inputs: Vec<(QualifiedFlowId, String, Vec<u8>)>,
     bricks: Vec<BrickSummary>,
+    pids: Vec<u32>,
 }
 
 /// Resolves `<brick>/<kind>:<params>` without any brick, unless the test set
@@ -55,6 +56,11 @@ impl FakeSupervisor {
         self.state.lock().unwrap().bricks = bricks;
     }
 
+    /// The anchor pid each resolution carried, in order.
+    pub fn pids(&self) -> Vec<u32> {
+        self.state.lock().unwrap().pids.clone()
+    }
+
     /// The flows a refresh was asked for, in order.
     pub fn refreshes(&self) -> Vec<QualifiedFlowId> {
         self.state.lock().unwrap().refreshes.clone()
@@ -77,11 +83,13 @@ impl Supervisor for FakeSupervisor {
     async fn resolve(
         &self,
         anchor: AnchorId,
+        pid: u32,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
     ) -> Result<Resolved, ResolveError> {
         let mut state = self.state.lock().unwrap();
+        state.pids.push(pid);
         if let Some(error) = state.failures.get(brick) {
             return Err(error.clone());
         }

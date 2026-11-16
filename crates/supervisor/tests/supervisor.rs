@@ -86,7 +86,7 @@ impl World {
         let params = probe::params(id);
         tokio::spawn(async move {
             let resolved = supervisor
-                .resolve(anchor, &probe::name(), probe::KIND, &params)
+                .resolve(anchor, 1, &probe::name(), probe::KIND, &params)
                 .await;
             resolved.map(|r| r.flow)
         })
@@ -145,7 +145,9 @@ fn assert_quiet(brick: &mut FakeBrick) {
 /// Takes the next `subscribe`, expected for `id`, and returns its `req`.
 async fn subscribe_req(brick: &mut FakeBrick, id: &str) -> RequestId {
     match recv(brick).await {
-        ServiceMessage::Subscribe { req, kind, params } => {
+        ServiceMessage::Subscribe {
+            req, kind, params, ..
+        } => {
             assert_eq!(kind, probe::KIND);
             assert_eq!(params, probe::params(id));
             req
@@ -304,7 +306,7 @@ async fn a_subscription_during_the_backoff_fails_at_once() {
     assert_eq!(
         world
             .supervisor
-            .resolve(A, &probe::name(), probe::KIND, &probe::params("b"))
+            .resolve(A, 1, &probe::name(), probe::KIND, &probe::params("b"))
             .await,
         Err(unavailable())
     );
@@ -489,7 +491,7 @@ async fn a_released_flow_keeps_no_value_for_a_later_subscriber() {
     let supervisor = world.supervisor.clone();
     let again = tokio::spawn(async move {
         supervisor
-            .resolve(B, &probe::name(), probe::KIND, &probe::params("a"))
+            .resolve(B, 2, &probe::name(), probe::KIND, &probe::params("a"))
             .await
     });
     serve(&mut brick, "a").await;
@@ -551,7 +553,7 @@ async fn a_resolution_dropped_before_its_answer_is_read_undoes_the_subscription(
     let world = world();
     let (name, params) = (probe::name(), probe::params("a"));
     // Never polled: the subscription is made, then dropped unread.
-    let resolution = world.supervisor.resolve(A, &name, probe::KIND, &params);
+    let resolution = world.supervisor.resolve(A, 1, &name, probe::KIND, &params);
     let mut brick = world.ready().await;
     serve(&mut brick, "a").await;
     settle().await;
