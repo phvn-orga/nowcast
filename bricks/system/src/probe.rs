@@ -3,8 +3,7 @@
 //! it to every group.
 
 use std::collections::VecDeque;
-use std::io;
-use std::mem::MaybeUninit;
+use std::io::{self, Read};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
@@ -34,7 +33,7 @@ pub fn gateway(route: &str) -> Option<Ipv4Addr> {
         }
         let gateway = u32::from_str_radix(gateway, 16).ok()?;
         // The kernel writes the address in its own byte order.
-        Some(Ipv4Addr::from(gateway.to_le_bytes()))
+        Some(Ipv4Addr::from(gateway.to_ne_bytes()))
     })
 }
 
@@ -70,14 +69,14 @@ fn exchange(socket: &Socket, target: Ipv4Addr, seq: u16) -> io::Result<Option<Du
     let request = [8, 0, 0, 0, 0, 0, hi, lo];
     let sent = Instant::now();
     socket.send_to(&request, &SocketAddrV4::new(target, 0).into())?;
-    let mut buf = [MaybeUninit::<u8>::uninit(); 64];
+    let mut reply = [0u8; 64];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Ok(None);
         }
         socket.set_read_timeout(Some(left))?;
-        let n = match socket.recv(&mut buf) {
+        let n = match (&*socket).read(&mut reply) {
             Ok(n) => n,
             Err(e)
                 if matches!(
@@ -89,11 +88,6 @@ fn exchange(socket: &Socket, target: Ipv4Addr, seq: u16) -> io::Result<Option<Du
             }
             Err(e) => return Err(e),
         };
-        // SAFETY: `recv` initialised the first `n` bytes.
-        let reply: Vec<u8> = buf[..n]
-            .iter()
-            .map(|b| unsafe { b.assume_init() })
-            .collect();
         // An echo reply to this request.
         if n >= 8 && reply[0] == 0 && reply[6..8] == [hi, lo] {
             return Ok(Some(sent.elapsed()));

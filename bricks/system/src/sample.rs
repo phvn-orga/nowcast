@@ -76,7 +76,8 @@ impl Sampler {
     }
 
     /// Reads the machine. The probes, `nvidia-smi` and the Wi-Fi link run
-    /// together, so a sample takes about [`probe::TIMEOUT`] at most.
+    /// together, so a sample takes the longest of their timeouts at most:
+    /// `nvidia-smi`'s 1.5 s.
     pub async fn sample(&mut self) -> Value {
         let mut detail = Map::new();
         let sensors = sensors::list(&self.root);

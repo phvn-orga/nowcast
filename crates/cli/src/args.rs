@@ -224,8 +224,8 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum BricksAction {
-    /// Enable a brick: a brick native to nowcast by its name (claude-code, forge),
-    /// or any brick by the path of its declaration file
+    /// Enable a brick: a brick native to nowcast by its name (claude-code, forge,
+    /// system), or any brick by the path of its declaration file
     ///
     /// A native brick's declaration and schemas are written under
     /// $XDG_DATA_HOME/nowcast/bricks/<name>/ first; the service keeps them in
