@@ -8,10 +8,10 @@
 //!
 //! While a flow has a subscriber, the brick samples it every 2 s, the first
 //! time 200 ms after the flow opens, and publishes when the rounded detail
-//! changes, and after every `refresh`. It reads `/proc` and `/sys`, runs
-//! `nvidia-smi` for an NVIDIA card, asks nl80211 for the Wi-Fi link, and
-//! pings the gateway and two public resolvers (9.9.9.9, 1.1.1.1): its only
-//! traffic.
+//! changes, and after every `refresh`. A process tree is read from `/proc`
+//! alone. For the machine, it reads `/proc` and `/sys`, runs `nvidia-smi` for
+//! an NVIDIA card, asks nl80211 for the Wi-Fi link, and pings the gateway and
+//! two public resolvers (9.9.9.9, 1.1.1.1): its only traffic.
 
 mod disk;
 mod gpu;
@@ -195,18 +195,20 @@ async fn serve() -> ExitCode {
             }
             () = sleep_until(due) => {
                 let now = Instant::now();
-                if let Some(r) = machine.as_mut().filter(|r| r.due <= now) {
-                    r.read();
-                    let detail = r.sampler.sample().await;
-                    if !send(&mut output, state.on_sample(Target::Machine, &detail)).await {
-                        return ExitCode::FAILURE;
-                    }
-                }
+                // Process trees first: they read in a few milliseconds, while
+                // a machine sample can wait on its probes for a second or more.
                 for (&pid, r) in processes.iter_mut().filter(|(_, r)| r.due <= now) {
                     let at = r.read();
                     // Nothing once the process is gone: its `release` follows.
                     let Some(detail) = r.sampler.read(at.into_std()) else { continue };
                     if !send(&mut output, state.on_sample(Target::Process(pid), &detail)).await {
+                        return ExitCode::FAILURE;
+                    }
+                }
+                if let Some(r) = machine.as_mut().filter(|r| r.due <= now) {
+                    r.read();
+                    let detail = r.sampler.sample().await;
+                    if !send(&mut output, state.on_sample(Target::Machine, &detail)).await {
                         return ExitCode::FAILURE;
                     }
                 }

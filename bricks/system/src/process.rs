@@ -163,15 +163,21 @@ fn children_of(proc: &Path, pid: u32) -> Vec<u32> {
     children
 }
 
-/// `pid` and its descendants, through the `children` files.
-fn walk(proc: &Path, pid: u32) -> Vec<u32> {
+/// `pid` and its descendants, breadth first, each process's children given
+/// by `children`.
+fn descendants(pid: u32, mut children: impl FnMut(u32) -> Vec<u32>) -> Vec<u32> {
     let mut pids = vec![pid];
     let mut i = 0;
     while let Some(&next) = pids.get(i) {
-        pids.extend(children_of(proc, next));
+        pids.extend(children(next));
         i += 1;
     }
     pids
+}
+
+/// `pid` and its descendants, through the `children` files.
+fn walk(proc: &Path, pid: u32) -> Vec<u32> {
+    descendants(pid, |next| children_of(proc, next))
 }
 
 /// `pid` and its descendants, from every process's parent.
@@ -187,13 +193,7 @@ fn scan(proc: &Path, pid: u32) -> Vec<u32> {
             }
         }
     }
-    let mut pids = vec![pid];
-    let mut i = 0;
-    while let Some(&next) = pids.get(i) {
-        pids.extend(children.remove(&next).unwrap_or_default());
-        i += 1;
-    }
-    pids
+    descendants(pid, |next| children.remove(&next).unwrap_or_default())
 }
 
 #[cfg(test)]

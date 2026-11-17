@@ -30,16 +30,13 @@ impl Target {
         FlowId::new(id).expect("a short flow id")
     }
 
+    /// The target whose flow is exactly `flow`: `process/077` names none.
     fn parse(flow: &FlowId) -> Option<Self> {
-        match flow.as_str() {
-            MACHINE => Some(Self::Machine),
-            id => id
-                .strip_prefix(PROCESS)?
-                .strip_prefix('/')?
-                .parse()
-                .ok()
-                .map(Self::Process),
-        }
+        let target = match flow.as_str() {
+            MACHINE => Self::Machine,
+            id => Self::Process(id.strip_prefix(PROCESS)?.strip_prefix('/')?.parse().ok()?),
+        };
+        (target.flow() == *flow).then_some(target)
     }
 
     fn data_type(self) -> &'static str {
@@ -302,7 +299,17 @@ mod tests {
     #[test]
     fn flows_never_served_are_ignored() {
         let mut state = State::default();
-        for flow in ["machine", "process/77", "process/x", "process", "other"] {
+        // `process/077` and `process/+77` are not `process/77`'s flow, served.
+        subscribe_from(&mut state, "process", 77);
+        for flow in [
+            "machine",
+            "process/78",
+            "process/077",
+            "process/+77",
+            "process/x",
+            "process",
+            "other",
+        ] {
             let flow = FlowId::new(flow).unwrap();
             assert_eq!(
                 state.on_service(ServiceMessage::Release { flow: flow.clone() }),
