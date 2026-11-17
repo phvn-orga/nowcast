@@ -16,8 +16,8 @@ use nowcast_traits::{
     Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
-    READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode,
+    QualifiedFlowId, READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
@@ -40,9 +40,12 @@ const GRACE: Duration = Duration::from_secs(30);
 const LONG: Duration = Duration::from_secs(600);
 const A: AnchorId = AnchorId(1);
 
-/// The pid the tests give `anchor`, distinct for each.
-fn pid(anchor: AnchorId) -> u32 {
-    1000 + u32::try_from(anchor.0).unwrap()
+/// The process the tests give `anchor`, distinct for each.
+fn process(anchor: AnchorId) -> AnchorProcess {
+    AnchorProcess {
+        pid: 1000 + u32::try_from(anchor.0).unwrap(),
+        start: 5000 + anchor.0,
+    }
 }
 
 struct World<S> {
@@ -92,7 +95,13 @@ impl<S: Supervisor> World<S> {
         let params = probe::params(id);
         tokio::spawn(async move {
             supervisor
-                .resolve(anchor, pid(anchor), &probe::name(), probe::KIND, &params)
+                .resolve(
+                    anchor,
+                    process(anchor),
+                    &probe::name(),
+                    probe::KIND,
+                    &params,
+                )
                 .await
         })
     }
@@ -141,8 +150,8 @@ async fn serve(brick: &mut FakeBrick, id: &str) {
 }
 
 /// Answers the next `subscribe`, expected for `id`, with flow `id`, and
-/// returns the anchor pid it carried.
-async fn serve_anchor(brick: &mut FakeBrick, id: &str) -> u32 {
+/// returns the anchor it carried.
+async fn serve_anchor(brick: &mut FakeBrick, id: &str) -> AnchorProcess {
     let ServiceMessage::Subscribe {
         req,
         kind,
@@ -211,7 +220,7 @@ pub async fn subscribe_maps_to_a_prefixed_flow<S: SupervisorSubject>() {
     let world = world::<S>();
     let pending = world.resolve("a");
     let mut brick = world.ready_brick().await;
-    assert_eq!(serve_anchor(&mut brick, "a").await, pid(A));
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(A));
     let resolved = pending.await.unwrap().unwrap();
     assert_eq!(resolved.flow, qualified("a"));
     assert_eq!(resolved.last, None);
@@ -551,7 +560,7 @@ pub async fn subscribe_carries_the_anchor<S: SupervisorSubject>() {
     let mut brick = world.subscribed("a").await;
     let b = AnchorId(2);
     let second = world.resolve_as(b, "a");
-    assert_eq!(serve_anchor(&mut brick, "a").await, pid(b));
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(b));
     assert_eq!(flow_of(second).await, Ok(qualified("a")));
     let mut stream = world.router.stream(A, None);
     drop(brick);
@@ -560,7 +569,7 @@ pub async fn subscribe_carries_the_anchor<S: SupervisorSubject>() {
         other => panic!("expected flow-error, got {other:?}"),
     }
     let mut brick = world.ready_brick().await;
-    assert_eq!(serve_anchor(&mut brick, "a").await, pid(A));
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(A));
 }
 
 /// `GET /v1/status` reads where each brick is in its life, with its crashes
@@ -788,7 +797,7 @@ pub async fn an_unknown_brick_is_refused<S: SupervisorSubject>() {
     assert_eq!(
         world
             .supervisor
-            .resolve(A, pid(A), &nope, "item", b"{}")
+            .resolve(A, process(A), &nope, "item", b"{}")
             .await,
         Err(ResolveError::UnknownBrick(nope))
     );

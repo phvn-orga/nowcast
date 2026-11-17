@@ -1,11 +1,11 @@
 //! What the brick answers the service, without I/O: the `machine` flow and
-//! one `process/<pid>` flow per anchor, each published when its detail
+//! one `process/<pid>-<start>` flow per anchor, each published when its detail
 //! changes and after every `refresh`.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use nowcast_types::{BrickMessage, FlowId, RequestId, ServiceMessage};
+use nowcast_types::{AnchorProcess, BrickMessage, FlowId, RequestId, ServiceMessage};
 use serde_json::Value;
 
 pub const MACHINE_TYPE: &str = "system.machine/v1";
@@ -17,24 +17,33 @@ const PROCESS: &str = "process";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     Machine,
-    /// The tree of this pid, the anchor of the flow's subscribers.
-    Process(u32),
+    /// The tree of this process, the anchor of the flow's subscribers.
+    Process(AnchorProcess),
 }
 
 impl Target {
     fn flow(self) -> FlowId {
         let id = match self {
             Self::Machine => MACHINE.to_owned(),
-            Self::Process(pid) => format!("{PROCESS}/{pid}"),
+            Self::Process(anchor) => format!("{PROCESS}/{}-{}", anchor.pid, anchor.start),
         };
         FlowId::new(id).expect("a short flow id")
     }
 
-    /// The target whose flow is exactly `flow`: `process/077` names none.
+    /// The target whose flow is exactly `flow`: `process/077-1` names none.
     fn parse(flow: &FlowId) -> Option<Self> {
         let target = match flow.as_str() {
             MACHINE => Self::Machine,
-            id => Self::Process(id.strip_prefix(PROCESS)?.strip_prefix('/')?.parse().ok()?),
+            id => {
+                let (pid, start) = id
+                    .strip_prefix(PROCESS)?
+                    .strip_prefix('/')?
+                    .split_once('-')?;
+                Self::Process(AnchorProcess {
+                    pid: pid.parse().ok()?,
+                    start: start.parse().ok()?,
+                })
+            }
         };
         (target.flow() == *flow).then_some(target)
     }
@@ -158,12 +167,17 @@ mod tests {
         subscribe_from(state, kind, 4242)
     }
 
-    fn subscribe_from(state: &mut State, kind: &str, anchor: u32) -> (Vec<BrickMessage>, Sampling) {
+    /// The process the tests give pid `pid`.
+    fn process(pid: u32) -> AnchorProcess {
+        AnchorProcess { pid, start: 9 }
+    }
+
+    fn subscribe_from(state: &mut State, kind: &str, pid: u32) -> (Vec<BrickMessage>, Sampling) {
         state.on_service(ServiceMessage::Subscribe {
             req: RequestId(1),
             kind: kind.into(),
             params: b"{}".to_vec(),
-            anchor,
+            anchor: process(pid),
         })
     }
 
@@ -209,10 +223,10 @@ mod tests {
             out,
             [BrickMessage::Subscribed {
                 req: RequestId(1),
-                flow: FlowId::new("process/77").unwrap()
+                flow: FlowId::new("process/77-9").unwrap()
             }]
         );
-        assert_eq!(sampling, Sampling::Start(Target::Process(77)));
+        assert_eq!(sampling, Sampling::Start(Target::Process(process(77))));
         // The same anchor shares its flow; another gets its own.
         assert_eq!(
             subscribe_from(&mut state, "process", 77).1,
@@ -220,8 +234,29 @@ mod tests {
         );
         assert_eq!(
             subscribe_from(&mut state, "process", 78).1,
-            Sampling::Start(Target::Process(78))
+            Sampling::Start(Target::Process(process(78)))
         );
+    }
+
+    #[test]
+    fn a_reused_pid_gets_its_own_flow() {
+        let mut state = State::default();
+        subscribe_from(&mut state, "process", 77);
+        let later = AnchorProcess { pid: 77, start: 10 };
+        let (out, sampling) = state.on_service(ServiceMessage::Subscribe {
+            req: RequestId(2),
+            kind: "process".into(),
+            params: b"{}".to_vec(),
+            anchor: later,
+        });
+        assert_eq!(
+            out,
+            [BrickMessage::Subscribed {
+                req: RequestId(2),
+                flow: FlowId::new("process/77-10").unwrap()
+            }]
+        );
+        assert_eq!(sampling, Sampling::Start(Target::Process(later)));
     }
 
     #[test]
@@ -263,7 +298,7 @@ mod tests {
         let mut state = State::default();
         subscribe(&mut state, "machine");
         subscribe_from(&mut state, "process", 77);
-        let (m, p) = (Target::Machine, Target::Process(77));
+        let (m, p) = (Target::Machine, Target::Process(process(77)));
         let a = json!({ "cpu": { "usage": 3 } });
         assert_eq!(
             published(&state.on_sample(m, &a), m),
@@ -274,7 +309,7 @@ mod tests {
             std::slice::from_ref(&a)
         );
         assert!(
-            state.on_sample(Target::Process(78), &a).is_empty(),
+            state.on_sample(Target::Process(process(78)), &a).is_empty(),
             "never subscribed"
         );
     }
@@ -283,7 +318,7 @@ mod tests {
     fn a_release_stops_and_the_next_flow_publishes_afresh() {
         let mut state = State::default();
         subscribe_from(&mut state, "process", 77);
-        let p = Target::Process(77);
+        let p = Target::Process(process(77));
         let a = json!({ "cpu": {} });
         state.on_sample(p, &a);
         let (_, sampling) = state.on_service(ServiceMessage::Release { flow: p.flow() });
@@ -299,14 +334,17 @@ mod tests {
     #[test]
     fn flows_never_served_are_ignored() {
         let mut state = State::default();
-        // `process/077` and `process/+77` are not `process/77`'s flow, served.
+        // `process/077-9` and the like are not `process/77-9`, served.
         subscribe_from(&mut state, "process", 77);
         for flow in [
             "machine",
-            "process/78",
-            "process/077",
-            "process/+77",
-            "process/x",
+            "process/78-9",
+            "process/77-8",
+            "process/77",
+            "process/077-9",
+            "process/+77-9",
+            "process/77-09",
+            "process/x-9",
             "process",
             "other",
         ] {

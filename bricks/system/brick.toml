@@ -17,7 +17,7 @@ schema = "schemas/params-machine.json"
 publishes = "system.machine/v1"
 
 [subscriptions.process]
-description = "The process tree of the subscriber's anchor: process count, resident memory and CPU, sampled every 2 s and published when a rounded value changes."
+description = "The process tree of the subscriber's anchor, on the machine's scale: process count, anonymous memory and CPU, sampled every 2 s and published when a value changes."
 schema = "schemas/params-process.json"
 publishes = "system.process/v1"
 

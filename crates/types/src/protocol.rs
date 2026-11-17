@@ -8,6 +8,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// How long a brick has to answer `hello` with `ready`.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A subscriber's anchor process, as the service passes it to a brick: a pid
+/// is reused, a pid with its start time names one process for the lifetime of
+/// the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnchorProcess {
+    /// In the brick's pid namespace.
+    pub pid: u32,
+    /// Start time since boot, in clock ticks (`/proc/<pid>/stat`, field 22).
+    pub start: u64,
+}
+
 /// A message from the service to a brick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceMessage {
@@ -19,9 +30,9 @@ pub enum ServiceMessage {
         kind: String,
         /// The JSON bytes of the subscription params.
         params: Vec<u8>,
-        /// The pid of the subscriber's anchor process, in the brick's pid
-        /// namespace. It may be reused once the anchor dies.
-        anchor: u32,
+        /// The subscriber's anchor process, sent as `anchor` (its pid) and
+        /// `anchor_start`.
+        anchor: AnchorProcess,
     },
     /// The last subscriber of the flow left.
     Release { flow: FlowId },

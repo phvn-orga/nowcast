@@ -339,7 +339,7 @@ async fn the_subscriptions_of_a_dead_anchor_are_released() {
     let anchors: Vec<u32> = messages
         .iter()
         .filter_map(|m| match m {
-            ServiceMessage::Subscribe { anchor, .. } => Some(*anchor),
+            ServiceMessage::Subscribe { anchor, .. } => Some(anchor.pid),
             _ => None,
         })
         .collect();

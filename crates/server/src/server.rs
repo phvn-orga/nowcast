@@ -19,7 +19,8 @@ use nowcast_traits::{
     AnchorId, BrickState, Discovery, Identity, InputError, Router, Sessions, Supervisor,
 };
 use nowcast_types::{
-    ApiError, ApiErrorCode, BrickName, EventId, QualifiedFlowId, SessionId, SubscriptionId,
+    AnchorProcess, ApiError, ApiErrorCode, BrickName, EventId, QualifiedFlowId, SessionId,
+    SubscriptionId,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -195,7 +196,7 @@ where
         let anchor = self
             .identity
             .identify(stream.as_fd())
-            .map(|anchor| (anchor.id, anchor.pid))
+            .map(|anchor| (anchor.id, anchor.process))
             .map_err(|e| {
                 tracing::warn!("cannot identify a connected process: {e}");
                 e.to_string()
@@ -216,7 +217,7 @@ where
 
     async fn respond(
         &self,
-        anchor: Result<(AnchorId, u32), String>,
+        anchor: Result<(AnchorId, AnchorProcess), String>,
         request: Request<Incoming>,
     ) -> Response<Body> {
         self.dispatch(anchor, request)
@@ -226,12 +227,12 @@ where
 
     async fn dispatch(
         &self,
-        anchor: Result<(AnchorId, u32), String>,
+        anchor: Result<(AnchorId, AnchorProcess), String>,
         request: Request<Incoming>,
     ) -> Result<Response<Body>, HttpError> {
         let (parts, body) = request.into_parts();
         let route = Route::parse(&parts.method, parts.uri.path())?;
-        let (anchor, pid) = anchor.map_err(|e| {
+        let (anchor, process) = anchor.map_err(|e| {
             HttpError::internal(format!("cannot identify the connected process: {e}"))
         })?;
         // What the service says of itself belongs to no session.
@@ -257,7 +258,10 @@ where
                 }
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Route::Subscribe => self.subscribe(anchor, pid, read_json(body).await?).await,
+            Route::Subscribe => {
+                self.subscribe(anchor, process, read_json(body).await?)
+                    .await
+            }
             Route::Unsubscribe(id) => {
                 let id = decode(id)?;
                 self.router
@@ -483,7 +487,7 @@ where
     async fn subscribe(
         &self,
         anchor: AnchorId,
-        pid: u32,
+        process: AnchorProcess,
         request: Subscribe,
     ) -> Result<Response<Body>, HttpError> {
         let unknown_brick = || {
@@ -510,7 +514,7 @@ where
         // what the brick publishes.
         let resolved = self
             .supervisor
-            .resolve(anchor, pid, &brick, &request.kind, &params)
+            .resolve(anchor, process, &brick, &request.kind, &params)
             .await
             .map_err(ApiError::from)?;
         // The anchor may have died while its brick was resolving. Its session

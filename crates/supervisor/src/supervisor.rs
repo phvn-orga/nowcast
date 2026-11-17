@@ -7,7 +7,7 @@ use nowcast_traits::{
     AnchorId, BrickConnection, BrickLauncher, BrickSummary, BrickUnavailable, Discovery,
     DiscoveryChange, InputError, ResolveError, Resolved, Router, Supervisor, UnknownFlow,
 };
-use nowcast_types::{BrickMessage, BrickName, QualifiedFlowId};
+use nowcast_types::{AnchorProcess, BrickMessage, BrickName, QualifiedFlowId};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, watch};
@@ -78,7 +78,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
     fn resolve(
         &self,
         anchor: AnchorId,
-        pid: u32,
+        process: AnchorProcess,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
@@ -90,7 +90,7 @@ impl<D: Discovery, L: BrickLauncher, R: Router> Supervisor for BrickSupervisor<D
         let reply = self.inner.update(|state, router| {
             discovery
                 .brick(brick)
-                .map(|_| state.resolve(anchor, pid, brick, kind, params, router))
+                .map(|_| state.resolve(anchor, process, brick, kind, params, router))
         });
         let answer = match reply {
             Some(reply) => Ok(Answer {

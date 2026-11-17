@@ -1,6 +1,6 @@
 use std::fmt;
 
-use nowcast_types::ClientKindName;
+use nowcast_types::{AnchorProcess, ClientKindName};
 
 /// An anchor process, issued by [`crate::Identity`] and unique for the lifetime
 /// of the service, even when the system reuses a pid.
@@ -21,7 +21,6 @@ pub struct Anchor {
     pub id: AnchorId,
     /// `None` when no process matched and the connected process anchors itself.
     pub kind: Option<ClientKindName>,
-    /// The pid of the anchor process when it was identified. Only the id
-    /// names the process for good: the pid may be reused once it exits.
-    pub pid: u32,
+    /// The anchor process's pid and start time, read when it was identified.
+    pub process: AnchorProcess,
 }

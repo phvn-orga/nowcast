@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::io;
 
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId, ServiceMessage,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId,
+    ServiceMessage,
 };
 use rmpv::ValueRef;
 
@@ -38,7 +39,8 @@ pub fn encode_service(msg: &ServiceMessage) -> Result<Vec<u8>, CodecError> {
                 ("req", req.0.into()),
                 ("kind", kind.as_str().into()),
                 ("params", params.as_slice().into()),
-                ("anchor", (*anchor).into()),
+                ("anchor", anchor.pid.into()),
+                ("anchor_start", anchor.start.into()),
             ],
         ),
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
@@ -119,8 +121,11 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, CodecError> {
             req: fields.req()?,
             kind: fields.str("kind")?.to_owned(),
             params: fields.bin("params")?.to_vec(),
-            anchor: u32::try_from(fields.u64("anchor")?)
-                .map_err(|_| invalid("anchor", "does not fit a u32".into()))?,
+            anchor: AnchorProcess {
+                pid: u32::try_from(fields.u64("anchor")?)
+                    .map_err(|_| invalid("anchor", "does not fit a u32".into()))?,
+                start: fields.u64("anchor_start")?,
+            },
         },
         "release" => ServiceMessage::Release {
             flow: fields.flow()?,

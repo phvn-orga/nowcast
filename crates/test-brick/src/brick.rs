@@ -219,7 +219,10 @@ mod tests {
             req: RequestId(req),
             kind: kind.into(),
             params: params.to_vec(),
-            anchor: 4242,
+            anchor: nowcast_types::AnchorProcess {
+                pid: 4242,
+                start: 1,
+            },
         }
     }
 
@@ -403,6 +406,7 @@ mod tests {
                     kind: KIND.into(),
                     params: br#"{"id":"a"}"#.to_vec(),
                     anchor: 4242,
+                    anchor_start: 1,
                 },
                 Received::Release { flow: "a".into() },
             ]

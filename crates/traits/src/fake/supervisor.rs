@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use nowcast_types::{BrickName, FlowId, QualifiedFlowId};
+use nowcast_types::{AnchorProcess, BrickName, FlowId, QualifiedFlowId};
 
 use crate::{
     AnchorId, BrickSummary, BrickUnavailable, InputError, ResolveError, Resolved, Router,
@@ -17,7 +17,7 @@ struct State {
     scoped_refreshes: Vec<(BrickName, Vec<u8>)>,
     inputs: Vec<(QualifiedFlowId, String, Vec<u8>)>,
     bricks: Vec<BrickSummary>,
-    pids: Vec<u32>,
+    processes: Vec<AnchorProcess>,
 }
 
 /// Resolves `<brick>/<kind>:<params>` without any brick, unless the test set
@@ -56,9 +56,9 @@ impl FakeSupervisor {
         self.state.lock().unwrap().bricks = bricks;
     }
 
-    /// The anchor pid each resolution carried, in order.
-    pub fn pids(&self) -> Vec<u32> {
-        self.state.lock().unwrap().pids.clone()
+    /// The anchor process each resolution carried, in order.
+    pub fn processes(&self) -> Vec<AnchorProcess> {
+        self.state.lock().unwrap().processes.clone()
     }
 
     /// The flows a refresh was asked for, in order.
@@ -83,13 +83,13 @@ impl Supervisor for FakeSupervisor {
     async fn resolve(
         &self,
         anchor: AnchorId,
-        pid: u32,
+        process: AnchorProcess,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
     ) -> Result<Resolved, ResolveError> {
         let mut state = self.state.lock().unwrap();
-        state.pids.push(pid);
+        state.processes.push(process);
         if let Some(error) = state.failures.get(brick) {
             return Err(error.clone());
         }

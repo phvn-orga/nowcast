@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "description": "What a process and everything it started cost, read at one sample.",
+  "description": "What a process and everything it started cost, read at one sample, on the scale of system.machine/v1.",
   "required": ["pid", "processes", "cpu", "memory"],
   "properties": {
     "pid": {
@@ -13,21 +13,25 @@
     },
     "cpu": {
       "type": "object",
-      "required": ["usage"],
+      "required": ["usage", "usage_one_core"],
       "properties": {
         "usage": {
-          "type": "integer",
-          "description": "CPU time the tree took since the previous sample, percent of one core: 250 is two and a half cores. It counts the children that ended and were waited for in between; a process that left the tree takes its time with it, and that sample counts 0."
+          "type": "number",
+          "description": "CPU time the tree took since the previous sample, percent of all online cores, like cpu.usage of system.machine/v1. Two decimals. Children that ended in between count, each process once."
+        },
+        "usage_one_core": {
+          "type": "number",
+          "description": "The same time in percent of one core, like top: 250 is two and a half cores. Two decimals."
         }
       }
     },
     "memory": {
       "type": "object",
-      "required": ["rss_mib"],
+      "required": ["anon_mib"],
       "properties": {
-        "rss_mib": {
+        "anon_mib": {
           "type": "integer",
-          "description": "Sum of the resident memories of the tree, MiB. A page shared by two of its processes counts twice."
+          "description": "Sum of the anonymous resident memories of the tree, MiB: its share of the machine's used memory, total_mib - available_mib of system.machine/v1."
         }
       }
     }

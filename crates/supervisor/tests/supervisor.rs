@@ -86,7 +86,13 @@ impl World {
         let params = probe::params(id);
         tokio::spawn(async move {
             let resolved = supervisor
-                .resolve(anchor, 1, &probe::name(), probe::KIND, &params)
+                .resolve(
+                    anchor,
+                    nowcast_types::AnchorProcess { pid: 1, start: 1 },
+                    &probe::name(),
+                    probe::KIND,
+                    &params,
+                )
                 .await;
             resolved.map(|r| r.flow)
         })
@@ -306,7 +312,13 @@ async fn a_subscription_during_the_backoff_fails_at_once() {
     assert_eq!(
         world
             .supervisor
-            .resolve(A, 1, &probe::name(), probe::KIND, &probe::params("b"))
+            .resolve(
+                A,
+                nowcast_types::AnchorProcess { pid: 1, start: 1 },
+                &probe::name(),
+                probe::KIND,
+                &probe::params("b")
+            )
             .await,
         Err(unavailable())
     );
@@ -491,7 +503,13 @@ async fn a_released_flow_keeps_no_value_for_a_later_subscriber() {
     let supervisor = world.supervisor.clone();
     let again = tokio::spawn(async move {
         supervisor
-            .resolve(B, 2, &probe::name(), probe::KIND, &probe::params("a"))
+            .resolve(
+                B,
+                nowcast_types::AnchorProcess { pid: 2, start: 2 },
+                &probe::name(),
+                probe::KIND,
+                &probe::params("a"),
+            )
             .await
     });
     serve(&mut brick, "a").await;
@@ -553,7 +571,13 @@ async fn a_resolution_dropped_before_its_answer_is_read_undoes_the_subscription(
     let world = world();
     let (name, params) = (probe::name(), probe::params("a"));
     // Never polled: the subscription is made, then dropped unread.
-    let resolution = world.supervisor.resolve(A, 1, &name, probe::KIND, &params);
+    let resolution = world.supervisor.resolve(
+        A,
+        nowcast_types::AnchorProcess { pid: 1, start: 1 },
+        &name,
+        probe::KIND,
+        &params,
+    );
     let mut brick = world.ready().await;
     serve(&mut brick, "a").await;
     settle().await;

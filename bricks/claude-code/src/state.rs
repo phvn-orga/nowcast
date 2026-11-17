@@ -577,7 +577,10 @@ mod tests {
                 req: RequestId(1),
                 kind: kind.into(),
                 params: params.to_string().into_bytes(),
-                anchor: 4242,
+                anchor: nowcast_types::AnchorProcess {
+                    pid: 4242,
+                    start: 1,
+                },
             },
             at(0),
         )

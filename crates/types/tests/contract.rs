@@ -43,7 +43,10 @@ fn service_to_brick_messages() {
             req: RequestId(1),
             kind: "pr".into(),
             params: b"{}".to_vec(),
-            anchor: 4242,
+            anchor: nowcast_types::AnchorProcess {
+                pid: 4242,
+                start: 1,
+            },
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },

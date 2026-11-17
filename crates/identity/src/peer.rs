@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use nowcast_traits::{Anchor, AnchorId, ClientKind, Identity};
+use nowcast_types::AnchorProcess;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
@@ -99,11 +100,14 @@ impl Identity for PeerIdentity {
             .ok_or_else(|| io::Error::other("no process to anchor the connection"))?;
         // A live process's pid, as the kernel gives it in the service's pid
         // namespace, is positive.
-        let pid = anchor.pid as u32;
+        let process = AnchorProcess {
+            pid: anchor.pid as u32,
+            start: anchor.start,
+        };
         Ok(Anchor {
             id: self.anchors().register(anchor),
             kind,
-            pid,
+            process,
         })
     }
 

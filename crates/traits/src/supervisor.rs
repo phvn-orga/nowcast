@@ -1,7 +1,9 @@
 use std::fmt;
 use std::future::Future;
 
-use nowcast_types::{ApiError, ApiErrorCode, BrickName, Event, QualifiedFlowId, SubscriptionId};
+use nowcast_types::{
+    AnchorProcess, ApiError, ApiErrorCode, BrickName, Event, QualifiedFlowId, SubscriptionId,
+};
 
 use crate::{AnchorId, UnknownFlow};
 
@@ -155,8 +157,8 @@ pub struct Resolved {
 /// under a new one.
 pub trait Supervisor: Send + Sync + 'static {
     /// Maps a subscription to its flow, launching the brick if needed, and
-    /// subscribes `anchor` to that flow in the router. `pid` is the anchor's,
-    /// passed on to the brick in `subscribe`. `params` are JSON bytes,
+    /// subscribes `anchor` to that flow in the router. `process` is the
+    /// anchor's, passed on to the brick in `subscribe`. `params` are JSON bytes,
     /// already validated against the kind's schema.
     ///
     /// Every value the brick publishes on the flow once it has answered
@@ -167,7 +169,7 @@ pub trait Supervisor: Send + Sync + 'static {
     fn resolve(
         &self,
         anchor: AnchorId,
-        pid: u32,
+        process: AnchorProcess,
         brick: &BrickName,
         kind: &str,
         params: &[u8],

@@ -5,7 +5,8 @@
 //! encodes must read back strictly, and it must decode what a peer would send.
 
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId, ServiceMessage,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId,
+    ServiceMessage,
 };
 use rmpv::Value;
 
@@ -37,7 +38,10 @@ pub fn service_messages() -> Vec<ServiceMessage> {
             req: BIG_REQ,
             kind: "pr".into(),
             params: br#"{"remote":"git@github.com:org/repo.git","branch":"main"}"#.to_vec(),
-            anchor: u32::MAX,
+            anchor: AnchorProcess {
+                pid: u32::MAX,
+                start: u64::MAX,
+            },
         },
         ServiceMessage::Release { flow: flow() },
         ServiceMessage::Refresh { flow: flow() },
