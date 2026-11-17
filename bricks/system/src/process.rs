@@ -614,7 +614,9 @@ mod tests {
         assert_eq!(tracker.read(t0), None);
         let detail = tracker.read(t0 + Duration::from_millis(200)).unwrap();
         assert!(detail["processes"].as_u64().unwrap() >= 1);
-        assert!(detail["memory"]["anon_mib"].as_u64().unwrap() >= 1);
+        // A small test process can hold less than half a MiB: only the type
+        // is certain.
+        assert!(detail["memory"]["anon_mib"].is_u64());
         let usage = detail["cpu"]["usage"].as_f64().unwrap();
         let one_core = detail["cpu"]["usage_one_core"].as_f64().unwrap();
         assert!(usage <= one_core);
