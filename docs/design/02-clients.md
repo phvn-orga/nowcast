@@ -294,6 +294,13 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   suivrait que son répertoire montrerait la mauvaise branche. Lire ces appels est
   propre à l'agent, donc au client ; choisir quels worktrees montrer revient au
   consommateur (`05-brique-claude-code.md`, « Les worktrees de la session »).
+- **Ce que coûte la session à la machine se lit dans la brique system**, sans rien
+  de propre à Claude Code. Un mod s'abonne à sa sorte `process` avec une clé vide
+  (`$.nowcast.subscribe({ name, brick: "system", kind: "process", params: {} })`) :
+  ses requêtes partent du processus de l'agent, qui est son ancrage, et le service
+  passe ce pid à la brique (`03-contrats.md`, « L'ancrage de l'abonné »). Il reçoit
+  la mémoire et le CPU de Claude Code et de tout ce qu'il a lancé
+  (`07-brique-system.md`). Le mod central n'a rien à faire pour cela.
 - **Une brique reste facultative pour le mod central.** Ce qu'il fait pour une
   brique ne vise que ses flux, ou ne part qu'une fois la brique activée (la réponse
   `unknown_brick` dit qu'elle ne l'est pas). Sans la brique, il ne fait rien pour
