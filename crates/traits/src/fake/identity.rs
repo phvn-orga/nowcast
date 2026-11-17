@@ -6,10 +6,12 @@ use std::sync::Mutex;
 
 use tokio::sync::watch;
 
+use nowcast_types::AnchorProcess;
+
 use crate::{Anchor, AnchorId, Identity};
 
 /// Answers every connection with the anchor the test set, `AnchorId(1)` with no
-/// kind by default.
+/// kind and process 1 by default.
 pub struct FakeIdentity {
     anchor: Mutex<Anchor>,
     dead: watch::Sender<HashSet<AnchorId>>,
@@ -21,6 +23,7 @@ impl Default for FakeIdentity {
             anchor: Mutex::new(Anchor {
                 id: AnchorId(1),
                 kind: None,
+                process: AnchorProcess { pid: 1, start: 1 },
             }),
             dead: watch::Sender::new(HashSet::new()),
         }

@@ -118,6 +118,10 @@ fn subscribe(req: u64, id: &str) -> ServiceMessage {
         req: RequestId(req),
         kind: KIND.into(),
         params: serde_json::to_vec(&serde_json::json!({ "id": id })).unwrap(),
+        anchor: nowcast_types::AnchorProcess {
+            pid: 4242,
+            start: 1,
+        },
     }
 }
 

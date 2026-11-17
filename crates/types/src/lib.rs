@@ -15,4 +15,4 @@ pub use event::{Event, SPEC_VERSION, StreamEvent};
 pub use flow::{FLOW_ID_MAX_LEN, FlowId, FlowIdError, QualifiedFlowId, QualifiedFlowIdError};
 pub use id::{EventId, RequestId, SessionId, SubscriptionId};
 pub use name::{BrickName, ClientKindName, NameError};
-pub use protocol::{BrickMessage, PROTOCOL_VERSION, READY_TIMEOUT, ServiceMessage};
+pub use protocol::{AnchorProcess, BrickMessage, PROTOCOL_VERSION, READY_TIMEOUT, ServiceMessage};

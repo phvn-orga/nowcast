@@ -65,7 +65,9 @@ impl Brick {
                 Mode::NeverReady => vec![],
                 Mode::Ready | Mode::Refusing => vec![Effect::Send(BrickMessage::Ready)],
             },
-            ServiceMessage::Subscribe { req, kind, params } => {
+            ServiceMessage::Subscribe {
+                req, kind, params, ..
+            } => {
                 vec![Effect::Send(self.subscribe(req, &kind, &params))]
             }
             ServiceMessage::Release { flow } => {
@@ -217,6 +219,10 @@ mod tests {
             req: RequestId(req),
             kind: kind.into(),
             params: params.to_vec(),
+            anchor: nowcast_types::AnchorProcess {
+                pid: 4242,
+                start: 1,
+            },
         }
     }
 
@@ -398,7 +404,9 @@ mod tests {
                 Received::Subscribe {
                     req: 1,
                     kind: KIND.into(),
-                    params: br#"{"id":"a"}"#.to_vec()
+                    params: br#"{"id":"a"}"#.to_vec(),
+                    anchor: 4242,
+                    anchor_start: 1,
                 },
                 Received::Release { flow: "a".into() },
             ]

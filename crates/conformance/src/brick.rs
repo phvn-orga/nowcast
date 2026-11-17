@@ -7,7 +7,8 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, READY_TIMEOUT, RequestId, ServiceMessage,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, READY_TIMEOUT, RequestId,
+    ServiceMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin};
@@ -114,8 +115,13 @@ impl Running {
     async fn subscribe<S: BrickSubject>(&mut self, req: u64) -> FlowId {
         let (kind, params) = S::subscription();
         let req = RequestId(req);
-        self.send(&ServiceMessage::Subscribe { req, kind, params })
-            .await;
+        self.send(&ServiceMessage::Subscribe {
+            req,
+            kind,
+            params,
+            anchor: this_process(),
+        })
+        .await;
         match self.recv_answer().await {
             BrickMessage::Subscribed {
                 req: answered,
@@ -255,4 +261,18 @@ macro_rules! brick_suite {
             );
         }
     };
+}
+
+/// This process, as the anchor of the harness's subscriptions: a live process
+/// a brick can measure.
+fn this_process() -> AnchorProcess {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
+    let fields: Vec<&str> = stat[stat.rfind(')').expect("a stat line") + 2..]
+        .split_ascii_whitespace()
+        .collect();
+    AnchorProcess {
+        pid: std::process::id(),
+        // Field 22, the third after the name being field 3.
+        start: fields[19].parse().expect("a start time"),
+    }
 }

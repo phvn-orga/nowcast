@@ -5,7 +5,7 @@ manifest_version = 1
 name = "system"
 # The binary embeds this file with the workspace version in its place.
 version = "0.0.0"
-description = "What the machine is doing: CPU, memory, GPUs, disks, network, temperatures and pressure."
+description = "What the machine is doing: CPU, memory, GPUs, disks, network, temperatures and pressure; and what a subscriber's process tree costs."
 protocol = 1
 
 [run]
@@ -16,5 +16,13 @@ description = "The whole machine, one snapshot sampled every 2 s and published w
 schema = "schemas/params-machine.json"
 publishes = "system.machine/v1"
 
+[subscriptions.process]
+description = "The process tree of the subscriber's anchor, on the machine's scale: process count, anonymous memory and CPU, sampled every 2 s and published when a value changes."
+schema = "schemas/params-process.json"
+publishes = "system.process/v1"
+
 [types."system.machine/v1"]
 schema = "schemas/machine-v1.json"
+
+[types."system.process/v1"]
+schema = "schemas/process-v1.json"

@@ -334,6 +334,16 @@ async fn the_subscriptions_of_a_dead_anchor_are_released() {
     assert_eq!(subscribed["flow"], "probe/a");
     assert_eq!(subscribed["last"], Value::Null);
     let mut brick = service.brick().await;
+    // The brick is told the anchor's pid: the agent's, not the tool's.
+    let messages = received(&mut brick, "the agent's subscribe", is_subscribe).await;
+    let anchors: Vec<u32> = messages
+        .iter()
+        .filter_map(|m| match m {
+            ServiceMessage::Subscribe { anchor, .. } => Some(anchor.pid),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(anchors, [agent.pid()]);
     let got = agent.run(&["--json", "get", "probe/a"]).await;
     assert_eq!(got.json(), Value::Null, "subscribed, nothing published yet");
 

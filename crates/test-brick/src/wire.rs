@@ -11,7 +11,9 @@
 //! brick → {"reply":"received","messages":[{"t":"hello","name":"probe","protocol":1}, ...]}
 //! ```
 
-use nowcast_types::{BrickName, FlowId, PublishErrorCode, RequestId, ServiceMessage};
+use nowcast_types::{
+    AnchorProcess, BrickName, FlowId, PublishErrorCode, RequestId, ServiceMessage,
+};
 use serde::{Deserialize, Serialize};
 
 /// What a test asks the brick.
@@ -70,6 +72,8 @@ pub enum Received {
         req: u64,
         kind: String,
         params: Vec<u8>,
+        anchor: u32,
+        anchor_start: u64,
     },
     Release {
         flow: String,
@@ -103,10 +107,17 @@ impl From<&ServiceMessage> for Received {
                 name: name.as_str().to_owned(),
                 protocol: *protocol,
             },
-            ServiceMessage::Subscribe { req, kind, params } => Self::Subscribe {
+            ServiceMessage::Subscribe {
+                req,
+                kind,
+                params,
+                anchor,
+            } => Self::Subscribe {
                 req: req.0,
                 kind: kind.clone(),
                 params: params.clone(),
+                anchor: anchor.pid,
+                anchor_start: anchor.start,
             },
             ServiceMessage::Release { flow } => Self::Release {
                 flow: flow.as_str().to_owned(),
@@ -146,10 +157,20 @@ impl TryFrom<Received> for ServiceMessage {
                 name: BrickName::new(name).map_err(|e| e.to_string())?,
                 protocol,
             },
-            Received::Subscribe { req, kind, params } => Self::Subscribe {
+            Received::Subscribe {
+                req,
+                kind,
+                params,
+                anchor,
+                anchor_start,
+            } => Self::Subscribe {
                 req: RequestId(req),
                 kind,
                 params,
+                anchor: AnchorProcess {
+                    pid: anchor,
+                    start: anchor_start,
+                },
             },
             Received::Release { flow: id } => Self::Release { flow: flow(id)? },
             Received::Refresh { flow: id } => Self::Refresh { flow: flow(id)? },
@@ -238,6 +259,10 @@ mod tests {
                 req: RequestId(3),
                 kind: "item".into(),
                 params: br#"{"id":"a"}"#.to_vec(),
+                anchor: nowcast_types::AnchorProcess {
+                    pid: 4242,
+                    start: 1,
+                },
             },
             ServiceMessage::Release {
                 flow: FlowId::new("a").unwrap(),

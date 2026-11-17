@@ -246,7 +246,9 @@ async fn serve() -> ExitCode {
                 match msg {
                     ServiceMessage::Shutdown => return ExitCode::SUCCESS,
                     ServiceMessage::Hello { .. } => vec![BrickMessage::Ready],
-                    ServiceMessage::Subscribe { req, kind, params } => core.subscribe(req, &kind, &params),
+                    ServiceMessage::Subscribe {
+                        req, kind, params, ..
+                    } => core.subscribe(req, &kind, &params),
                     ServiceMessage::Release { flow } => {
                         core.release(&flow);
                         vec![]

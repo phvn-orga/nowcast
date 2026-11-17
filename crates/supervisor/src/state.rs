@@ -24,8 +24,8 @@ use nowcast_traits::{
     InputError, ResolveError, Resolved, Router, UnknownFlow,
 };
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
-    RequestId, ServiceMessage,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode,
+    QualifiedFlowId, RequestId, ServiceMessage,
 };
 use serde::de::IgnoredAny;
 use tokio::sync::mpsc::UnboundedSender;
@@ -99,11 +99,15 @@ struct Process {
 struct Subscription {
     kind: String,
     params: Vec<u8>,
+    /// The anchor whose subscription created the flow.
+    process: AnchorProcess,
 }
 
 /// A `resolve` waiting for its flow, to subscribe `anchor` to it.
 pub(crate) struct Waiter {
     anchor: AnchorId,
+    /// The process of `anchor`, passed on to the brick.
+    process: AnchorProcess,
     kind: String,
     params: Vec<u8>,
     reply: Reply,
@@ -231,6 +235,7 @@ impl State {
     pub(crate) fn resolve(
         &mut self,
         anchor: AnchorId,
+        process: AnchorProcess,
         brick: &BrickName,
         kind: &str,
         params: &[u8],
@@ -244,6 +249,7 @@ impl State {
         }
         let waiter = Waiter {
             anchor,
+            process,
             kind: kind.to_owned(),
             params: params.to_vec(),
             reply,
@@ -542,9 +548,21 @@ impl Brick {
         self.enter(Phase::Stopping(Stop::Shutdown), ctx);
     }
 
-    fn subscribe(&mut self, kind: String, params: Vec<u8>, request: Request, ctx: &mut Ctx<'_>) {
+    fn subscribe(
+        &mut self,
+        kind: String,
+        params: Vec<u8>,
+        anchor: AnchorProcess,
+        request: Request,
+        ctx: &mut Ctx<'_>,
+    ) {
         let req = RequestId(ctx.stamp());
-        self.send(ServiceMessage::Subscribe { req, kind, params });
+        self.send(ServiceMessage::Subscribe {
+            req,
+            kind,
+            params,
+            anchor,
+        });
         self.requests.insert(req, request);
         self.arm(ctx.config.answer_timeout, TimerKind::Answer(req), ctx);
     }
@@ -557,8 +575,9 @@ impl Brick {
             }
             Phase::Starting | Phase::Stopping(_) => self.queue.push(waiter),
             Phase::Running | Phase::Grace => {
-                let (kind, params) = (waiter.kind.clone(), waiter.params.clone());
-                self.subscribe(kind, params, Request::Client(waiter), ctx);
+                let (kind, params, process) =
+                    (waiter.kind.clone(), waiter.params.clone(), waiter.process);
+                self.subscribe(kind, params, process, Request::Client(waiter), ctx);
             }
             Phase::Backoff => waiter.fail(self.unavailable()),
         }
@@ -788,20 +807,21 @@ impl Brick {
         info!(brick = %self.name, "brick ready");
         self.ready_at = Some(Instant::now());
         self.enter(Phase::Running, ctx);
-        let live: Vec<(FlowId, String, Vec<u8>)> = self
+        let live: Vec<(FlowId, String, Vec<u8>, AnchorProcess)> = self
             .flows
             .iter()
-            .map(|(flow, s)| (flow.clone(), s.kind.clone(), s.params.clone()))
+            .map(|(flow, s)| (flow.clone(), s.kind.clone(), s.params.clone(), s.process))
             .collect();
-        for (flow, kind, params) in live {
-            self.subscribe(kind, params, Request::Resubscribe(flow), ctx);
+        for (flow, kind, params, process) in live {
+            self.subscribe(kind, params, process, Request::Resubscribe(flow), ctx);
         }
         for waiter in mem::take(&mut self.queue) {
             if waiter.reply.is_closed() {
                 continue;
             }
-            let (kind, params) = (waiter.kind.clone(), waiter.params.clone());
-            self.subscribe(kind, params, Request::Client(waiter), ctx);
+            let (kind, params, process) =
+                (waiter.kind.clone(), waiter.params.clone(), waiter.process);
+            self.subscribe(kind, params, process, Request::Client(waiter), ctx);
         }
     }
 
@@ -816,6 +836,7 @@ impl Brick {
             }
             Some(Request::Client(Waiter {
                 anchor,
+                process,
                 kind,
                 params,
                 reply,
@@ -828,9 +849,11 @@ impl Brick {
                     }
                     return;
                 }
-                self.flows
-                    .entry(flow.clone())
-                    .or_insert(Subscription { kind, params });
+                self.flows.entry(flow.clone()).or_insert(Subscription {
+                    kind,
+                    params,
+                    process,
+                });
                 // Under the lock, so ordered with every publication and
                 // every release decision on the flow.
                 let qualified = self.qualify(&flow);
@@ -1006,8 +1029,14 @@ mod tests {
 
         fn resolve(&mut self, id: &str) -> oneshot::Receiver<Result<Resolved, ResolveError>> {
             let params = probe::params(id);
-            self.state
-                .resolve(A, &probe::name(), probe::KIND, &params, &self.router)
+            self.state.resolve(
+                A,
+                nowcast_types::AnchorProcess { pid: 1, start: 1 },
+                &probe::name(),
+                probe::KIND,
+                &params,
+                &self.router,
+            )
         }
 
         /// Takes the effects, expecting a launch, and carries it out.

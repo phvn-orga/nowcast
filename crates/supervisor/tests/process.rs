@@ -92,8 +92,13 @@ impl Harness {
         let params = probe::params(id);
         timeout(
             WAIT,
-            self.supervisor
-                .resolve(A, &probe::name(), probe::KIND, &params),
+            self.supervisor.resolve(
+                A,
+                nowcast_types::AnchorProcess { pid: 1, start: 1 },
+                &probe::name(),
+                probe::KIND,
+                &params,
+            ),
         )
         .await
         .expect("resolve answers")
