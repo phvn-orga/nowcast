@@ -1,31 +1,85 @@
-//! What the brick answers the service, without I/O: one flow, `machine`,
-//! published when its detail changes and after every `refresh`.
+//! What the brick answers the service, without I/O: the `machine` flow and
+//! one `process/<pid>-<start>` flow per anchor, each published when its detail
+//! changes and after every `refresh`.
 
-use nowcast_types::{BrickMessage, FlowId, RequestId, ServiceMessage};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+use nowcast_types::{AnchorProcess, BrickMessage, FlowId, RequestId, ServiceMessage};
 use serde_json::Value;
 
 pub const MACHINE_TYPE: &str = "system.machine/v1";
+pub const PROCESS_TYPE: &str = "system.process/v1";
 const MACHINE: &str = "machine";
+const PROCESS: &str = "process";
 
-/// What the shell does with the sampler after a message.
+/// What a flow measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Target {
+    Machine,
+    /// The tree of this process, the anchor of the flow's subscribers.
+    Process(AnchorProcess),
+}
+
+impl Target {
+    fn flow(self) -> FlowId {
+        let id = match self {
+            Self::Machine => MACHINE.to_owned(),
+            Self::Process(anchor) => format!("{PROCESS}/{}-{}", anchor.pid, anchor.start),
+        };
+        FlowId::new(id).expect("a short flow id")
+    }
+
+    /// The target whose flow is exactly `flow`: `process/077-1` names none.
+    fn parse(flow: &FlowId) -> Option<Self> {
+        let target = match flow.as_str() {
+            MACHINE => Self::Machine,
+            id => {
+                let (pid, start) = id
+                    .strip_prefix(PROCESS)?
+                    .strip_prefix('/')?
+                    .split_once('-')?;
+                Self::Process(AnchorProcess {
+                    pid: pid.parse().ok()?,
+                    start: start.parse().ok()?,
+                })
+            }
+        };
+        (target.flow() == *flow).then_some(target)
+    }
+
+    fn data_type(self) -> &'static str {
+        match self {
+            Self::Machine => MACHINE_TYPE,
+            Self::Process(_) => PROCESS_TYPE,
+        }
+    }
+}
+
+/// What the shell does with a flow's sampler after a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sampling {
     Unchanged,
-    /// The flow opened: start sampling.
-    Start,
+    /// The flow opened: start sampling it.
+    Start(Target),
     /// The flow was released: stop.
-    Stop,
-    /// A `refresh`: sample now.
-    Now,
+    Stop(Target),
+    /// A `refresh`: sample it now.
+    Now(Target),
 }
 
+/// A flow being served.
 #[derive(Default)]
-pub struct State {
-    subscribed: bool,
+struct Served {
     /// The last detail published, as sent.
     last: Option<Vec<u8>>,
     /// The next sample publishes even unchanged.
     forced: bool,
+}
+
+#[derive(Default)]
+pub struct State {
+    flows: HashMap<Target, Served>,
     last_req: u64,
 }
 
@@ -33,66 +87,74 @@ impl State {
     pub fn on_service(&mut self, msg: ServiceMessage) -> (Vec<BrickMessage>, Sampling) {
         match msg {
             ServiceMessage::Hello { .. } => (vec![BrickMessage::Ready], Sampling::Unchanged),
-            ServiceMessage::Subscribe { req, kind, .. } => {
-                if kind != MACHINE {
-                    let error = BrickMessage::Error {
-                        req,
-                        code: "unknown_kind".into(),
-                        message: format!("no subscription kind {kind:?}"),
-                    };
-                    return (vec![error], Sampling::Unchanged);
-                }
+            ServiceMessage::Subscribe {
+                req, kind, anchor, ..
+            } => {
+                let target = match kind.as_str() {
+                    MACHINE => Target::Machine,
+                    PROCESS => Target::Process(anchor),
+                    _ => {
+                        let error = BrickMessage::Error {
+                            req,
+                            code: "unknown_kind".into(),
+                            message: format!("no subscription kind {kind:?}"),
+                        };
+                        return (vec![error], Sampling::Unchanged);
+                    }
+                };
                 let subscribed = BrickMessage::Subscribed {
                     req,
-                    flow: machine(),
+                    flow: target.flow(),
                 };
-                let sampling = if self.subscribed {
-                    Sampling::Unchanged
-                } else {
-                    self.subscribed = true;
-                    Sampling::Start
+                let sampling = match self.flows.entry(target) {
+                    Entry::Occupied(_) => Sampling::Unchanged,
+                    Entry::Vacant(vacant) => {
+                        vacant.insert(Served::default());
+                        Sampling::Start(target)
+                    }
                 };
                 (vec![subscribed], sampling)
             }
-            ServiceMessage::Release { flow } if flow.as_str() == MACHINE && self.subscribed => {
-                self.subscribed = false;
-                self.last = None;
-                self.forced = false;
-                (vec![], Sampling::Stop)
-            }
-            ServiceMessage::Refresh { flow } if flow.as_str() == MACHINE && self.subscribed => {
-                self.forced = true;
-                (vec![], Sampling::Now)
+            ServiceMessage::Release { flow } => match Target::parse(&flow) {
+                Some(target) if self.flows.remove(&target).is_some() => {
+                    (vec![], Sampling::Stop(target))
+                }
+                _ => (vec![], Sampling::Unchanged),
+            },
+            ServiceMessage::Refresh { flow } => {
+                match Target::parse(&flow).and_then(|t| Some((t, self.flows.get_mut(&t)?))) {
+                    Some((target, served)) => {
+                        served.forced = true;
+                        (vec![], Sampling::Now(target))
+                    }
+                    None => (vec![], Sampling::Unchanged),
+                }
             }
             // The brick declares no refresh scope and accepts no input.
             _ => (vec![], Sampling::Unchanged),
         }
     }
 
-    /// A sample: published when it differs from the last one, or after a
-    /// `refresh`.
-    pub fn on_sample(&mut self, detail: &Value) -> Vec<BrickMessage> {
-        if !self.subscribed {
+    /// A sample of `target`: published when it differs from the last one,
+    /// or after a `refresh`.
+    pub fn on_sample(&mut self, target: Target, detail: &Value) -> Vec<BrickMessage> {
+        let Some(served) = self.flows.get_mut(&target) else {
             return vec![];
-        }
+        };
         let bytes = serde_json::to_vec(detail).expect("a JSON value serialises");
-        let forced = std::mem::take(&mut self.forced);
-        if !forced && self.last.as_ref() == Some(&bytes) {
+        let forced = std::mem::take(&mut served.forced);
+        if !forced && served.last.as_ref() == Some(&bytes) {
             return vec![];
         }
-        self.last = Some(bytes.clone());
+        served.last = Some(bytes.clone());
         self.last_req += 1;
         vec![BrickMessage::Publish {
             req: RequestId(self.last_req),
-            flow: machine(),
-            data_type: MACHINE_TYPE.into(),
+            flow: target.flow(),
+            data_type: target.data_type().into(),
             detail: bytes,
         }]
     }
-}
-
-fn machine() -> FlowId {
-    FlowId::new(MACHINE).expect("a short flow id")
 }
 
 #[cfg(test)]
@@ -102,14 +164,24 @@ mod tests {
     use super::*;
 
     fn subscribe(state: &mut State, kind: &str) -> (Vec<BrickMessage>, Sampling) {
+        subscribe_from(state, kind, 4242)
+    }
+
+    /// The process the tests give pid `pid`.
+    fn process(pid: u32) -> AnchorProcess {
+        AnchorProcess { pid, start: 9 }
+    }
+
+    fn subscribe_from(state: &mut State, kind: &str, pid: u32) -> (Vec<BrickMessage>, Sampling) {
         state.on_service(ServiceMessage::Subscribe {
             req: RequestId(1),
             kind: kind.into(),
             params: b"{}".to_vec(),
+            anchor: process(pid),
         })
     }
 
-    fn published(messages: &[BrickMessage]) -> Vec<Value> {
+    fn published(messages: &[BrickMessage], target: Target) -> Vec<Value> {
         messages
             .iter()
             .map(|m| match m {
@@ -119,8 +191,8 @@ mod tests {
                     flow,
                     ..
                 } => {
-                    assert_eq!(data_type, MACHINE_TYPE);
-                    assert_eq!(flow.as_str(), MACHINE);
+                    assert_eq!(data_type, target.data_type());
+                    assert_eq!(flow, &target.flow());
                     serde_json::from_slice(detail).unwrap()
                 }
                 other => panic!("expected publish, got {other:?}"),
@@ -136,11 +208,55 @@ mod tests {
             out,
             [BrickMessage::Subscribed {
                 req: RequestId(1),
-                flow: machine()
+                flow: FlowId::new("machine").unwrap()
             }]
         );
-        assert_eq!(sampling, Sampling::Start);
+        assert_eq!(sampling, Sampling::Start(Target::Machine));
         assert_eq!(subscribe(&mut state, "machine").1, Sampling::Unchanged);
+    }
+
+    #[test]
+    fn a_process_flow_is_the_anchors() {
+        let mut state = State::default();
+        let (out, sampling) = subscribe_from(&mut state, "process", 77);
+        assert_eq!(
+            out,
+            [BrickMessage::Subscribed {
+                req: RequestId(1),
+                flow: FlowId::new("process/77-9").unwrap()
+            }]
+        );
+        assert_eq!(sampling, Sampling::Start(Target::Process(process(77))));
+        // The same anchor shares its flow; another gets its own.
+        assert_eq!(
+            subscribe_from(&mut state, "process", 77).1,
+            Sampling::Unchanged
+        );
+        assert_eq!(
+            subscribe_from(&mut state, "process", 78).1,
+            Sampling::Start(Target::Process(process(78)))
+        );
+    }
+
+    #[test]
+    fn a_reused_pid_gets_its_own_flow() {
+        let mut state = State::default();
+        subscribe_from(&mut state, "process", 77);
+        let later = AnchorProcess { pid: 77, start: 10 };
+        let (out, sampling) = state.on_service(ServiceMessage::Subscribe {
+            req: RequestId(2),
+            kind: "process".into(),
+            params: b"{}".to_vec(),
+            anchor: later,
+        });
+        assert_eq!(
+            out,
+            [BrickMessage::Subscribed {
+                req: RequestId(2),
+                flow: FlowId::new("process/77-10").unwrap()
+            }]
+        );
+        assert_eq!(sampling, Sampling::Start(Target::Process(later)));
     }
 
     #[test]
@@ -155,29 +271,93 @@ mod tests {
     fn a_sample_publishes_only_what_changed_unless_refreshed() {
         let mut state = State::default();
         subscribe(&mut state, "machine");
+        let m = Target::Machine;
         let a = json!({ "cpu": { "usage": 3 } });
         let b = json!({ "cpu": { "usage": 4 } });
-        assert_eq!(published(&state.on_sample(&a)), std::slice::from_ref(&a));
-        assert!(state.on_sample(&a).is_empty());
-        assert_eq!(published(&state.on_sample(&b)), std::slice::from_ref(&b));
-        let (out, sampling) = state.on_service(ServiceMessage::Refresh { flow: machine() });
+        assert_eq!(
+            published(&state.on_sample(m, &a), m),
+            std::slice::from_ref(&a)
+        );
+        assert!(state.on_sample(m, &a).is_empty());
+        assert_eq!(
+            published(&state.on_sample(m, &b), m),
+            std::slice::from_ref(&b)
+        );
+        let (out, sampling) = state.on_service(ServiceMessage::Refresh { flow: m.flow() });
         assert!(out.is_empty());
-        assert_eq!(sampling, Sampling::Now);
-        assert_eq!(published(&state.on_sample(&b)), std::slice::from_ref(&b));
-        assert!(state.on_sample(&b).is_empty());
+        assert_eq!(sampling, Sampling::Now(m));
+        assert_eq!(
+            published(&state.on_sample(m, &b), m),
+            std::slice::from_ref(&b)
+        );
+        assert!(state.on_sample(m, &b).is_empty());
+    }
+
+    #[test]
+    fn flows_publish_apart() {
+        let mut state = State::default();
+        subscribe(&mut state, "machine");
+        subscribe_from(&mut state, "process", 77);
+        let (m, p) = (Target::Machine, Target::Process(process(77)));
+        let a = json!({ "cpu": { "usage": 3 } });
+        assert_eq!(
+            published(&state.on_sample(m, &a), m),
+            std::slice::from_ref(&a)
+        );
+        assert_eq!(
+            published(&state.on_sample(p, &a), p),
+            std::slice::from_ref(&a)
+        );
+        assert!(
+            state.on_sample(Target::Process(process(78)), &a).is_empty(),
+            "never subscribed"
+        );
     }
 
     #[test]
     fn a_release_stops_and_the_next_flow_publishes_afresh() {
         let mut state = State::default();
-        subscribe(&mut state, "machine");
+        subscribe_from(&mut state, "process", 77);
+        let p = Target::Process(process(77));
         let a = json!({ "cpu": {} });
-        state.on_sample(&a);
-        let (_, sampling) = state.on_service(ServiceMessage::Release { flow: machine() });
-        assert_eq!(sampling, Sampling::Stop);
-        assert!(state.on_sample(&a).is_empty());
-        assert_eq!(subscribe(&mut state, "machine").1, Sampling::Start);
-        assert_eq!(published(&state.on_sample(&a)), [a]);
+        state.on_sample(p, &a);
+        let (_, sampling) = state.on_service(ServiceMessage::Release { flow: p.flow() });
+        assert_eq!(sampling, Sampling::Stop(p));
+        assert!(state.on_sample(p, &a).is_empty());
+        assert_eq!(
+            subscribe_from(&mut state, "process", 77).1,
+            Sampling::Start(p)
+        );
+        assert_eq!(published(&state.on_sample(p, &a), p), [a]);
+    }
+
+    #[test]
+    fn flows_never_served_are_ignored() {
+        let mut state = State::default();
+        // `process/077-9` and the like are not `process/77-9`, served.
+        subscribe_from(&mut state, "process", 77);
+        for flow in [
+            "machine",
+            "process/78-9",
+            "process/77-8",
+            "process/77",
+            "process/077-9",
+            "process/+77-9",
+            "process/77-09",
+            "process/x-9",
+            "process",
+            "other",
+        ] {
+            let flow = FlowId::new(flow).unwrap();
+            assert_eq!(
+                state.on_service(ServiceMessage::Release { flow: flow.clone() }),
+                (vec![], Sampling::Unchanged)
+            );
+            assert_eq!(
+                state.on_service(ServiceMessage::Refresh { flow }),
+                (vec![], Sampling::Unchanged)
+            );
+        }
     }
 
     #[test]

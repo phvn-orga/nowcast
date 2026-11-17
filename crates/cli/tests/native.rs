@@ -92,6 +92,29 @@ mod system {
     nowcast_conformance::brick_suite!(System);
 }
 
+/// The system brick on its `process` kind: the harness gives its own pid as
+/// the anchor, a live process the brick measures.
+struct SystemProcess;
+
+impl BrickSubject for SystemProcess {
+    fn command() -> std::process::Command {
+        System::command()
+    }
+
+    fn name() -> BrickName {
+        System::name()
+    }
+
+    fn subscription() -> (String, Vec<u8>) {
+        ("process".into(), b"{}".to_vec())
+    }
+}
+
+mod system_process {
+    use super::*;
+    nowcast_conformance::brick_suite!(SystemProcess);
+}
+
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn bricks(config: &Path, data: &Path) -> tokio::process::Command {

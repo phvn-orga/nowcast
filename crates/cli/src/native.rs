@@ -40,7 +40,7 @@ pub const NATIVES: &[Native] = &[
             name: nowcast_brick_system::NAME,
             files: nowcast_brick_system::FILES,
         },
-        description: "What the machine is doing: CPU, memory, GPUs, disks, network, temperatures and pressure.",
+        description: "What the machine is doing: CPU, memory, GPUs, disks, network, temperatures and pressure; and what a subscriber's process tree costs.",
         run: nowcast_brick_system::run,
         configure: None,
     },

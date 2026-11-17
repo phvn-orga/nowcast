@@ -188,7 +188,9 @@ impl State {
     pub fn on_service(&mut self, msg: ServiceMessage, now: Timestamp) -> Vec<BrickMessage> {
         match msg {
             ServiceMessage::Hello { .. } => vec![BrickMessage::Ready],
-            ServiceMessage::Subscribe { req, kind, params } => self.subscribe(req, &kind, &params),
+            ServiceMessage::Subscribe {
+                req, kind, params, ..
+            } => self.subscribe(req, &kind, &params),
             ServiceMessage::Release { flow } => self.release(&flow, now),
             ServiceMessage::Refresh { flow } => match Flow::parse(&flow) {
                 // The usage API is read again by the shell.
@@ -575,6 +577,10 @@ mod tests {
                 req: RequestId(1),
                 kind: kind.into(),
                 params: params.to_string().into_bytes(),
+                anchor: nowcast_types::AnchorProcess {
+                    pid: 4242,
+                    start: 1,
+                },
             },
             at(0),
         )

@@ -220,6 +220,7 @@ async fn a_matching_process_between_launcher_and_child_anchors() {
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, named("near"));
     assert_eq!(identity.pid(anchor.id), Some(tree.shell(1)));
+    assert_eq!(anchor.process.pid, tree.shell(1));
     assert_ne!(tree.shell(1), tree.connector());
 }
 
@@ -253,6 +254,7 @@ async fn with_no_match_the_connected_process_anchors_with_no_kind() {
     let anchor = identity.identify(tree.stream().as_fd()).unwrap();
     assert_eq!(anchor.kind, None);
     assert_eq!(identity.pid(anchor.id), Some(tree.connector()));
+    assert_eq!(anchor.process.pid, tree.connector());
 }
 
 #[tokio::test]

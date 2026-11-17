@@ -458,6 +458,11 @@ impl Agent {
         }
     }
 
+    /// The agent's pid.
+    pub fn pid(&self) -> u32 {
+        self.child.id().expect("the agent is running")
+    }
+
     /// Kills the agent and waits for its end.
     pub async fn kill(&mut self) -> ExitStatus {
         self.child.kill().await.unwrap();

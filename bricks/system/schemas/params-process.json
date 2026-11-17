@@ -1,0 +1,5 @@
+{
+  "type": "object",
+  "description": "No key: the process is the subscriber's anchor, which the service passes to the brick.",
+  "additionalProperties": false
+}

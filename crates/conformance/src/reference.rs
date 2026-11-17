@@ -3,7 +3,8 @@
 //! would send. It is strict: a field of the wrong MessagePack type is an error.
 
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId, ServiceMessage,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, RequestId,
+    ServiceMessage,
 };
 use rmpv::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -91,12 +92,19 @@ pub fn service_value(msg: &ServiceMessage) -> Value {
                 ("protocol", Value::from(*protocol)),
             ],
         ),
-        ServiceMessage::Subscribe { req, kind, params } => map(
+        ServiceMessage::Subscribe {
+            req,
+            kind,
+            params,
+            anchor,
+        } => map(
             t,
             vec![
                 ("req", Value::from(req.0)),
                 ("kind", s(kind)),
                 ("params", Value::Binary(params.clone())),
+                ("anchor", Value::from(anchor.pid)),
+                ("anchor_start", Value::from(anchor.start)),
             ],
         ),
         ServiceMessage::Release { flow } | ServiceMessage::Refresh { flow } => {
@@ -239,6 +247,10 @@ pub fn decode_service(frame: &[u8]) -> Result<ServiceMessage, String> {
             req: f.req()?,
             kind: f.str("kind")?,
             params: f.bin("params")?,
+            anchor: AnchorProcess {
+                pid: u32::try_from(f.u64("anchor")?).map_err(|e| e.to_string())?,
+                start: f.u64("anchor_start")?,
+            },
         },
         "release" => ServiceMessage::Release { flow: f.flow()? },
         "refresh" => ServiceMessage::Refresh { flow: f.flow()? },

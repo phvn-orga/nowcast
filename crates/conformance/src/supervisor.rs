@@ -16,8 +16,8 @@ use nowcast_traits::{
     Router, Supervisor, UnknownFlow,
 };
 use nowcast_types::{
-    BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode, QualifiedFlowId,
-    READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
+    AnchorProcess, BrickMessage, BrickName, FlowId, PROTOCOL_VERSION, PublishErrorCode,
+    QualifiedFlowId, READY_TIMEOUT, RequestId, ServiceMessage, StreamEvent,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
@@ -39,6 +39,14 @@ const GRACE: Duration = Duration::from_secs(30);
 /// Longer than any delay of the supervisor, however its open delays are set.
 const LONG: Duration = Duration::from_secs(600);
 const A: AnchorId = AnchorId(1);
+
+/// The process the tests give `anchor`, distinct for each.
+fn process(anchor: AnchorId) -> AnchorProcess {
+    AnchorProcess {
+        pid: 1000 + u32::try_from(anchor.0).unwrap(),
+        start: 5000 + anchor.0,
+    }
+}
 
 struct World<S> {
     supervisor: Arc<S>,
@@ -87,7 +95,13 @@ impl<S: Supervisor> World<S> {
         let params = probe::params(id);
         tokio::spawn(async move {
             supervisor
-                .resolve(anchor, &probe::name(), probe::KIND, &params)
+                .resolve(
+                    anchor,
+                    process(anchor),
+                    &probe::name(),
+                    probe::KIND,
+                    &params,
+                )
                 .await
         })
     }
@@ -132,7 +146,19 @@ async fn recv(brick: &mut FakeBrick) -> ServiceMessage {
 
 /// Answers the next `subscribe`, expected for `id`, with flow `id`.
 async fn serve(brick: &mut FakeBrick, id: &str) {
-    let ServiceMessage::Subscribe { req, kind, params } = recv(brick).await else {
+    serve_anchor(brick, id).await;
+}
+
+/// Answers the next `subscribe`, expected for `id`, with flow `id`, and
+/// returns the anchor it carried.
+async fn serve_anchor(brick: &mut FakeBrick, id: &str) -> AnchorProcess {
+    let ServiceMessage::Subscribe {
+        req,
+        kind,
+        params,
+        anchor,
+    } = recv(brick).await
+    else {
         panic!("expected subscribe");
     };
     assert_eq!(kind, probe::KIND);
@@ -144,6 +170,7 @@ async fn serve(brick: &mut FakeBrick, id: &str) {
             flow: flow(id),
         })
         .unwrap();
+    anchor
 }
 
 /// Waits for the first sign of the service stopping the brick: `shutdown`, a
@@ -186,14 +213,14 @@ pub async fn the_first_subscription_launches_the_brick<S: SupervisorSubject>() {
     world.ready_brick().await;
 }
 
-/// `subscribe` carries the kind and the params as JSON bytes; the flow the
-/// brick answers is prefixed with its name, and the anchor is subscribed to it
+/// `subscribe` carries the kind, the params as JSON bytes and the anchor's
+/// pid; the flow the brick answers is prefixed with its name, and the anchor is subscribed to it
 /// in the router.
 pub async fn subscribe_maps_to_a_prefixed_flow<S: SupervisorSubject>() {
     let world = world::<S>();
     let pending = world.resolve("a");
     let mut brick = world.ready_brick().await;
-    serve(&mut brick, "a").await;
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(A));
     let resolved = pending.await.unwrap().unwrap();
     assert_eq!(resolved.flow, qualified("a"));
     assert_eq!(resolved.last, None);
@@ -525,6 +552,26 @@ pub async fn a_crashed_brick_is_relaunched<S: SupervisorSubject>() {
     );
 }
 
+/// Each subscriber's `subscribe` carries its own anchor; a relaunched brick
+/// gets back, for each live flow, the anchor of the subscription that created
+/// it.
+pub async fn subscribe_carries_the_anchor<S: SupervisorSubject>() {
+    let world = world::<S>();
+    let mut brick = world.subscribed("a").await;
+    let b = AnchorId(2);
+    let second = world.resolve_as(b, "a");
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(b));
+    assert_eq!(flow_of(second).await, Ok(qualified("a")));
+    let mut stream = world.router.stream(A, None);
+    drop(brick);
+    match timeout(LONG, stream.recv()).await.unwrap() {
+        Some(StreamEvent::FlowError { flow, .. }) => assert_eq!(flow, qualified("a")),
+        other => panic!("expected flow-error, got {other:?}"),
+    }
+    let mut brick = world.ready_brick().await;
+    assert_eq!(serve_anchor(&mut brick, "a").await, process(A));
+}
+
 /// `GET /v1/status` reads where each brick is in its life, with its crashes
 /// in a row; a brick without a process or a relaunch to wait for is left out.
 pub async fn the_supervisor_tells_its_bricks<S: SupervisorSubject>() {
@@ -748,7 +795,10 @@ pub async fn an_unknown_brick_is_refused<S: SupervisorSubject>() {
     let world = world::<S>();
     let nope = BrickName::new("nope").unwrap();
     assert_eq!(
-        world.supervisor.resolve(A, &nope, "item", b"{}").await,
+        world
+            .supervisor
+            .resolve(A, process(A), &nope, "item", b"{}")
+            .await,
         Err(ResolveError::UnknownBrick(nope))
     );
 }
@@ -784,6 +834,7 @@ macro_rules! supervisor_suite {
                     an_idle_brick_shuts_down_after_the_grace_period,
                     a_brick_ignoring_shutdown_is_terminated_then_killed,
                     a_crashed_brick_is_relaunched,
+                    subscribe_carries_the_anchor,
                     a_crash_without_subscribers_is_not_relaunched,
                     the_supervisor_tells_its_bricks,
                     a_removed_brick_stops_and_its_flows_end,

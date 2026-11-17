@@ -134,7 +134,7 @@ nowcast ships three native bricks, built into the binary. Each one is optional: 
 |---|---|---|
 | `forge` | A branch's PR and its pipelines per job, a repository's issues, on GitHub and Azure DevOps | `pr`, `pipelines`, `issues`, `issue` |
 | `claude-code` | The Claude Code account's usage quotas, and the measures of its running sessions | `quotas`, `session`, `sessions` |
-| `system` | CPU, memory, GPUs, disks, network, temperatures and pressure, sampled every 2 s | `machine` |
+| `system` | CPU, memory, GPUs, disks, network, temperatures and pressure, and what a subscriber's process tree costs (for an agent, its session), sampled every 2 s | `machine`, `process` |
 
 Enable, configure or disable a brick:
 
@@ -148,7 +148,7 @@ nowcast bricks disable forge
 A brick that needs credentials, like `forge`, asks for them in your terminal when enabled. Each subscription kind takes parameters described by a JSON Schema, in the brick's `schemas/` directory ([forge](bricks/forge/schemas), [claude-code](bricks/claude-code/schemas), [system](bricks/system/schemas)).
 
 > [!NOTE]
-> While subscribed, `system` pings the gateway and two public resolvers (9.9.9.9 and 1.1.1.1) every 2 s.
+> While the `machine` flow is subscribed, `system` pings the gateway and two public resolvers (9.9.9.9 and 1.1.1.1) every 2 s.
 
 ## Build on nowcast
 

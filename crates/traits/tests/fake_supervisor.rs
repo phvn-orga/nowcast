@@ -19,14 +19,26 @@ fn world() -> (Arc<FakeRouter>, FakeSupervisor, BrickName, QualifiedFlowId) {
 #[test]
 fn a_resolution_dropped_unpolled_subscribes_nobody() {
     let (router, supervisor, brick, flow) = world();
-    drop(supervisor.resolve(AnchorId(1), &brick, "item", b"{}"));
+    drop(supervisor.resolve(
+        AnchorId(1),
+        nowcast_types::AnchorProcess { pid: 1, start: 1 },
+        &brick,
+        "item",
+        b"{}",
+    ));
     assert_eq!(router.subscribers(&flow), 0);
 }
 
 #[test]
 fn a_polled_resolution_subscribes_the_anchor() {
     let (router, supervisor, brick, flow) = world();
-    let resolving = pin!(supervisor.resolve(AnchorId(1), &brick, "item", b"{}"));
+    let resolving = pin!(supervisor.resolve(
+        AnchorId(1),
+        nowcast_types::AnchorProcess { pid: 1, start: 1 },
+        &brick,
+        "item",
+        b"{}"
+    ));
     let Poll::Ready(Ok(resolved)) = resolving.poll(&mut Context::from_waker(Waker::noop())) else {
         panic!("the fake resolves at once");
     };
