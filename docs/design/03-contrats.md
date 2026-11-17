@@ -425,7 +425,7 @@ Du service vers la brique :
 | `t` | Champs | Réponse attendue |
 |---|---|---|
 | `hello` | `name`, `protocol` | `ready` |
-| `subscribe` | `req`, `kind`, `params` (`bin` : les octets JSON du contenu), `anchor` (u32 : le pid de l'ancrage de l'abonné, voir plus bas) | `subscribed` {`req`, `flow`} ou `error` {`req`, `code`, `message`} |
+| `subscribe` | `req`, `kind`, `params` (`bin` : les octets JSON du contenu), `anchor` (u32 : le pid de l'ancrage de l'abonné), `anchor_start` (u64 : son instant de démarrage ; voir plus bas) | `subscribed` {`req`, `flow`} ou `error` {`req`, `code`, `message`} |
 | `release` | `flow` | aucune : le dernier abonné du flux est parti |
 | `refresh` | `flow` | aucune : la brique republie quand elle a relu |
 | `refresh-scope` | `scope` (`bin` : les octets JSON) | aucune : la brique relit ce que la portée touche, et ne republie que ce qui a changé |
@@ -449,7 +449,7 @@ Exemple d'échange, en notation JSON pour la lisibilité :
 ```
 service → {"v":1,"t":"hello","name":"forge","protocol":1}
 brique  → {"v":1,"t":"ready"}
-service → {"v":1,"t":"subscribe","req":1,"kind":"pr","params":<bin {"remote":"…","branch":"main"}>,"anchor":868412}
+service → {"v":1,"t":"subscribe","req":1,"kind":"pr","params":<bin {"remote":"…","branch":"main"}>,"anchor":868412,"anchor_start":10080836}
 brique  → {"v":1,"t":"subscribed","req":1,"flow":"pr/github.com/org/repo#main"}
 brique  → {"v":1,"t":"publish","req":7,"flow":"pr/github.com/org/repo#main","type":"forge.pr/v1","detail":<bin {…}>}
 service → {"v":1,"t":"ack","req":7}
@@ -459,33 +459,38 @@ service → {"v":1,"t":"ack","req":7}
 
 Chaque `subscribe` porte `anchor`, le pid du processus d'ancrage de l'abonné
 (section 5) : le processus de l'agent pour un client rattaché à un type, le
-processus connecté lui-même sinon. Le service le tient du noyau à la connexion ;
-aucun client ne le déclare. Le champ ne dit rien du type de client : une brique qui
+processus connecté lui-même sinon. Il porte aussi `anchor_start`, l'instant de
+démarrage de ce processus depuis le démarrage de la machine, en tops d'horloge
+(`/proc/<pid>/stat`, champ 22) : un pid se réattribue, un pid avec son instant de
+démarrage désigne un seul processus pour toute la vie du système. Le service tient
+les deux du noyau à la connexion, et lit l'instant de démarrage pendant qu'il tient
+le processus par un pidfd ; aucun client ne les déclare. Le champ ne dit rien du type de client : une brique qui
 mesure des processus s'en sert sans rien savoir de l'agent, les autres l'ignorent.
 
 Ce qu'une brique peut en attendre :
 
-- **Il est toujours présent**, et vaut dans l'espace de pids de la brique, puisque
-  le service la lance.
+- **Les deux champs sont toujours présents**, et valent dans l'espace de pids de la
+  brique, puisque le service la lance.
 - **Chaque abonnement d'un client envoie son propre `subscribe`**, avec son propre
   ancrage : la brique voit le pid de chaque abonné d'un flux, même partagé.
 - **Le pid peut être réattribué dès la mort de l'ancrage**, avant que le service
   ne l'apprenne et retire ses abonnements. Une brique qui lit le processus vérifie
-  qu'il s'agit du même, par l'instant de démarrage qu'elle a relevé au `subscribe`
-  (`/proc/<pid>/stat`, champ 22).
+  qu'il s'agit du même en comparant son instant de démarrage à `anchor_start`.
 - **Pour un flux dont tous les abonnés ont le même ancrage**, le `release` suit la
   mort de cet ancrage : le service retire ses abonnements, et le dernier parti
   relâche le flux.
 - **À la relance de la brique**, le service renvoie un `subscribe` par flux vivant
   (« Le cycle de vie d'une brique »), avec l'ancrage de l'abonnement qui a créé le
-  flux. Il est exact pour un flux dont tous les abonnés ont le même ancrage.
+  flux, pid et instant de démarrage d'origine : une brique relancée après la mort
+  de l'ancrage reconnaît qu'un autre processus porte ce pid. Il est exact pour un
+  flux dont tous les abonnés ont le même ancrage.
 
 Limite connue : sur un flux partagé par plusieurs ancrages, la brique n'apprend pas
 qu'un abonné est parti, seulement que le dernier l'est (`release`), et l'ancrage
 renvoyé à la relance peut être celui d'un abonné parti depuis. Aucune brique n'en a
 besoin aujourd'hui.
 
-Le champ s'ajoute sans changer la version du protocole : une brique ignore les clés
+Les champs s'ajoutent sans changer la version du protocole : une brique ignore les clés
 qu'elle ne connaît pas.
 
 ### L'identifiant de flux
@@ -497,8 +502,9 @@ qu'elle ne connaît pas.
   y compris après un redémarrage de la brique. C'est ce qui permet au service de
   réabonner une brique relancée sans changer les flux vus par les clients. Une
   brique peut y faire entrer l'ancrage, qui compte alors comme une part du contenu :
-  le flux `process` de la brique system est celui d'un pid (`07-brique-system.md`).
-  Le service renvoyant le même ancrage à la relance, l'identifiant ne change pas.
+  le flux `process` de la brique system est celui d'un processus, pid et instant
+  de démarrage (`07-brique-system.md`). Le service renvoyant le même ancrage à la
+  relance, l'identifiant ne change pas.
 
 ### Le cycle de vie d'une brique
 
