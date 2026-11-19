@@ -3,7 +3,9 @@
 // worktree may write in others by their path: a consumer that follows the
 // session's directory would show the wrong branch. Each `Edit` or `Write`
 // that succeeded, of the main loop or a subagent, marks the worktree of its
-// file; reads and Bash commands do not count.
+// file; reads and Bash commands do not count. Each entry keeps which kinds of
+// loop wrote in it (`writers`), so that a consumer can tell a worktree only a
+// workflow's agents wrote in.
 //
 // Each entry carries its forge key, where `git push` sends its branch
 // (`02-clients.md`), read again at each write in it and after a command of
@@ -16,7 +18,7 @@
 // finds it in the state.
 
 import type { EngineInterface, On } from 'claude-code'
-import type { NowcastForgeKey, NowcastWorktree } from '../types'
+import type { NowcastForgeKey, NowcastWorktree, NowcastWriter } from '../types'
 import { MAY_ACT, branchMoves, isUrl } from './actions'
 import { followForge } from './branches'
 import { write } from './flows'
@@ -43,9 +45,20 @@ let held: Promise<Held> | undefined
 // Writes are applied one at a time, in the order the calls ended.
 let queue: Promise<void> = Promise.resolve()
 
+/** The kinds of writer, in the order an entry lists them. */
+const WRITERS: readonly NowcastWriter[] = ['main', 'subagent', 'workflow']
+
+/** The loops a workflow script's `agent()` started, by `agentId`. */
+const workflowAgents = new Set<string>()
+
 export function registerWorktrees(on: On): void {
-  on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, await next(e)))
-  on('tool.call', { tool: 'Write' }, async ($, e, next) => marked($, e.file_path, await next(e)))
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e)
+    if (e.workflow !== undefined && result.agentId !== undefined) workflowAgents.add(result.agentId)
+    return result
+  })
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, e.agentId, await next(e)))
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => marked($, e.file_path, e.agentId, await next(e)))
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (!MAY_ACT.test(e.command)) return next(e)
     // Read before the command runs: a `cd` in it moves the session.
@@ -69,10 +82,19 @@ export function checkWorktrees($: $): void {
   reread($, [])
 }
 
-/** Records `file` when the call that wrote it succeeded; the call's result unchanged. */
-function marked<R extends { deny?: string; isError?: true }>($: $, file: string, result: R): R {
-  if (result.deny === undefined && result.isError !== true) record($, file)
+/**
+ * Records `file` when the call that wrote it succeeded, with the kind of loop
+ * `agentId` names; the call's result unchanged.
+ */
+function marked<R extends { deny?: string; isError?: true }>($: $, file: string, agentId: string | undefined, result: R): R {
+  if (result.deny === undefined && result.isError !== true) record($, file, writerOf(agentId))
   return result
+}
+
+/** The kind of loop: none is main, one a workflow started is the workflow's, any other a subagent. */
+function writerOf(agentId: string | undefined): NowcastWriter {
+  if (agentId === undefined) return 'main'
+  return workflowAgents.has(agentId) ? 'workflow' : 'subagent'
 }
 
 /**
@@ -80,14 +102,14 @@ function marked<R extends { deny?: string; isError?: true }>($: $, file: string,
  * tool's answer waits for nothing. The queue is taken at once, so it keeps
  * the order the calls ended.
  */
-function record($: $, file: string): void {
+function record($: $, file: string, writer: NowcastWriter): void {
   const asked = Promise.all([$.clock.now(), $.session.id()])
   // Handled when its turn comes, below.
   asked.catch(() => undefined)
   queue = queue
     .then(async () => {
       const [now, session] = await asked
-      await wrote($, file, new Date(now).toISOString(), session)
+      await wrote($, file, new Date(now).toISOString(), session, writer)
     })
     .catch(error => $.ui.log(`nowcast: cannot record the worktree of ${file}: ${message(error)}`, { to: 'debug' }))
 }
@@ -151,7 +173,7 @@ async function hold($: $): Promise<Held> {
   return held
 }
 
-async function wrote($: $, file: string, at: string, session: string): Promise<void> {
+async function wrote($: $, file: string, at: string, session: string, writer: NowcastWriter): Promise<void> {
   if (!file.startsWith('/')) return
   const place = await placeOf($, file.slice(0, file.lastIndexOf('/')) || '/')
   if (place === null) return
@@ -166,7 +188,12 @@ async function wrote($: $, file: string, at: string, session: string): Promise<v
   )
   const others = kept.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
   const { branch, remote, forge } = described
-  const written = { path: place.root, repo: place.repo, branch, remote, written_at: at, forge }
+  const before = mine.list.find(worktree => worktree.path === place.root)
+  const written: NowcastWorktree = { path: place.root, repo: place.repo, branch, remote, written_at: at, forge }
+  // An entry an older mod wrote does not say who wrote in it: it stays so.
+  if (before === undefined || before.writers !== undefined) {
+    written.writers = WRITERS.filter(kind => kind === writer || before?.writers?.includes(kind))
+  }
   const next = [written, ...others].slice(0, MAX_WORKTREES)
   mine.list = next
   // The session ended meanwhile: the new one's state is not this list's.

@@ -3,7 +3,7 @@
 
 import type { On } from 'claude-code'
 import { type Engine, expect, test } from 'claude-code/testing'
-import type { NowcastWorktree } from '../types'
+import type { NowcastWorktree, NowcastWriter } from '../types'
 import { START, type World, world } from './world'
 
 const REPO = '/lab/nowcast/.bare'
@@ -45,8 +45,8 @@ function tools(on: On) {
   })
 }
 
-async function edit($: Engine, file: string) {
-  await $.tool.call({ tool: 'Edit', file_path: file, old_string: 'a', new_string: 'b' })
+async function edit($: Engine, file: string, agentId?: string) {
+  await $.tool.call({ tool: 'Edit', file_path: file, old_string: 'a', new_string: 'b', agentId })
 }
 
 async function writeFile($: Engine, file: string) {
@@ -59,13 +59,19 @@ async function listed(w: World): Promise<NowcastWorktree[] | undefined> {
   return w.writes.filter(write => write.key === 'worktrees').at(-1)?.value as NowcastWorktree[] | undefined
 }
 
-const entry = (name: string, ms: number, branch: string | null = name): NowcastWorktree => ({
+const entry = (
+  name: string,
+  ms: number,
+  branch: string | null = name,
+  writers: NowcastWriter[] = ['main'],
+): NowcastWorktree => ({
   path: ROOT(name),
   repo: REPO,
   branch,
   remote: REMOTE,
   written_at: new Date(ms).toISOString(),
   forge: branch === null ? null : { remote: REMOTE, branch },
+  writers,
 })
 
 test('an Edit or a Write marks the worktree of its file, the latest write first', async ($, on) => {
@@ -80,6 +86,60 @@ test('an Edit or a Write marks the worktree of its file, the latest write first'
   await edit($, `${ROOT('feature')}/docs/c.md`)
 
   expect(await listed(w)).toEqual([entry('feature', 1_002_000), entry('main', 1_000_000)])
+})
+
+/** The engine beneath the mod starts each agent under its `description` as `agentId`. */
+function agents(on: On) {
+  on('agent.spawn', (_, e) => ({ model: 'm', agentId: e.description }))
+}
+
+/** Starts the agent `agentId`, a workflow's when `workflow` is set. */
+async function spawn($: Engine, agentId: string, workflow: boolean): Promise<void> {
+  await $.agent.spawn({
+    tool_use_id: 'toolu-1',
+    prompt: 'p',
+    description: agentId,
+    subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'm',
+    background: true,
+    fork: false,
+    ...(workflow ? { workflow: { runId: 'wf_1', agentIndex: 1 } } : {}),
+  } as never)
+}
+
+test("each entry keeps the kinds of loop that wrote in it: main, a subagent, a workflow's agent", async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature'), ROOT('flow')] })
+  tools(on)
+  agents(on)
+  await $.session.start(START)
+  await spawn($, 'agent-wf', true)
+  await spawn($, 'agent-sub', false)
+
+  await edit($, `${ROOT('flow')}/a.ts`, 'agent-wf')
+  await edit($, `${ROOT('feature')}/a.ts`, 'agent-wf')
+  await edit($, `${ROOT('feature')}/a.ts`, 'agent-sub')
+  await edit($, `${ROOT('main')}/a.ts`, 'agent-unknown')
+  await edit($, `${ROOT('main')}/a.ts`)
+
+  expect((await listed(w))?.map(worktree => worktree.writers)).toEqual([
+    ['main', 'subagent'],
+    ['subagent', 'workflow'],
+    ['workflow'],
+  ])
+})
+
+test('an entry an older mod wrote stays without writers', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main')] })
+  tools(on)
+  const { writers: _, ...before } = entry('main', 900_000)
+  on('state.get', { plugin: 'nowcast', key: 'worktrees' }, () => ({ value: { value: [before], version: 1 } }))
+  await $.session.start(START)
+
+  await edit($, `${ROOT('main')}/a.ts`)
+
+  expect((await listed(w))?.[0]).toEqual({ ...before, written_at: new Date(1_000_000).toISOString() })
+  expect((await listed(w))?.[0]).not.toHaveProperty('writers')
 })
 
 test('a failed call, a relative path or a file outside a worktree marks nothing', async ($, on) => {
