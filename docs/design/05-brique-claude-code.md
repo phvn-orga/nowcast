@@ -354,7 +354,7 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
 | `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Pas la clé forge : voir `forge` |
 | `written_at` | Dernière écriture relevée dans ce worktree |
 | `forge` | Clé des flux `pr` et `pipelines` de la brique forge, `{remote, branch}` : la branche où `git push` l'enverrait et l'URL de push de ce remote (`02-clients.md`). `null` en HEAD détaché ou sans remote de push ; absent d'une entrée écrite par un mod plus ancien. Le schéma de `claude-code.measure/v1` le décrit |
-| `writers` | Les sortes de boucle dont un `Edit` ou un `Write` y a abouti : `main` (le fil principal), `subagent`, `workflow`. Une boucle est celle d'un workflow quand un `agent.spawn` portant `workflow` a démarré son `agentId` ; tout autre `agentId` est un sous-agent. Absent d'une entrée écrite par un mod plus ancien, et le reste aux écritures suivantes : qui y a écrit avant reste inconnu |
+| `writers` | Les sortes de boucle dont un `Edit` ou un `Write` y a abouti : `main` (le fil principal), `subagent`, `workflow`. Une boucle est celle d'un workflow quand un `agent.spawn` portant `workflow` a démarré son `agentId`, ou quand une boucle d'un workflow l'a démarrée (`parentAgentId`), à toute profondeur ; tout autre `agentId` est un sous-agent. Absent d'une entrée écrite par un mod plus ancien, et le reste aux écritures suivantes : qui y a écrit avant reste inconnu |
 
 - **Triée par écriture**, la plus récente d'abord.
 - **Au plus 16 worktrees.** Au-delà, celui dont l'écriture est la plus ancienne
@@ -393,6 +393,8 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
 - **Les agents d'un workflow ne sont connus qu'en mémoire.** Après un rechargement
   du mod en plein workflow, les écritures de ses agents comptent comme `subagent` :
   la session est réveillée comme avant `writers`.
+- **Un agent de workflow relancé après un blocage compte comme `subagent`.** Sa
+  relance ne lève pas de nouvel `agent.spawn` : son nouvel `agentId` reste inconnu.
 - **Des options courtes groupées** (`git push -fu`) ne sont pas vues comme
   déplaçant la branche : l'entrée n'est relue qu'à l'écriture suivante.
 - **Un nom de ref local ambigu**, une branche locale nommée comme une branche
