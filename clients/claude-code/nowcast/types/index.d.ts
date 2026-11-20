@@ -119,7 +119,8 @@ export type NowcastWriter = 'main' | 'subagent' | 'workflow'
 
 /**
  * A worktree the session wrote in: an `Edit` or `Write` that succeeded, of
- * the main loop or a subagent. Reads and Bash commands do not count.
+ * the main loop, a subagent or a workflow's agent. Reads and Bash commands do
+ * not count.
  */
 export type NowcastWorktree = {
   /** The worktree's root, absolute. */
@@ -161,8 +162,9 @@ export type NowcastWorktree = {
   /**
    * The kinds of loop whose `Edit` or `Write` succeeded in it, in the order
    * `main`, `subagent`, `workflow`. A loop is a workflow's when an
-   * `agent.spawn` carrying `workflow` started its `agentId`; any other
-   * `agentId` is a subagent's. Absent from an entry an older mod wrote, which
+   * `agent.spawn` carrying `workflow` started its `agentId`, or when a
+   * workflow's loop started it (`parentAgentId`); any other `agentId` is a
+   * subagent's. Absent from an entry an older mod wrote, which
    * stays so at a later write.
    *
    * @example

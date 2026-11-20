@@ -75,7 +75,7 @@
           },
           "writers": {
             "type": "array",
-            "description": "The kinds of loop whose Edit or Write succeeded in it: main, subagent, or workflow for an agent a workflow script started. Absent from an older mod.",
+            "description": "The kinds of loop whose Edit or Write succeeded in it: main, subagent, or workflow for an agent a workflow script started, or one started from it. Absent from an older mod.",
             "items": { "enum": ["main", "subagent", "workflow"] },
             "uniqueItems": true
           }

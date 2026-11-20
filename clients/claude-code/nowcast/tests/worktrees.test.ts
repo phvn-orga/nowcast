@@ -93,8 +93,8 @@ function agents(on: On) {
   on('agent.spawn', (_, e) => ({ model: 'm', agentId: e.description }))
 }
 
-/** Starts the agent `agentId`, a workflow's when `workflow` is set. */
-async function spawn($: Engine, agentId: string, workflow: boolean): Promise<void> {
+/** Starts the agent `agentId` from the loop `parentAgentId`, by a workflow's `agent()` when `workflow` is set. */
+async function spawn($: Engine, agentId: string, workflow: boolean, parentAgentId?: string): Promise<void> {
   await $.agent.spawn({
     tool_use_id: 'toolu-1',
     prompt: 'p',
@@ -104,19 +104,26 @@ async function spawn($: Engine, agentId: string, workflow: boolean): Promise<voi
     parentModel: 'm',
     background: true,
     fork: false,
+    parentAgentId,
     ...(workflow ? { workflow: { runId: 'wf_1', agentIndex: 1 } } : {}),
   } as never)
 }
 
 test("each entry keeps the kinds of loop that wrote in it: main, a subagent, a workflow's agent", async ($, on) => {
-  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature'), ROOT('flow')] })
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature'), ROOT('flow'), ROOT('nested')] })
   tools(on)
   agents(on)
   await $.session.start(START)
   await spawn($, 'agent-wf', true)
   await spawn($, 'agent-sub', false)
+  // Started from a workflow's loop, at any depth: the workflow's too.
+  await spawn($, 'agent-wf-child', false, 'agent-wf')
+  await spawn($, 'agent-wf-grandchild', false, 'agent-wf-child')
+  await spawn($, 'agent-sub-child', false, 'agent-sub')
 
   await edit($, `${ROOT('flow')}/a.ts`, 'agent-wf')
+  await edit($, `${ROOT('flow')}/a.ts`, 'agent-wf-grandchild')
+  await edit($, `${ROOT('nested')}/a.ts`, 'agent-sub-child')
   await edit($, `${ROOT('feature')}/a.ts`, 'agent-wf')
   await edit($, `${ROOT('feature')}/a.ts`, 'agent-sub')
   await edit($, `${ROOT('main')}/a.ts`, 'agent-unknown')
@@ -125,6 +132,7 @@ test("each entry keeps the kinds of loop that wrote in it: main, a subagent, a w
   expect((await listed(w))?.map(worktree => worktree.writers)).toEqual([
     ['main', 'subagent'],
     ['subagent', 'workflow'],
+    ['subagent'],
     ['workflow'],
   ])
 })

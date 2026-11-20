@@ -2,10 +2,10 @@
 // design branch, "Les worktrees de la session"). A session anchored in one
 // worktree may write in others by their path: a consumer that follows the
 // session's directory would show the wrong branch. Each `Edit` or `Write`
-// that succeeded, of the main loop or a subagent, marks the worktree of its
-// file; reads and Bash commands do not count. Each entry keeps which kinds of
-// loop wrote in it (`writers`), so that a consumer can tell a worktree only a
-// workflow's agents wrote in.
+// that succeeded, of the main loop, a subagent or a workflow's agent, marks
+// the worktree of its file; reads and Bash commands do not count. Each entry
+// keeps which kinds of loop wrote in it (`writers`), so that a consumer can
+// tell a worktree only a workflow's agents wrote in.
 //
 // Each entry carries its forge key, where `git push` sends its branch
 // (`02-clients.md`), read again at each write in it and after a command of
@@ -48,13 +48,17 @@ let queue: Promise<void> = Promise.resolve()
 /** The kinds of writer, in the order an entry lists them. */
 const WRITERS: readonly NowcastWriter[] = ['main', 'subagent', 'workflow']
 
-/** The loops a workflow script's `agent()` started, by `agentId`. */
+/**
+ * The loops of a workflow, by `agentId`: those its script's `agent()`
+ * started, and those started from one of them, at any depth.
+ */
 const workflowAgents = new Set<string>()
 
 export function registerWorktrees(on: On): void {
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
-    if (e.workflow !== undefined && result.agentId !== undefined) workflowAgents.add(result.agentId)
+    const ofWorkflow = e.workflow !== undefined || (e.parentAgentId !== undefined && workflowAgents.has(e.parentAgentId))
+    if (ofWorkflow && result.agentId !== undefined) workflowAgents.add(result.agentId)
     return result
   })
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, e.agentId, await next(e)))
@@ -91,7 +95,7 @@ function marked<R extends { deny?: string; isError?: true }>($: $, file: string,
   return result
 }
 
-/** The kind of loop: none is main, one a workflow started is the workflow's, any other a subagent. */
+/** The kind of loop: none is main, one of a workflow is the workflow's, any other a subagent. */
 function writerOf(agentId: string | undefined): NowcastWriter {
   if (agentId === undefined) return 'main'
   return workflowAgents.has(agentId) ? 'workflow' : 'subagent'
