@@ -112,8 +112,15 @@ export type NowcastStream = {
 }
 
 /**
+ * A kind of model loop: the session's own (`main`), a subagent's, or the
+ * agent of a workflow script's `agent()` (`workflow`).
+ */
+export type NowcastWriter = 'main' | 'subagent' | 'workflow'
+
+/**
  * A worktree the session wrote in: an `Edit` or `Write` that succeeded, of
- * the main loop or a subagent. Reads and Bash commands do not count.
+ * the main loop, a subagent or a workflow's agent. Reads and Bash commands do
+ * not count.
  */
 export type NowcastWorktree = {
   /** The worktree's root, absolute. */
@@ -152,6 +159,19 @@ export type NowcastWorktree = {
    * const pr = flow === null ? undefined : (await $.state.get({ plugin: 'nowcast', key: 'flows', id: flow })).value
    */
   forge?: NowcastForgeKey | null
+  /**
+   * The kinds of loop whose `Edit` or `Write` succeeded in it, in the order
+   * `main`, `subagent`, `workflow`. A loop is a workflow's when an
+   * `agent.spawn` carrying `workflow` started its `agentId`, or when a
+   * workflow's loop started it (`parentAgentId`); any other `agentId` is a
+   * subagent's. Absent from an entry an older mod wrote, which
+   * stays so at a later write.
+   *
+   * @example
+   * // A worktree only a workflow's agents wrote in: its pipelines are theirs.
+   * const workflowOnly = worktree.writers?.every(writer => writer === 'workflow') === true
+   */
+  writers?: NowcastWriter[]
 }
 
 /** A branch on a forge, as the forge brick's `pr` and `pipelines` kinds take it. */
