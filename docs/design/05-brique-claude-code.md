@@ -116,13 +116,19 @@ suivante, pour qu'un tour de session ne republie pas les quotas à chaque fois.
 
 Le mod central de Claude Code (`02-clients.md`), dans chaque session :
 
-1. à sa première mesure, s'abonne à `session` avec l'identifiant de la session :
-   une session qui ne fait aucun tour n'envoie aucune requête ;
+1. à son entrée dans une conversation (démarrage, `/clear`, reprise, `02-clients.md`),
+   s'abonne à `session` avec l'identifiant de la conversation, et y envoie aussitôt
+   ses premières mesures : une nouvelle conversation montre sa fenêtre de contexte
+   vide au lieu du contexte de la précédente, une conversation reprise le sien dès
+   l'entrée ;
 2. envoie une entrée `claude-code.measure/v1` sur ce flux
    (`POST /v1/flows/{flow}/input`, `03-contrats.md`) après chaque requête au modèle
    et à chaque `session.measure`, en regroupant les envois rapprochés ;
-3. après un `/clear` ou une reprise, se désabonne du flux de l'ancien identifiant et
-   s'abonne à celui du nouveau, à sa première mesure.
+3. à l'entrée dans une autre conversation, se désabonne du flux de l'ancien
+   identifiant et s'abonne à celui du nouveau.
+
+Un rechargement du mod n'est pas une entrée : il n'envoie rien avant la mesure
+suivante.
 
 Si la brique n'est pas activée, l'abonnement répond `404` `unknown_brick` : le mod
 n'envoie rien pour cette session.
@@ -152,11 +158,11 @@ n'envoie rien pour cette session.
 | `root` | Répertoire de la session | `$.session.root()` |
 | `model` | Modèle du fil principal | `$.session.model()` |
 | `effort` | Effort de la dernière requête du fil principal | `turn.step`, champ `effort` ; facultatif |
-| `context` | Remplissage de la fenêtre de contexte | `session.measure`, champ `context` |
+| `context` | Remplissage de la fenêtre de contexte | `$.session.usage()` à l'entrée, puis `session.measure`, champ `context` |
 | `tokens` | Tokens que le mod compte, par catégorie : les transcriptions, plus ce qu'il a vu depuis son chargement | transcriptions, puis somme des `usage` de `turn.step`, `model.fork`, `model.complete` et `session.compact` |
 | `side_tokens` | La part de `tokens` que les transcriptions ne gardent pas, comptée depuis le chargement du mod | somme des `usage` de `model.fork`, `model.complete` et `session.compact` |
 | `side_since` | Instant du chargement du mod, qui date ce comptage | horloge du mod |
-| `last_request_at` | Instant de la dernière requête qui a lu ou écrit le cache du fil principal | `turn.step`, `model.fork` (plus bas) |
+| `last_request_at` | Instant de la dernière requête qui a lu ou écrit le cache du fil principal | transcription au chargement, puis `turn.step`, `model.fork` (plus bas) |
 | `cache_ttl` | Durée de vie du cache du fil principal, `5m` ou `1h` ; facultatif | transcription (plus bas) |
 | `rate_limits` | Fenêtres de quota de la dernière réponse ; vide hors abonnement | `session.measure`, champ `rateLimits` |
 | `cost_usd` | Coût de la session ; facultatif | `session.measure`, champ `cost.usd` |
@@ -195,9 +201,14 @@ qui a commencé après lui : l'heure ne fait qu'avancer.
 rechargement du plugin en cours de session. Les requêtes d'avant n'ont déclenché aucun
 `turn.step` chez lui. Le mod part alors des transcriptions de la session et de ses
 sous-agents (`~/.claude/projects/*/<id>.jsonl` et `<id>/subagents/*.jsonl`) : il y
-somme l'`usage` de chaque réponse, une fois par identifiant de message, et prend la
-date de modification de la transcription pour `last_request_at`. Il ajoute ensuite
-chaque requête qu'il voit. Une transcription illisible ou dans un format inattendu le fait
+somme l'`usage` de chaque réponse, une fois par identifiant de message. Dans celle du
+fil principal, la dernière réponse qui a lu ou écrit le cache donne
+`last_request_at` : la date de la ligne qui précède son premier enregistrement (le
+prompt ou les résultats d'outils auxquels elle répond), que la requête suit aussitôt.
+Une réponse s'écrit en un enregistrement par bloc de contenu, et le premier arrive
+après la réflexion du modèle : sa date avancerait l'échéance du cache d'autant. La
+dernière réponse qui a écrit en cache donne `cache_ttl`. Il ajoute ensuite chaque requête qu'il voit, et
+une requête vue depuis l'emporte sur la transcription. Une transcription illisible ou dans un format inattendu le fait
 compter depuis son chargement, sans erreur. Après un `/clear`, la nouvelle session a
 une transcription vide et repart de zéro.
 
@@ -315,8 +326,10 @@ travaille, marque celui où se trouve son répertoire, et suit leurs flux forge
   active, relevée dès que le répertoire y entre, comme un travail du fil
   principal, qu'il y ait écrit ou non : une session qui entre dans un worktree
   (EnterWorktree) pour seulement y pousser ou y ouvrir une PR l'y trouve. Le mod
-  relit ce répertoire après EnterWorktree, ExitWorktree et les appels Bash du fil
-  principal, et au début et à la fin de chacun de ses tours. Il ne s'appuie pas
+  relit ce répertoire à l'entrée dans une conversation (`02-clients.md`), après
+  EnterWorktree, ExitWorktree et les appels Bash du fil principal, et au début et à
+  la fin de chacun de ses tours : une session montre son worktree avant son premier
+  tour. Il ne s'appuie pas
   sur `CwdChanged` : sur un compte d'organisation, le plugin intégré
   `cc-plugin-sec-default` peut faire passer les événements classiques avant les
   plugins installés. Rester dans le même worktree ne compte qu'une fois.
