@@ -53,7 +53,7 @@
     "cost_usd": { "type": "number" },
     "worktrees": {
       "type": "array",
-      "description": "The worktrees the session wrote in through Edit and Write, the most recent write first, at most 16.",
+      "description": "The worktrees the session worked in through Edit, Write and Bash, or by moving its directory into them, the most recent first, at most 16.",
       "maxItems": 16,
       "items": {
         "type": "object",
@@ -61,9 +61,10 @@
         "properties": {
           "path": { "type": "string", "description": "The worktree's root." },
           "repo": { "type": "string", "description": "The common git directory, the same for every worktree of a repository." },
-          "branch": { "type": ["string", "null"], "description": "The branch at the last write, or after a command of the agent that may move it; null on a detached HEAD." },
+          "branch": { "type": ["string", "null"], "description": "The branch at the last work in it, or after a command of the agent that may move it; null on a detached HEAD." },
           "remote": { "type": ["string", "null"], "description": "The origin remote's URL as git has it." },
-          "written_at": { "type": "string", "description": "The last write in it, RFC 3339." },
+          "written_at": { "type": "string", "description": "The last work in it, RFC 3339." },
+          "active": { "type": "boolean", "description": "Whether the session's directory is in it: true for at most one entry, none outside a git worktree. Absent from an older mod." },
           "forge": {
             "type": ["object", "null"],
             "description": "Where git push sends the branch, the forge brick's pr and pipelines key; null on a detached HEAD or without a push remote. Absent from an older mod.",
@@ -75,7 +76,7 @@
           },
           "writers": {
             "type": "array",
-            "description": "The kinds of loop whose Edit or Write succeeded in it: main, subagent, or workflow for an agent a workflow script started, or one started from it. Absent from an older mod.",
+            "description": "The kinds of loop that worked in it (an Edit or Write that succeeded, a Bash call that ran; main for the session's directory moving in): main, subagent, or workflow for an agent a workflow script started, or one started from it. Absent from an older mod.",
             "items": { "enum": ["main", "subagent", "workflow"] },
             "uniqueItems": true
           }

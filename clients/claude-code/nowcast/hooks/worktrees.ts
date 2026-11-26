@@ -1,14 +1,21 @@
-// The worktrees this session writes in (`05-brique-claude-code.md` on the
+// The worktrees this session works in (`05-brique-claude-code.md` on the
 // design branch, "Les worktrees de la session"). A session anchored in one
-// worktree may write in others by their path: a consumer that follows the
+// worktree may work in others by their path: a consumer that follows the
 // session's directory would show the wrong branch. Each `Edit` or `Write`
 // that succeeded, of the main loop, a subagent or a workflow's agent, marks
-// the worktree of its file; reads and Bash commands do not count. Each entry
-// keeps which kinds of loop wrote in it (`writers`), so that a consumer can
-// tell a worktree only a workflow's agents wrote in.
+// the worktree of its file; each Bash call that ran, failed or not, marks the
+// worktree of each directory it runs in; reads do not count. Each entry keeps
+// which kinds of loop worked in it (`writers`), so that a consumer can tell a
+// worktree only a workflow's agents worked in.
+//
+// The worktree holding the session's directory is the active entry, listed
+// as soon as the directory moves into it, as a work of the main loop. The
+// directory is read again after EnterWorktree, ExitWorktree and the main
+// loop's Bash calls, and at the start and the end of each of its turns:
+// `CwdChanged` may not reach this mod.
 //
 // Each entry carries its forge key, where `git push` sends its branch
-// (`02-clients.md`), read again at each write in it and after a command of
+// (`02-clients.md`), read again at each work in it and after a command of
 // the agent that may move a branch (`actions.ts`); `branches.ts` follows
 // the forge flows of these keys.
 //
@@ -19,19 +26,20 @@
 
 import type { EngineInterface, On } from 'claude-code'
 import type { NowcastForgeKey, NowcastWorktree, NowcastWriter } from '../types'
-import { MAY_ACT, branchMoves, isUrl } from './actions'
+import { branchMoves, commandDirs, isUrl } from './actions'
 import { followForge } from './branches'
 import { write } from './flows'
 
 type $ = EngineInterface
 
 const WORKTREES = { plugin: 'nowcast', key: 'worktrees' } as const
-/** The most worktrees kept: past it, the one written in longest ago leaves. */
+/** The most worktrees kept: past it, the one worked in longest ago leaves, never the active one. */
 export const MAX_WORKTREES = 16
 const GIT_TIMEOUT_MS = 5_000
 
 /** A directory's worktree root and common git directory; null outside a worktree. */
 type Place = { root: string; repo: string } | null
+type Found = NonNullable<Place>
 
 /** What git answered for each directory seen. */
 const places = new Map<string, Place>()
@@ -64,15 +72,21 @@ export function registerWorktrees(on: On): void {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => marked($, e.file_path, e.agentId, await next(e)))
   on('tool.call', { tool: 'Write' }, async ($, e, next) => marked($, e.file_path, e.agentId, await next(e)))
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (!MAY_ACT.test(e.command)) return next(e)
-    // Read before the command runs: a `cd` in it moves the session.
+    // Read before the command runs: a `cd` in it moves the session. Inside
+    // the hook, a subagent's own directory.
     const cwd = await $.session.cwd().catch(() => undefined)
     const result = await next(e)
-    // A command that failed may still have switched before it did.
-    const moved = result.deny === undefined ? branchMoves(e.command, cwd) : []
+    // A command denied never ran. One that failed ran all the same, and may
+    // have switched before it did.
+    if (result.deny !== undefined) return result
+    record($, commandDirs(e.command, cwd), writerOf(e.agentId))
+    const moved = branchMoves(e.command, cwd)
     if (moved.length > 0) reread($, moved)
+    if (e.agentId === undefined) locate($)
     return result
   })
+  on('tool.call', { tool: 'EnterWorktree' }, async ($, e, next) => located($, e.agentId, await next(e)))
+  on('tool.call', { tool: 'ExitWorktree' }, async ($, e, next) => located($, e.agentId, await next(e)))
 }
 
 /**
@@ -84,14 +98,23 @@ export function registerWorktrees(on: On): void {
  */
 export function checkWorktrees($: $): void {
   reread($, [])
+  locate($)
 }
 
 /**
- * Records `file` when the call that wrote it succeeded, with the kind of loop
- * `agentId` names; the call's result unchanged.
+ * Records the worktree of `file` when the call that wrote it succeeded, with
+ * the kind of loop `agentId` names; the call's result unchanged.
  */
 function marked<R extends { deny?: string; isError?: true }>($: $, file: string, agentId: string | undefined, result: R): R {
-  if (result.deny === undefined && result.isError !== true) record($, file, writerOf(agentId))
+  if (result.deny === undefined && result.isError !== true && file.startsWith('/')) {
+    record($, [file.slice(0, file.lastIndexOf('/')) || '/'], writerOf(agentId))
+  }
+  return result
+}
+
+/** Reads the session's directory again after a call of the main loop; the call's result unchanged. */
+function located<R>($: $, agentId: string | undefined, result: R): R {
+  if (agentId === undefined) locate($)
   return result
 }
 
@@ -102,20 +125,46 @@ function writerOf(agentId: string | undefined): NowcastWriter {
 }
 
 /**
- * Queues a write to `file`, dated now and tied to the session it ran in; the
- * tool's answer waits for nothing. The queue is taken at once, so it keeps
- * the order the calls ended.
+ * Queues a work in the worktree of each directory of `dirs`, in that order,
+ * dated now and tied to the session it ran in; the tool's answer waits for
+ * nothing. The queue is taken at once, so it keeps the order the calls ended.
  */
-function record($: $, file: string, writer: NowcastWriter): void {
+function record($: $, dirs: string[], writer: NowcastWriter): void {
+  if (dirs.length === 0) return
   const asked = Promise.all([$.clock.now(), $.session.id()])
   // Handled when its turn comes, below.
   asked.catch(() => undefined)
   queue = queue
     .then(async () => {
       const [now, session] = await asked
-      await wrote($, file, new Date(now).toISOString(), session, writer)
+      for (const dir of dirs) {
+        const place = dir.startsWith('/') ? await placeOf($, dir) : null
+        if (place !== null) await worked($, place, new Date(now).toISOString(), session, writer, false)
+      }
     })
-    .catch(error => $.ui.log(`nowcast: cannot record the worktree of ${file}: ${message(error)}`, { to: 'debug' }))
+    .catch(error => $.ui.log(`nowcast: cannot record the worktree of ${dirs.join(', ')}: ${message(error)}`, { to: 'debug' }))
+}
+
+/**
+ * Queues a new reading of the session's directory: the worktree holding it
+ * becomes the active entry, a work of the main loop when it was not; none is
+ * active outside a worktree. Read at once, the hook's directory being the
+ * session's on the main loop.
+ */
+function locate($: $): void {
+  const asked = Promise.all([$.clock.now(), $.session.id(), $.session.cwd()])
+  // Handled when its turn comes, below.
+  asked.catch(() => undefined)
+  queue = queue
+    .then(async () => {
+      const [now, session, cwd] = await asked
+      const place = await placeOf($, cwd)
+      if (place !== null) return worked($, place, new Date(now).toISOString(), session, 'main', true)
+      const mine = await hold($)
+      if (mine.session !== session || !mine.list.some(worktree => worktree.active)) return
+      await save($, mine, session, mine.list.map(worktree => ({ ...worktree, active: false })))
+    })
+    .catch(error => $.ui.log(`nowcast: cannot read the session's directory: ${message(error)}`, { to: 'debug' }))
 }
 
 /**
@@ -149,7 +198,7 @@ function reread($: $, dirs: Array<string | undefined>): void {
     .catch(error => $.ui.log(`nowcast: cannot read the worktrees again: ${message(error)}`, { to: 'debug' }))
 }
 
-/** The session's worktrees, most recent write first. */
+/** The session's worktrees, most recent work first. */
 export async function worktrees($: $): Promise<NowcastWorktree[]> {
   return (await hold($)).list
 }
@@ -160,7 +209,11 @@ async function hold($: $): Promise<Held> {
   const current = held
   if (current === undefined) {
     // This mod loaded: the state holds the session's list from before.
-    const loading = $.state.get(WORKTREES).then(({ value }) => ({ session, list: Array.isArray(value) ? value : [] }))
+    // An entry an older mod wrote has no `active`.
+    const loading = $.state.get(WORKTREES).then(({ value }) => ({
+      session,
+      list: Array.isArray(value) ? value.map(worktree => ({ ...worktree, active: worktree.active === true })) : [],
+    }))
     held = loading
     // A failed read is tried again by the next caller.
     loading.catch(() => {
@@ -177,28 +230,53 @@ async function hold($: $): Promise<Held> {
   return held
 }
 
-async function wrote($: $, file: string, at: string, session: string, writer: NowcastWriter): Promise<void> {
-  if (!file.startsWith('/')) return
-  const place = await placeOf($, file.slice(0, file.lastIndexOf('/')) || '/')
-  if (place === null) return
-  const [described, mine] = await Promise.all([describe($, place.root), hold($)])
+/**
+ * A work in the worktree at `place`: its entry goes first, dated `at`, with
+ * `writer` among its writers. `activate` makes it the active entry, and does
+ * nothing when it already is.
+ */
+async function worked($: $, place: Found, at: string, session: string, writer: NowcastWriter, activate: boolean): Promise<void> {
+  const mine = await hold($)
   // The session of the call ended before its turn: its list is gone.
   if (mine.session !== session) return
+  const before = mine.list.find(worktree => worktree.path === place.root)
+  if (activate && before?.active === true) return
+  const described = await describe($, place.root)
   // A worktree removed since leaves the list.
   const kept = await Promise.all(
     mine.list
       .filter(worktree => worktree.path !== place.root)
       .map(async worktree => ((await $.fs.exists(worktree.path).catch(() => true)) ? worktree : undefined)),
   )
-  const others = kept.filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
+  const others = kept
+    .filter((worktree): worktree is NowcastWorktree => worktree !== undefined)
+    .map(worktree => (activate && worktree.active ? { ...worktree, active: false } : worktree))
   const { branch, remote, forge } = described
-  const before = mine.list.find(worktree => worktree.path === place.root)
-  const written: NowcastWorktree = { path: place.root, repo: place.repo, branch, remote, written_at: at, forge }
+  const written: NowcastWorktree = {
+    path: place.root,
+    repo: place.repo,
+    branch,
+    remote,
+    written_at: at,
+    forge,
+    active: activate || before?.active === true,
+  }
   // An entry an older mod wrote does not say who wrote in it: it stays so.
   if (before === undefined || before.writers !== undefined) {
     written.writers = WRITERS.filter(kind => kind === writer || before?.writers?.includes(kind))
   }
-  const next = [written, ...others].slice(0, MAX_WORKTREES)
+  await save($, mine, session, capped([written, ...others]))
+}
+
+/** `list` within `MAX_WORKTREES`: the entry worked in longest ago leaves, never the active one. */
+function capped(list: NowcastWorktree[]): NowcastWorktree[] {
+  if (list.length <= MAX_WORKTREES) return list
+  const dropped = list.findLast(worktree => !worktree.active)
+  return capped(list.filter(worktree => worktree !== dropped))
+}
+
+/** Holds `next` as the list of `mine`, and writes it unless the session ended meanwhile. */
+async function save($: $, mine: Held, session: string, next: NowcastWorktree[]): Promise<void> {
   mine.list = next
   // The session ended meanwhile: the new one's state is not this list's.
   if ((await $.session.id()) !== session) return

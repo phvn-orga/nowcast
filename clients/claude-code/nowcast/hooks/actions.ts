@@ -303,6 +303,21 @@ function* programs(command: string, cwd: string | undefined) {
   }
 }
 
+/**
+ * The directories a command line run in `cwd` runs in, each once: `cwd`, and
+ * where a `cd` or a `git -C` takes one of its programs. A directory not to be
+ * followed is left out.
+ */
+export function commandDirs(command: string, cwd: string | undefined): string[] {
+  const dirs = new Set<string>()
+  if (cwd !== undefined) dirs.add(cwd)
+  for (const { program, args, dir } of programs(command, cwd)) {
+    const where = program === 'git' ? gitCommand(args.slice(1), dir).dir : dir
+    if (where !== undefined) dirs.add(where)
+  }
+  return [...dirs]
+}
+
 /** The `git branch` options that rename a branch, and those that change its upstream. */
 const BRANCH_RENAMES = ['-m', '-M', '--move']
 const BRANCH_UPSTREAMS = ['-u', '--set-upstream-to', '--unset-upstream']

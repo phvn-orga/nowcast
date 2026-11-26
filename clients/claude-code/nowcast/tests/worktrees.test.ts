@@ -64,6 +64,7 @@ const entry = (
   ms: number,
   branch: string | null = name,
   writers: NowcastWriter[] = ['main'],
+  active = false,
 ): NowcastWorktree => ({
   path: ROOT(name),
   repo: REPO,
@@ -72,6 +73,7 @@ const entry = (
   written_at: new Date(ms).toISOString(),
   forge: branch === null ? null : { remote: REMOTE, branch },
   writers,
+  active,
 })
 
 test('an Edit or a Write marks the worktree of its file, the latest write first', async ($, on) => {
@@ -342,33 +344,30 @@ test('a command that moves a branch reads the worktrees it ran in again', async 
   await edit($, `${ROOT('feature')}/a.ts`)
   await w.clock.advance(1_000)
   await edit($, `${ROOT('main')}/a.ts`)
-  await w.clock.settle()
-  const count = () => w.writes.filter(write => write.key === 'worktrees').length
-  const before = count()
+  const active = (name: string, ms: number, branch: string | null = name) => entry(name, ms, branch, ['main'], true)
 
-  // Nothing moves: no new reading, no write.
-  branches.main = 'other'
+  // Nothing moves: the worktree the command ran in only.
+  branches.feature = 'elsewhere'
   await bash($, 'git status && git log')
-  await w.clock.settle()
-  expect(count()).toBe(before)
+  expect(await listed(w)).toEqual([active('main', 1_001_000), entry('feature', 1_000_000)])
 
   // `git switch` in the session's directory: that worktree only.
-  branches.feature = 'elsewhere'
+  branches.main = 'other'
   await bash($, 'git switch other')
-  expect(await listed(w)).toEqual([entry('main', 1_001_000, 'other'), entry('feature', 1_000_000)])
+  expect(await listed(w)).toEqual([active('main', 1_001_000, 'other'), entry('feature', 1_000_000)])
 
   // Through a `cd`, after a push that sets the upstream.
   git.feature = { [PUSH]: 'origin/elsewhere-x' }
   await bash($, 'cd ../feature && git push -u origin HEAD:elsewhere-x')
-  expect((await listed(w))?.[1]).toEqual({
-    ...entry('feature', 1_000_000, 'elsewhere'),
+  expect((await listed(w))?.[0]).toEqual({
+    ...entry('feature', 1_001_000, 'elsewhere'),
     forge: { remote: REMOTE, branch: 'elsewhere-x' },
   })
 
   // Detached by `git -C`.
   branches.feature = null
   await bash($, `git -C ${ROOT('feature')} checkout --detach`)
-  expect((await listed(w))?.[1]).toEqual(entry('feature', 1_000_000, null))
+  expect(await listed(w)).toEqual([entry('feature', 1_001_000, null), active('main', 1_001_000, 'other')])
 })
 
 test('git worktree reads every worktree again: one removed leaves the list', async ($, on) => {
@@ -383,7 +382,7 @@ test('git worktree reads every worktree again: one removed leaves the list', asy
   files.pop()
   await bash($, 'git worktree remove ../feature')
 
-  expect(await listed(w)).toEqual([entry('main', 1_000_000)])
+  expect(await listed(w)).toEqual([entry('main', 1_000_000, 'main', ['main'], true)])
 })
 
 test('a worktree removed however leaves the list at the start or the end of a turn of the main thread', async ($, on) => {
@@ -411,4 +410,109 @@ test('a worktree removed however leaves the list at the start or the end of a tu
   expect(await listed(w)).toHaveLength(2)
   await $.turn.start({ text: 'hi', turnId: 't-2' })
   expect(await listed(w)).toEqual([entry('main', 1_000_000)])
+})
+
+/** The session's directory, which the test moves; the tools beneath the mod run from it. */
+function directory(on: On, cwd: string): { cwd: string } {
+  const where = { cwd }
+  on('session.cwd', () => ({ value: where.cwd }))
+  tools(on)
+  return where
+}
+
+const enter = ($: Engine, path: string) => $.tool.call({ tool: 'EnterWorktree', path })
+const exit = ($: Engine) => $.tool.call({ tool: 'ExitWorktree', action: 'keep' })
+const active = (name: string, ms: number, writers: NowcastWriter[] = ['main']) =>
+  entry(name, ms, name, writers, true)
+
+test('entering a worktree without writing makes it listed and active', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  const where = directory(on, ROOT('main'))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+  expect(await listed(w)).toEqual([active('main', 1_000_000)])
+
+  await w.clock.advance(1_000)
+  where.cwd = `${ROOT('feature')}/src`
+  await enter($, ROOT('feature'))
+
+  expect(await listed(w)).toEqual([active('feature', 1_001_000), entry('main', 1_000_000)])
+})
+
+test('moving to a directory outside git leaves no active entry', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  const where = directory(on, ROOT('feature'))
+  await $.session.start(START)
+  await enter($, ROOT('feature'))
+  expect(await listed(w)).toEqual([active('feature', 1_000_000)])
+
+  where.cwd = '/tmp'
+  await exit($)
+
+  expect(await listed(w)).toEqual([entry('feature', 1_000_000)])
+})
+
+test('going back to a listed worktree moves the flag, and dates it', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  const where = directory(on, ROOT('main'))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+  await w.clock.advance(1_000)
+  where.cwd = ROOT('feature')
+  await bash($, 'cd ../feature')
+  expect(await listed(w)).toEqual([active('feature', 1_001_000), entry('main', 1_000_000)])
+
+  // Staying there counts for nothing; coming back to `main`, seen at the end of the turn, does.
+  await w.clock.advance(1_000)
+  await $.turn.start({ text: 'hi', turnId: 't-2' })
+  where.cwd = ROOT('main')
+  await $.turn.complete({ turnId: 't-2', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+
+  expect(await listed(w)).toEqual([active('main', 1_002_000), entry('feature', 1_001_000)])
+})
+
+test("a subagent's Bash call in another worktree lists it without changing the active one", async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  directory(on, ROOT('main'))
+  agents(on)
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+  await spawn($, 'agent-sub', false)
+
+  await $.tool.call({ tool: 'Bash', command: `cd ${ROOT('feature')} && nr test`, agentId: 'agent-sub' })
+
+  expect(await listed(w)).toEqual([
+    entry('feature', 1_000_000, 'feature', ['subagent']),
+    active('main', 1_000_000, ['main', 'subagent']),
+  ])
+})
+
+test('a Bash call that failed counts, one denied does not', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
+  on('session.cwd', () => ({ value: '/tmp' }))
+  on('tool.call', (_, e) => {
+    const command = (e as { command?: string }).command ?? ''
+    return (command.startsWith('rm') ? { deny: 'denied' } : { isError: true, result: 'failed', text: 'failed' }) as never
+  })
+  await $.session.start(START)
+
+  await bash($, `rm -rf ${ROOT('main')}/target`)
+  expect(await listed(w)).toBeUndefined()
+  await bash($, `cd ${ROOT('feature')} && false`)
+  expect(await listed(w)).toEqual([entry('feature', 1_000_000)])
+})
+
+test('the cap never drops the active entry', async ($, on) => {
+  const names = Array.from({ length: 17 }, (_, i) => `w${i}`)
+  const w = world(on, { git: repository(), files: names.map(ROOT) })
+  directory(on, ROOT('w0'))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+
+  for (const name of names.slice(1)) await edit($, `${ROOT(name)}/a.ts`)
+
+  const list = await listed(w)
+  expect(list?.map(worktree => worktree.path)).toEqual([...names.slice(2).reverse(), 'w0'].map(ROOT))
+  expect(list?.at(-1)?.active).toBe(true)
 })

@@ -118,9 +118,11 @@ export type NowcastStream = {
 export type NowcastWriter = 'main' | 'subagent' | 'workflow'
 
 /**
- * A worktree the session wrote in: an `Edit` or `Write` that succeeded, of
- * the main loop, a subagent or a workflow's agent. Reads and Bash commands do
- * not count.
+ * A worktree the session worked in: an `Edit` or `Write` that succeeded, or a
+ * Bash call that ran, failed or not, in a directory of it (where it starts,
+ * or where a `cd` or `git -C` takes it), of the main loop, a subagent or a
+ * workflow's agent; or the session's directory moving into it. Reads do not
+ * count.
  */
 export type NowcastWorktree = {
   /** The worktree's root, absolute. */
@@ -128,7 +130,7 @@ export type NowcastWorktree = {
   /** The common git directory, the same for every worktree of a repository. */
   repo: string
   /**
-   * The branch checked out at the last write, or after a command of the
+   * The branch checked out at the last work in it, or after a command of the
    * agent that may move it; null on a detached HEAD.
    */
   branch: string | null
@@ -137,12 +139,25 @@ export type NowcastWorktree = {
    * key's remote: see `forge`.
    */
   remote: string | null
-  /** The last write in it, RFC 3339. */
+  /** The last work in it, RFC 3339. */
   written_at: string
+  /**
+   * Whether the session's directory (`$.session.cwd()`) is in it: true for at
+   * most one entry, none while that directory is in no git worktree. That
+   * entry is never the one the cap drops. The directory is read again after
+   * EnterWorktree, ExitWorktree and Bash calls of the main loop, and at the
+   * start and the end of each of its turns. False on an entry an older mod
+   * wrote.
+   *
+   * @example
+   * // The branch whose PR and CI to show; the other entries are side worktrees.
+   * const shown = worktrees.find(worktree => worktree.active)
+   */
+  active: boolean
   /**
    * Where `git push` sends the branch, the key of the forge brick's `pr` and
    * `pipelines` flows; null on a detached HEAD or without a push remote. Read
-   * again at each write in the worktree and after the agent runs a command
+   * again at each work in the worktree and after the agent runs a command
    * that may move the branch (`git switch`, `git push -u`...). Absent from an
    * entry an older mod wrote.
    *
@@ -160,15 +175,16 @@ export type NowcastWorktree = {
    */
   forge?: NowcastForgeKey | null
   /**
-   * The kinds of loop whose `Edit` or `Write` succeeded in it, in the order
-   * `main`, `subagent`, `workflow`. A loop is a workflow's when an
+   * The kinds of loop that worked in it, in the order `main`, `subagent`,
+   * `workflow`: whose `Edit` or `Write` succeeded or Bash call ran there, and
+   * `main` when the session's directory moved into it. A loop is a workflow's when an
    * `agent.spawn` carrying `workflow` started its `agentId`, or when a
    * workflow's loop started it (`parentAgentId`); any other `agentId` is a
    * subagent's. Absent from an entry an older mod wrote, which
    * stays so at a later write.
    *
    * @example
-   * // A worktree only a workflow's agents wrote in: its pipelines are theirs.
+   * // A worktree only a workflow's agents worked in: its pipelines are theirs.
    * const workflowOnly = worktree.writers?.every(writer => writer === 'workflow') === true
    */
   writers?: NowcastWriter[]
@@ -367,11 +383,12 @@ declare module 'claude-code' {
       flows: StateFamily<NowcastFlow>
       stream: NowcastStream
       /**
-       * The worktrees the session wrote in, the most recent write first, at
-       * most 16; one whose root is gone leaves at the next write, or after a
-       * command of the agent that may move a branch. Absent
-       * until the session writes: a consumer then follows the session's
-       * directory. Kept whether or not the claude-code brick is enabled.
+       * The worktrees the session worked in, the most recent work first, at
+       * most 16, the one holding the session's directory flagged `active`;
+       * one whose root is gone leaves at the next work, after a command of
+       * the agent that may move a branch, or at the start or the end of a
+       * turn of the main loop. Kept whether or not the claude-code brick is
+       * enabled.
        */
       worktrees: NowcastWorktree[]
     }
