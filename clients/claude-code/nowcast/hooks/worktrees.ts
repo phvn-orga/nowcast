@@ -355,24 +355,26 @@ async function pushedName($: $, dir: string, push: string, branch: string): Prom
  * that holds it in that format (where the file stays `.invalid`), and the
  * config files git reads there, a missing one included; and where the root's
  * `.git` leads, which a worktree recreated there with another git directory
- * changes. Undefined when `HEAD` cannot be read: nothing is then kept.
+ * changes. The SHA-256 of their contents, a missing file reading as none:
+ * any change shows, whatever its date or size. Undefined when `HEAD` cannot
+ * be read: nothing is then kept.
  */
 async function stampOf($: $, place: Found, files: string[]): Promise<string | undefined> {
-  const [head, link] = await Promise.all([
-    $.fs.read(`${place.gitDir}/HEAD`).catch(() => undefined),
-    // A file names the git directory; a directory, or none, reads the same each time.
-    $.fs.read(`${place.root}/.git`).catch(() => '-'),
-  ])
+  const head = await $.fs.read(`${place.gitDir}/HEAD`).catch(() => undefined)
   if (typeof head !== 'string') return undefined
-  const stats = await Promise.all(
-    [`${place.gitDir}/reftable/tables.list`, ...files].map(file =>
-      $.fs.stat(file).then(
-        stat => `${stat.mtimeMs}:${stat.size}`,
+  // `.git` is a file naming the git directory; a directory, or none, reads as none.
+  const contents = await Promise.all(
+    [`${place.root}/.git`, `${place.gitDir}/reftable/tables.list`, ...files].map(file =>
+      $.fs.read(file).then(
+        text => (typeof text === 'string' ? `+${text}` : '-'),
         () => '-',
       ),
     ),
   )
-  return [head, link, ...stats].join('\n')
+  // Each content is framed by its length: no two lists of contents join alike.
+  const joined = [head, ...contents].map(text => `${text.length}:${text}`).join('')
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(joined))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 /**
