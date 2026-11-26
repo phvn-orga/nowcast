@@ -22,7 +22,7 @@ type $ = EngineInterface
 export const CLI = 'nowcast'
 
 /** What `POST /v1/subscriptions` asks for. */
-export type Wanted = Omit<NowcastSubscribeRequest, 'name'>
+export type Wanted = Omit<NowcastSubscribeRequest, 'name' | 'conversation'>
 
 /** What `POST /v1/subscriptions` answers. */
 export type Created = { ok: true; subscription: string; flow: string; last: NowcastEvent | null }

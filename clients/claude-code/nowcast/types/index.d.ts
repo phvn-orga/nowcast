@@ -18,6 +18,14 @@
 // it starts empty, and this mod writes every subscription it keeps and the
 // last value of every flow the session's process is subscribed to into it
 // again.
+//
+// The conversation is the session id: a `/clear` makes a new one, a resume
+// returns to the resumed one's. At the process's start, after a `/clear` or a
+// resume, and at a turn that starts under another id, this mod enters it, the
+// same way each time: it moves the subscriptions that follow the conversation,
+// writes `conversation`, sends the session's measures, and reads again which
+// worktree is active. A consumer that shows the conversation starts over on
+// the `conversation` write; a reload of this mod is not an entry.
 
 /**
  * One update of a flow: a CloudEvents event in JSON, as the service sends it
@@ -70,7 +78,10 @@ export type NowcastFlow = {
 export type NowcastSubscription = {
   brick: string
   kind: string
+  /** As sent to the service: for one that follows the conversation, its id filled in. */
   params: Readonly<Record<string, unknown>>
+  /** The parameter the conversation's id fills, for one that follows it; absent otherwise. */
+  conversation?: string
   /**
    * `active` while the service serves it; `retrying` while the service is
    * out of reach or refuses it for now, tried again after 1 s, doubled up to
@@ -109,6 +120,14 @@ export type NowcastStream = {
   status: 'starting' | 'up' | 'down' | 'stopped'
   /** Why the stream is down or stopped; null while up. */
   error: string | null
+}
+
+/** The conversation this mod entered last: see the head of this file. */
+export type NowcastConversation = {
+  /** Claude Code's session id. */
+  id: string
+  /** When this mod entered it, RFC 3339. */
+  since: string
 }
 
 /**
@@ -235,13 +254,14 @@ export type Nowcast = {
    * The same name with the same request answers the subscription in place;
    * with another request, it replaces it. A mod reloaded subscribes again
    * under the same names and finds its subscriptions; a `/clear` leaves them
-   * as they are. A name the mod no longer uses stays subscribed until the
-   * process ends.
+   * as they are, but those that follow the conversation (`conversation`). A
+   * name the mod no longer uses stays subscribed until the process ends.
    *
    * Only a request that can never succeed fails, and nothing is kept for it:
    * `unknown_brick` (a brick not enabled answers it too: enable it, then
    * reload the mod), `unknown_kind`, `invalid_params`, `invalid_request` (a
-   * malformed body), or `invalid_name`.
+   * malformed body, or a `conversation` that is not a non-empty string, or
+   * without `params` an object), or `invalid_name`.
    * Any other failure answers the subscription `retrying`. The flow's last
    * value, once the service gives it, is written to the state's `flows`.
    */
@@ -317,6 +337,19 @@ export type NowcastSubscribeRequest = {
   kind: string
   /** The subscription's content, checked against the kind's JSON Schema. */
   params: Readonly<Record<string, unknown>>
+  /**
+   * Names the parameter this mod fills with the conversation's id, for a
+   * subscription that follows the conversation. Each entry into another one
+   * moves it there under the same name: the previous flow's subscription is
+   * ended first, and its `flow` reads null until the new one is active, so
+   * that the previous flow's value never shows again. A reload subscribing
+   * again with the same request finds it in place.
+   *
+   * @example
+   * // The session this conversation is, whatever `/clear` or `/resume` changes.
+   * await $.nowcast.subscribe({ name: 'session', brick: 'claude-code', kind: 'sessions', params: {}, conversation: 'id' })
+   */
+  conversation?: string
 }
 
 /** A subscription kept, where it stands when `subscribe` answers. */
@@ -382,6 +415,11 @@ declare module 'claude-code' {
       /** One member per flow the session's stream delivered, by flow id. */
       flows: StateFamily<NowcastFlow>
       stream: NowcastStream
+      /**
+       * The conversation entered last, written at each entry; absent until
+       * the first. A consumer follows it with a `state.set` hook.
+       */
+      conversation: NowcastConversation
       /**
        * The worktrees the session worked in, the most recent work first, at
        * most 16, the one holding the session's directory flagged `active`;

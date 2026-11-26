@@ -3,6 +3,10 @@
 // mod unsubscribes: what the service refuses for now is tried again, what it
 // forgot (a restart, a brick removed) is taken again. Only a request that can
 // never succeed is refused, and nothing is kept for it.
+//
+// A request may follow the conversation: it names the parameter this mod
+// fills with the conversation's id, and each entry into another conversation
+// moves it there (`moveTo`).
 
 import type { EngineInterface } from 'claude-code'
 import type { NowcastDone, NowcastFailure, NowcastSubscribed, NowcastSubscription } from '../types'
@@ -23,9 +27,14 @@ const MAX_RETRY_MS = 60_000
 /** A subscription active this long and then lost is taken again at once. */
 const STABLE_MS = 60_000
 
+/** A request as the mod gave it: `params` without the one the conversation fills. */
+type Asked = Wanted & { conversation?: string }
+
 type Entry = {
   readonly id: string
-  readonly wanted: Wanted
+  readonly asked: Asked
+  /** What the service is asked: `asked`, its conversation's id filled in. */
+  wanted: Wanted
   /** What the state holds for it. */
   value: NowcastSubscription
   /** Attempts refused or lost in a row, for the delay before the next. */
@@ -46,16 +55,24 @@ const queues = new Map<string, Promise<unknown>>()
 export function subscribeFor(
   $: $,
   owner: string,
-  asked: { name: unknown } & Wanted,
+  request: { name: unknown; conversation?: unknown } & Wanted,
 ): Promise<NowcastSubscribed | NowcastFailure> {
-  if (typeof asked.name !== 'string' || asked.name === '') {
+  if (typeof request.name !== 'string' || request.name === '') {
     return Promise.resolve(failure('invalid_name', 'a subscription needs a name, a non-empty string'))
   }
-  const id = `${owner}/${asked.name}`
-  const wanted = { brick: asked.brick, kind: asked.kind, params: asked.params }
+  const { conversation } = request
+  if (conversation !== undefined && (typeof conversation !== 'string' || conversation === '')) {
+    return Promise.resolve(failure('invalid_request', 'conversation names a parameter: a non-empty string'))
+  }
+  if (conversation !== undefined && !isRecord(request.params)) {
+    return Promise.resolve(failure('invalid_request', 'a request that follows the conversation needs params, an object'))
+  }
+  const id = `${owner}/${request.name}`
+  const asked = askedOf(request, conversation)
   return serial(id, async () => {
+    const wanted = filled(asked, await $.session.id())
     const held = entries.get(id)
-    if (held !== undefined && same(held.wanted, wanted)) {
+    if (held !== undefined && same(held.asked, asked)) {
       // Left failed, it is tried again only when asked for again: a mod
       // reloaded once its brick is back gets it back.
       if (held.value.status === 'failed') {
@@ -68,8 +85,9 @@ export function subscribeFor(
     if (held !== undefined) await drop($, held)
     const entry: Entry = {
       id,
+      asked,
       wanted,
-      value: { ...wanted, status: 'retrying', error: null, flow: null, service: null },
+      value: { ...shown(asked, wanted), status: 'retrying', error: null, flow: null, service: null },
       refused: 0,
       attempt: 0,
       activeSince: null,
@@ -80,6 +98,9 @@ export function subscribeFor(
     if (refused !== null) return refused
     entries.set(id, entry)
     await saveIds($)
+    // A conversation entered while the service was asked did not move it.
+    const now = await $.session.id()
+    if (behind(entry, now)) await move($, entry, now)
     return answer(entry)
   })
 }
@@ -131,6 +152,40 @@ export async function flowChanged($: $, flow: string): Promise<void> {
   if (held.length > 0) await check($, flow, held)
 }
 
+/**
+ * Moves each subscription that follows the conversation and asks for another
+ * one to `conversation`, the one just entered: the service ends the previous
+ * flow's subscription before the new one is asked for, and the state never
+ * shows the previous flow again. Called before anything else is written.
+ */
+export async function moveTo($: $, conversation: string): Promise<void> {
+  const moving = [...entries.values()].filter(entry => behind(entry, conversation))
+  await Promise.all(
+    moving.map(entry =>
+      serial(entry.id, async () => {
+        if (entries.get(entry.id) === entry) await move($, entry, conversation)
+      }),
+    ),
+  )
+}
+
+/** Whether `entry` follows the conversation and asks for another one than `conversation`. */
+function behind(entry: Entry, conversation: string): boolean {
+  return entry.asked.conversation !== undefined && !same(entry.wanted, filled(entry.asked, conversation))
+}
+
+/** Moves `entry` to `conversation`, from within its `serial`. */
+async function move($: $, entry: Entry, conversation: string): Promise<void> {
+  const service = entry.value.service
+  entry.wanted = filled(entry.asked, conversation)
+  entry.refused = 0
+  entry.activeSince = null
+  entry.value = { ...shown(entry.asked, entry.wanted), status: 'retrying', error: null, flow: null, service: null }
+  if (service !== null) await release($, service)
+  const refused = await attempt($, entry)
+  if (refused !== null) await set($, entry, { status: 'failed', error: reason(refused), service: null })
+}
+
 /** Writes every subscription kept again, into a state a `/clear` emptied. */
 export async function rewrite($: $): Promise<void> {
   for (const entry of entries.values()) await save($, entry.id, entry.value)
@@ -155,7 +210,8 @@ export async function restore($: $): Promise<void> {
       continue
     }
     const wanted = { brick: value.brick, kind: value.kind, params: value.params }
-    entries.set(id, { id, wanted, value, refused: 0, attempt: 0, activeSince: null })
+    const asked = askedOf(wanted, value.conversation)
+    entries.set(id, { id, asked, wanted, value, refused: 0, attempt: 0, activeSince: null })
   }
 }
 
@@ -281,9 +337,37 @@ function failure(code: string, message: string): NowcastFailure {
   return { ok: false, status: null, code, message }
 }
 
+/** A request as kept: its `params` without the one `conversation` names. */
+function askedOf(request: Wanted, conversation: string | undefined): Asked {
+  const { brick, kind } = request
+  if (conversation === undefined) return { brick, kind, params: request.params }
+  const { [conversation]: _, ...params } = request.params
+  return { brick, kind, params, conversation }
+}
+
+/** What the service is asked for `asked` in the conversation `id`. */
+function filled(asked: Asked, id: string): Wanted {
+  const { brick, kind, params, conversation } = asked
+  return { brick, kind, params: conversation === undefined ? params : { ...params, [conversation]: id } }
+}
+
+/** The request as the state shows it: the parameters sent, and the one the conversation fills. */
+function shown(asked: Asked, wanted: Wanted): Pick<NowcastSubscription, 'brick' | 'kind' | 'params' | 'conversation'> {
+  return asked.conversation === undefined ? wanted : { ...wanted, conversation: asked.conversation }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /** Whether two requests ask for the same thing, `params` compared as JSON. */
-function same(a: Wanted, b: Wanted): boolean {
-  return a.brick === b.brick && a.kind === b.kind && canonical(a.params) === canonical(b.params)
+function same(a: Asked, b: Asked): boolean {
+  return (
+    a.brick === b.brick &&
+    a.kind === b.kind &&
+    a.conversation === b.conversation &&
+    canonical(a.params) === canonical(b.params)
+  )
 }
 
 /** JSON with object keys sorted, so that their order does not matter. */

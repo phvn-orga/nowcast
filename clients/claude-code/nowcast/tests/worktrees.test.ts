@@ -440,6 +440,19 @@ test('entering a worktree without writing makes it listed and active', async ($,
   expect(await listed(w)).toEqual([active('feature', 1_001_000), entry('main', 1_000_000)])
 })
 
+test('entering the conversation locates its active worktree, before any turn', async ($, on) => {
+  const w = world(on, { git: repository(), files: [ROOT('main')] })
+  directory(on, ROOT('main'))
+  await $.session.start(START)
+  expect(await listed(w)).toEqual([active('main', 1_000_000)])
+
+  // A /clear starts the list over, the session's directory in it at once.
+  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+  w.session.id = 'session-2'
+  await w.clock.advance(50)
+  expect(await listed(w)).toEqual([active('main', 1_000_050)])
+})
+
 test('moving to a directory outside git leaves no active entry', async ($, on) => {
   const w = world(on, { git: repository(), files: [ROOT('main'), ROOT('feature')] })
   const where = directory(on, ROOT('feature'))

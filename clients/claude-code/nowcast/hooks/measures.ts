@@ -4,15 +4,20 @@
 // request to the model (the session's, a mod's fork or completion, a
 // compaction's summary) and each `session.measure`, grouped when close.
 //
-// Nothing is sent until the session measures something, and nothing at all
-// when the brick is not enabled (`unknown_brick`). The subscription is this
-// mod's own, named `session`: the next session's replaces the previous one.
+// Entering a conversation (`register.ts`) starts its measures over and sends
+// them at once: the context `$.session.usage()` gives, the window alone for a
+// new conversation, and what its transcripts hold. After a reload, nothing is
+// sent until the session measures something. Nothing at all is sent when the
+// brick is not enabled (`unknown_brick`). The subscription is this mod's own,
+// named `session`: the next conversation's replaces the previous one.
 //
-// Two values come from the session's transcripts, which no API gives: the
-// tokens spent before this mod loaded (a resume, a reload), read once per
-// session, and the lifetime of the main thread's prompt cache, read from the
-// last response that wrote to it. An unreadable transcript only leaves them
-// out: the count starts at the load, and the brick assumes one hour.
+// Three values come from the session's transcripts, which no API gives: the
+// tokens spent before this mod loaded (a resume, a reload), and the time of
+// the main thread's last response that read or wrote its prompt cache, both
+// read once per session; and the lifetime of that cache, read from the last
+// response that wrote to it, then again after each turn. An unreadable
+// transcript only leaves them out: the count starts at the load, and the
+// brick assumes one hour.
 //
 // The mods' forks and completions and the compactions' summaries are not in
 // the transcripts: they are also counted apart, from this mod's load
@@ -36,6 +41,8 @@ const GROUP_MS = 500
 const SEED_MS = 5_000
 /** How much of the transcript's end holds its last responses. */
 const TAIL_BYTES = 262_144
+/** The line that parts the main thread's transcript from its subagents' in `transcripts`. */
+const SUBAGENTS = '--nowcast-subagents--'
 
 export type Tokens = { input: number; output: number; cache_creation: number; cache_read: number }
 
@@ -188,6 +195,31 @@ async function measured($: $): Promise<Measured> {
   const since = new Date(await $.clock.now()).toISOString()
   // Another request may have started it meanwhile.
   if (current?.id === id) return current
+  return begin($, id, since)
+}
+
+/**
+ * Enters the conversation `id` (`register.ts`): its measures, started now,
+ * are sent once its transcripts are read, with the context the engine gives.
+ * A new conversation's context is its window alone, never the previous one's.
+ */
+export async function enterMeasures($: $, id: string): Promise<void> {
+  await quietly($, async () => {
+    const { context } = await $.session.usage()
+    // Read before the check: a request may start the measures meanwhile.
+    const since = new Date(await $.clock.now()).toISOString()
+    const m = current?.id === id ? current : begin($, id, since)
+    m.context = context
+    // Past an unload, `schedule` is refused: nothing left to send.
+    void m.seeding
+      .catch(() => undefined)
+      .then(() => schedule($, m))
+      .catch(() => undefined)
+  })
+}
+
+/** Starts measuring the session `id`, from its transcripts. */
+function begin($: $, id: string, since: string): Measured {
   const m: Measured = {
     id,
     off: false,
@@ -203,19 +235,27 @@ async function measured($: $): Promise<Measured> {
 }
 
 /**
- * Adds what the transcripts count to the tokens. The session's requests wait
- * for it (`turn.step`), so that a response is never both read there and
- * counted by this mod; the mods' forks and completions and the compactions'
- * summaries are never written there, and do not wait. A transcript that
- * takes longer than `SEED_MS` to read is left out.
+ * Adds what the transcripts count to the tokens, and takes the cache's time
+ * and lifetime from the main thread's last responses, unless a request seen
+ * since says newer. The session's requests wait for it (`turn.step`), so that
+ * a response is never both read there and counted by this mod; the mods'
+ * forks and completions and the compactions' summaries are never written
+ * there, and do not wait. A transcript that takes longer than `SEED_MS` to
+ * read is left out.
  */
 async function seed($: $, m: Measured): Promise<void> {
-  const found = await Promise.race([
-    transcriptTokens($, m.id).catch(() => undefined),
+  const text = await Promise.race([
+    transcripts($, m.id).catch(() => undefined),
     $.clock.sleep(SEED_MS).then(() => undefined),
   ])
-  if (found === undefined) return
-  for (const key of Object.keys(found) as Array<keyof Tokens>) m.tokens[key] += found[key]
+  if (text === undefined) return
+  const cut = text.indexOf(`\n${SUBAGENTS}\n`)
+  const main = cut < 0 ? text : text.slice(0, cut)
+  const found = sumUsage(text)
+  if (found !== undefined) for (const key of Object.keys(found) as Array<keyof Tokens>) m.tokens[key] += found[key]
+  const at = lastCachedAt(main)
+  if (at !== undefined && (m.lastRequestAt === undefined || at > m.lastRequestAt)) m.lastRequestAt = at
+  m.cacheTtl ??= lastTtl(main)
   schedule($, m)
 }
 
@@ -339,17 +379,20 @@ async function shell($: $, script: string, args: string[]): Promise<string> {
 }
 
 /**
- * The tokens the session's transcript and its subagents' record, each
- * response once (its last record, the one with the most output), or
- * undefined when none could be read.
+ * The session's transcript, then the `SUBAGENTS` line, then its subagents';
+ * undefined when the transcripts' directory is not known.
  */
-export async function transcriptTokens($: $, id: string): Promise<Tokens | undefined> {
+async function transcripts($: $, id: string): Promise<string | undefined> {
   const dir = await projects($)
   if (dir === undefined) return undefined
-  const text = await shell($, 'cat "$1"/*/"$2".jsonl "$1"/*/"$2"/subagents/*.jsonl 2>/dev/null', [dir, id])
-  return sumUsage(text)
+  const script = 'cat "$1"/*/"$2".jsonl 2>/dev/null; printf \'\\n%s\\n\' "$3"; cat "$1"/*/"$2"/subagents/*.jsonl 2>/dev/null'
+  return shell($, script, [dir, id, SUBAGENTS])
 }
 
+/**
+ * The tokens the transcripts record, each response once (its last record,
+ * the one with the most output), or undefined when they hold none.
+ */
 export function sumUsage(text: string): Tokens | undefined {
   const byMessage = new Map<string, Usage>()
   for (const line of text.split('\n')) {
@@ -386,9 +429,48 @@ export function lastTtl(text: string): '5m' | '1h' | undefined {
   return undefined
 }
 
+/**
+ * When the main thread's last request that read or wrote its cache went out,
+ * RFC 3339: the time of the row before its response's first record, the
+ * prompt or the tool results it answers, which the request follows at once;
+ * that first record's own time when no row precedes it.
+ */
+export function lastCachedAt(text: string): string | undefined {
+  const rows = text.split('\n').map(parse)
+  const main = (row: Row | undefined): row is Row => row !== undefined && row.isSidechain !== true
+  let last = rows.length - 1
+  for (; last >= 0; last--) {
+    const row = rows[last]
+    const usage = main(row) && row.type === 'assistant' ? row.message?.usage : undefined
+    if ((usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) > 0) break
+  }
+  if (last < 0) return undefined
+  // Each content block of a response is a record of its own, under the response's id.
+  const id = rows[last]?.message?.id
+  let first = last
+  for (let i = last - 1; i >= 0 && id !== undefined; i--) {
+    const row = rows[i]
+    if (main(row) && row.type === 'assistant' && row.message?.id === id) first = i
+  }
+  for (let i = first - 1; i >= 0; i--) {
+    const row = rows[i]
+    const at = main(row) ? timeOf(row) : undefined
+    if (at !== undefined) return at
+  }
+  return timeOf(rows[first])
+}
+
+/** A row's time, RFC 3339; undefined when it has none. */
+function timeOf(row: Row | undefined): string | undefined {
+  const at = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : Number.NaN
+  return Number.isNaN(at) ? undefined : new Date(at).toISOString()
+}
+
 type Row = {
   type?: string
   uuid?: string
+  timestamp?: unknown
+  isSidechain?: boolean
   message?: {
     id?: string
     usage?: Usage & { cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } }
