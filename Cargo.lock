@@ -1769,11 +1769,11 @@ dependencies = [
 
 [[package]]
 name = "nowcast-brick-build"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 
 [[package]]
 name = "nowcast-brick-claude-code"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "jiff",
  "notify",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-brick-forge"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "base64",
  "cliclack",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-brick-system"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "futures",
  "libc",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-cli"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "bytes",
  "clap",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-codec"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-conformance",
  "nowcast-types",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-conformance"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-daemon"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-discovery",
  "nowcast-identity",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-discovery"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "jsonschema",
  "notify",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-e2e"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-discovery",
  "nowcast-test-brick",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-identity"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "globset",
  "libc",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-router"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-conformance",
  "nowcast-traits",
@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-server"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-sessions"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-conformance",
  "nowcast-identity",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-supervisor"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-codec",
  "nowcast-conformance",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-test-brick"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-codec",
  "nowcast-conformance",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-traits"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "nowcast-types",
  "serde_json",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "nowcast-types"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 
 [[package]]
 name = "ntapi"
