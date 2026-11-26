@@ -288,10 +288,11 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   `refreshForge`). Il voit un `git switch` lancé par son agent
   (`05-brique-claude-code.md`, « Du fichier au worktree »), pas un lancé dans un
   terminal, jusqu'à ce que la brique git (#51) lui donne l'état local.
-- **Le mod central relève les worktrees où écrit sa session**, d'après les appels
-  d'outils, et les tient dans son état, brique claude-code activée ou non. Une
-  session peut écrire dans un autre worktree que le sien : un consommateur qui ne
-  suivrait que son répertoire montrerait la mauvaise branche. Lire ces appels est
+- **Le mod central relève les worktrees où travaille sa session**, d'après les
+  appels d'outils et son répertoire, marque celui où elle se trouve, et les tient
+  dans son état, brique claude-code activée ou non. Une session peut travailler
+  dans un autre worktree que le sien : un consommateur qui ne suivrait que son
+  répertoire montrerait la mauvaise branche. Lire ces appels est
   propre à l'agent, donc au client ; choisir quels worktrees montrer revient au
   consommateur (`05-brique-claude-code.md`, « Les worktrees de la session »).
 - **Ce que coûte la session à la machine se lit dans la brique system**, sans rien
