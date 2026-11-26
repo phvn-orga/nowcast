@@ -138,7 +138,7 @@ function record($: $, dirs: string[], writer: NowcastWriter): void {
     .then(async () => {
       const [now, session] = await asked
       for (const dir of dirs) {
-        const place = dir.startsWith('/') ? await placeOf($, dir) : null
+        const place = dir.startsWith('/') ? await livePlaceOf($, dir) : null
         if (place !== null) await worked($, place, new Date(now).toISOString(), session, writer, false)
       }
     })
@@ -158,7 +158,7 @@ function locate($: $): void {
   queue = queue
     .then(async () => {
       const [now, session, cwd] = await asked
-      const place = await placeOf($, cwd)
+      const place = await livePlaceOf($, cwd)
       if (place !== null) return worked($, place, new Date(now).toISOString(), session, 'main', true)
       const mine = await hold($)
       if (mine.session !== session || !mine.list.some(worktree => worktree.active)) return
@@ -348,6 +348,16 @@ async function placeOf($: $, dir: string): Promise<Place> {
   const place = root?.startsWith('/') && repo?.startsWith('/') ? { root, repo } : null
   places.set(dir, place)
   return place
+}
+
+/**
+ * The worktree a directory belongs to, null when its root is gone: `placeOf`
+ * keeps git's answer, and a command run in a removed worktree must not bring
+ * it back.
+ */
+async function livePlaceOf($: $, dir: string): Promise<Place> {
+  const place = await placeOf($, dir)
+  return place !== null && (await $.fs.exists(place.root).catch(() => true)) ? place : null
 }
 
 /** A git command's output, trimmed; null when it fails or prints nothing. */

@@ -387,8 +387,9 @@ declare module 'claude-code' {
        * most 16, the one holding the session's directory flagged `active`;
        * one whose root is gone leaves at the next work, after a command of
        * the agent that may move a branch, or at the start or the end of a
-       * turn of the main loop. Kept whether or not the claude-code brick is
-       * enabled.
+       * turn of the main loop. Absent until the session works in a worktree
+       * or its directory enters one. Kept whether or not the claude-code
+       * brick is enabled.
        */
       worktrees: NowcastWorktree[]
     }

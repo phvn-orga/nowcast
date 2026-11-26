@@ -493,14 +493,31 @@ test('a Bash call that failed counts, one denied does not', async ($, on) => {
   on('session.cwd', () => ({ value: '/tmp' }))
   on('tool.call', (_, e) => {
     const command = (e as { command?: string }).command ?? ''
-    return (command.startsWith('rm') ? { deny: 'denied' } : { isError: true, result: 'failed', text: 'failed' }) as never
+    return (command.includes('rm ') ? { deny: 'denied' } : { isError: true, result: 'failed', text: 'failed' }) as never
   })
   await $.session.start(START)
 
-  await bash($, `rm -rf ${ROOT('main')}/target`)
+  await bash($, `cd ${ROOT('main')} && rm -rf target`)
   expect(await listed(w)).toBeUndefined()
   await bash($, `cd ${ROOT('feature')} && false`)
   expect(await listed(w)).toEqual([entry('feature', 1_000_000)])
+})
+
+test('a command run in a worktree removed since does not bring it back', async ($, on) => {
+  const files = [ROOT('main'), ROOT('feature')]
+  const w = world(on, { git: repository(), files })
+  const where = directory(on, ROOT('main'))
+  await $.session.start(START)
+  await bash($, `cd ${ROOT('feature')} && nr test`)
+  where.cwd = ROOT('feature')
+  await enter($, ROOT('feature'))
+  expect(await listed(w)).toEqual([active('feature', 1_000_000), entry('main', 1_000_000)])
+
+  files.splice(files.indexOf(ROOT('feature')), 1)
+  await bash($, `cd ${ROOT('feature')} && ls`)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+
+  expect(await listed(w)).toEqual([entry('main', 1_000_000)])
 })
 
 test('the cap never drops the active entry', async ($, on) => {
