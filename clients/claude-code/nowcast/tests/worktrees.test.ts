@@ -9,6 +9,7 @@ import { START, type World, world } from './world'
 const REPO = '/lab/nowcast/.bare'
 const REMOTE = 'git@github.com:o/r.git'
 const ROOT = (name: string) => `/lab/nowcast/${name}`
+const GIT_DIR = (name: string) => `${REPO}/worktrees/${name}`
 
 /**
  * A repository whose worktrees sit under `/lab/nowcast/`, each on the branch
@@ -24,7 +25,7 @@ function repository(branches: Record<string, string | null> = {}, git: Record<st
     const given = git[name]?.[line]
     if (given !== undefined) return { exitCode: 0, stdout: `${given}\n` }
     if (args[0] === 'rev-parse' && args[1] === '--path-format=absolute') {
-      return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n` }
+      return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n${GIT_DIR(name)}\n` }
     }
     if (args[0] === 'symbolic-ref') {
       const branch = name in branches ? branches[name] : name
@@ -532,4 +533,149 @@ test('the cap never drops the active entry', async ($, on) => {
   const list = await listed(w)
   expect(list?.map(worktree => worktree.path)).toEqual([...names.slice(2).reverse(), 'w0'].map(ROOT))
   expect(list?.at(-1)?.active).toBe(true)
+})
+
+/**
+ * Files git reads, by path, as `$.fs` sees them: `text` for `HEAD`, a date
+ * for the rest. A path absent is missing.
+ */
+function disk(on: On): Record<string, { text?: string; mtimeMs: number }> {
+  const files: Record<string, { text?: string; mtimeMs: number }> = {}
+  on('fs.read', (_, e) => {
+    const text = files[e.path]?.text
+    if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: text }
+  })
+  on('fs.stat', (_, e) => {
+    const file = files[e.path]
+    if (file === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: file.text?.length ?? 0, mtimeMs: file.mtimeMs, isLink: false } }
+  })
+  return files
+}
+
+const LIST = 'config --list --show-origin -z'
+const AT_PUSH = 'rev-parse --abbrev-ref --symbolic-full-name @{push}'
+
+test('a work in a worktree whose HEAD and config files are unchanged asks git only @{push}', async ($, on) => {
+  const branches: Record<string, string | null> = {}
+  const asked: string[] = []
+  const answer = repository(branches)
+  const w = world(on, {
+    git: (args, cwd) => {
+      asked.push(args.join(' '))
+      return args.join(' ') === LIST
+        ? { exitCode: 0, stdout: `file:${REPO}/config\0core.bare\ntrue\0file:/home/me/.gitconfig\0include.path\n~/.gitconfig-extra\0` }
+        : answer(args, cwd)
+    },
+    files: [ROOT('main')],
+    env: { HOME: '/home/me' },
+  })
+  const files = disk(on)
+  files[`${GIT_DIR('main')}/HEAD`] = { text: 'ref: refs/heads/main\n', mtimeMs: 1 }
+  files[`${REPO}/config`] = { mtimeMs: 1 }
+  files['/home/me/.gitconfig'] = { mtimeMs: 1 }
+  tools(on)
+  await $.session.start(START)
+  /** Edits in `main` again: the list, and what git was asked meanwhile in `asked`. */
+  const again = async () => {
+    await w.clock.settle()
+    asked.length = 0
+    await edit($, `${ROOT('main')}/a.ts`)
+    return listed(w)
+  }
+
+  await edit($, `${ROOT('main')}/a.ts`)
+  expect(await again()).toEqual([entry('main', 1_000_000)])
+  expect(asked).toEqual([AT_PUSH])
+
+  // A checkout rewrites HEAD.
+  branches.main = 'other'
+  files[`${GIT_DIR('main')}/HEAD`] = { text: 'ref: refs/heads/other\n', mtimeMs: 2 }
+  expect(await again()).toEqual([entry('main', 1_000_000, 'other')])
+  expect(asked).toContain(LIST)
+  expect(await again()).toEqual([entry('main', 1_000_000, 'other')])
+  expect(asked).toEqual([AT_PUSH])
+
+  // A config file changes.
+  files[`${REPO}/config`] = { mtimeMs: 2 }
+  await again()
+  expect(asked).toContain(LIST)
+
+  // An included file, missing so far, appears.
+  files['/home/me/.gitconfig-extra'] = { mtimeMs: 2 }
+  await again()
+  expect(asked).toContain(LIST)
+  await again()
+  expect(asked).toEqual([AT_PUSH])
+})
+
+test('a session directory that becomes a git repository is listed once it does', async ($, on) => {
+  let inited = false
+  const answer = repository()
+  const w = world(on, {
+    git: (args, cwd) => (inited ? answer(args, cwd) : { exitCode: 128, stdout: '' }),
+    files: [ROOT('fresh')],
+  })
+  directory(on, ROOT('fresh'))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't-1' })
+  expect(await listed(w)).toBeUndefined()
+
+  inited = true
+  await $.turn.start({ text: 'hi', turnId: 't-2' })
+
+  expect(await listed(w)).toEqual([active('fresh', 1_000_000)])
+})
+
+test('a worktree recreated at the same root with another git directory is read again', async ($, on) => {
+  const branches: Record<string, string | null> = {}
+  let gitDir = GIT_DIR('main')
+  const answer = repository(branches)
+  const w = world(on, {
+    git: (args, cwd) =>
+      args[1] === '--path-format=absolute'
+        ? { exitCode: 0, stdout: `${ROOT('main')}\n${REPO}\n${gitDir}\n` }
+        : answer(args, cwd),
+    files: [ROOT('main')],
+  })
+  const files = disk(on)
+  files[`${GIT_DIR('main')}/HEAD`] = { text: 'ref: refs/heads/main\n', mtimeMs: 1 }
+  files[`${ROOT('main')}/.git`] = { text: `gitdir: ${GIT_DIR('main')}\n`, mtimeMs: 1 }
+  tools(on)
+  await $.session.start(START)
+  await edit($, `${ROOT('main')}/a.ts`)
+  await w.clock.settle()
+
+  // The old git directory is left behind, unpruned, and its HEAD stays.
+  gitDir = `${REPO}/worktrees/main1`
+  branches.main = 'other'
+  files[`${gitDir}/HEAD`] = { text: 'ref: refs/heads/other\n', mtimeMs: 2 }
+  files[`${ROOT('main')}/.git`] = { text: `gitdir: ${gitDir}\n`, mtimeMs: 2 }
+  await edit($, `${ROOT('main')}/a.ts`)
+  expect(await listed(w)).toEqual([entry('main', 1_000_000, 'other')])
+
+  // Checkouts in the new one are seen.
+  branches.main = 'third'
+  files[`${gitDir}/HEAD`] = { text: 'ref: refs/heads/third\n', mtimeMs: 3 }
+  await edit($, `${ROOT('main')}/a.ts`)
+  expect(await listed(w)).toEqual([entry('main', 1_000_000, 'third')])
+})
+
+test('in the reftable format, whose HEAD file stays the same, the reftable says the checkout', async ($, on) => {
+  const branches: Record<string, string | null> = {}
+  const w = world(on, { git: repository(branches), files: [ROOT('main')] })
+  const files = disk(on)
+  files[`${GIT_DIR('main')}/HEAD`] = { text: 'ref: refs/heads/.invalid\n', mtimeMs: 1 }
+  files[`${GIT_DIR('main')}/reftable/tables.list`] = { mtimeMs: 1 }
+  tools(on)
+  await $.session.start(START)
+
+  await edit($, `${ROOT('main')}/a.ts`)
+  await w.clock.settle()
+  branches.main = 'other'
+  files[`${GIT_DIR('main')}/reftable/tables.list`] = { mtimeMs: 2 }
+  await edit($, `${ROOT('main')}/a.ts`)
+
+  expect(await listed(w)).toEqual([entry('main', 1_000_000, 'other')])
 })

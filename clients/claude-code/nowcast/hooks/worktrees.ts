@@ -25,7 +25,7 @@
 // finds it in the state.
 
 import type { EngineInterface, On } from 'claude-code'
-import type { NowcastForgeKey, NowcastWorktree, NowcastWriter } from '../types'
+import type { NowcastWorktree, NowcastWriter } from '../types'
 import { branchMoves, commandDirs, isUrl } from './actions'
 import { followForge } from './branches'
 import { write } from './flows'
@@ -37,12 +37,29 @@ const WORKTREES = { plugin: 'nowcast', key: 'worktrees' } as const
 export const MAX_WORKTREES = 16
 const GIT_TIMEOUT_MS = 5_000
 
-/** A directory's worktree root and common git directory; null outside a worktree. */
-type Place = { root: string; repo: string } | null
+/** A directory's worktree root, common git directory and own git directory; null outside a worktree. */
+type Place = { root: string; repo: string; gitDir: string } | null
 type Found = NonNullable<Place>
 
-/** What git answered for each directory seen. */
+/** What git answered for each directory seen in a worktree. */
 const places = new Map<string, Place>()
+
+/**
+ * What git last answered of a worktree, but `@{push}`, with the stamp of the
+ * files those answers rest on (`stampOf`): the same stamp, the same answers.
+ */
+type Read = {
+  stamp: string | undefined
+  files: string[]
+  branch: string | null
+  remote: string | null
+  /** The remote `git push` sends the branch to, its name or its URL; null on a detached HEAD. */
+  push: string | null
+  pushUrl: string | null
+}
+
+/** The last reading of each worktree, by root. */
+const reads = new Map<string, Read>()
 
 /** The list, for the session it belongs to. */
 type Held = { session: string; list: NowcastWorktree[] }
@@ -284,32 +301,121 @@ async function save($: $, mine: Held, session: string, next: NowcastWorktree[]):
   followForge($, next)
 }
 
-/** What git says of a worktree now: its branch, its `origin` and its forge key. */
+/**
+ * What git says of a worktree now: its branch, its `origin` and its forge key.
+ * The answers but `@{push}` come from the last reading while the files they
+ * rest on are unchanged: one git command instead of up to seven.
+ */
 async function describe($: $, root: string): Promise<Pick<NowcastWorktree, 'branch' | 'remote' | 'forge'>> {
+  const place = await placeOf($, root)
+  const known = reads.get(root)
+  const same = known?.stamp !== undefined && place !== null && (await stampOf($, place, known.files)) === known.stamp
+  const read = same && known !== undefined ? known : await readGit($, root)
+  const forge =
+    read.branch === null || read.push === null || read.pushUrl === null
+      ? null
+      : { remote: read.pushUrl, branch: await pushedName($, root, read.push, read.branch) }
+  return { branch: read.branch, remote: read.remote, forge }
+}
+
+/** Asks git what `describe` keeps of a worktree, and keeps it with its stamp. */
+async function readGit($: $, root: string): Promise<Read> {
+  // Asked again: a worktree recreated at the same root may have another git directory.
+  places.delete(root)
+  const place = await placeOf($, root)
+  // Stamped before git answers: a change meanwhile shows at the next stamp.
+  const files = place === null ? [] : await configFiles($, place)
+  const stamp = place === null ? undefined : await stampOf($, place, files)
   const [branch, remote] = await Promise.all([
     git($, root, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
     git($, root, ['config', '--get', 'remote.origin.url']),
   ])
-  return { branch, remote, forge: await forgeKey($, root, branch) }
+  const push = branch === null ? null : await pushRemote($, root, branch)
+  const read: Read = { stamp, files, branch, remote, push, pushUrl: push === null ? null : await remoteUrl($, root, push) }
+  reads.set(root, read)
+  return read
 }
 
 /**
- * Where `git push` sends `branch` from `dir` (`02-clients.md` on the design
- * branch): `@{push}`, `<remote>/<branch>`; when git does not resolve it, as
- * before a first push with `push.default` at `simple`, the same name on the
- * push remote. Null on a detached HEAD or without a push remote.
+ * The name `git push` gives `branch` from `dir` on the remote `push` (`02-clients.md` on
+ * the design branch): `@{push}`, `<remote>/<branch>`; when git does not
+ * resolve it, as before a first push with `push.default` at `simple`, the
+ * same name. Asked each time: it also rests on the remote-tracking branch,
+ * which a push or a fetch creates or deletes without touching a stamped file.
  */
-export async function forgeKey($: $, dir: string, branch: string | null): Promise<NowcastForgeKey | null> {
-  if (branch === null) return null
-  const [name, push] = await Promise.all([
-    pushRemote($, dir, branch),
-    git($, dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{push}']),
+async function pushedName($: $, dir: string, push: string, branch: string): Promise<string> {
+  const pushed = await git($, dir, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{push}'])
+  // `@{push}` names the remote git pushes to, `push`.
+  const name = pushed?.startsWith(`${push}/`) ? pushed.slice(push.length + 1) : ''
+  return name === '' ? branch : name
+}
+
+/**
+ * What a worktree's answers but `@{push}` rest on: its `HEAD`, the reftable
+ * that holds it in that format (where the file stays `.invalid`), and the
+ * config files git reads there, a missing one included; and where the root's
+ * `.git` leads, which a worktree recreated there with another git directory
+ * changes. Undefined when `HEAD` cannot be read: nothing is then kept.
+ */
+async function stampOf($: $, place: Found, files: string[]): Promise<string | undefined> {
+  const [head, link] = await Promise.all([
+    $.fs.read(`${place.gitDir}/HEAD`).catch(() => undefined),
+    // A file names the git directory; a directory, or none, reads the same each time.
+    $.fs.read(`${place.root}/.git`).catch(() => '-'),
   ])
-  const remote = await remoteUrl($, dir, name)
-  if (remote === null) return null
-  // `@{push}` names the remote git pushes to, the one found above.
-  const pushed = push?.startsWith(`${name}/`) ? push.slice(name.length + 1) : ''
-  return { remote, branch: pushed === '' ? branch : pushed }
+  if (typeof head !== 'string') return undefined
+  const stats = await Promise.all(
+    [`${place.gitDir}/reftable/tables.list`, ...files].map(file =>
+      $.fs.stat(file).then(
+        stat => `${stat.mtimeMs}:${stat.size}`,
+        () => '-',
+      ),
+    ),
+  )
+  return [head, link, ...stats].join('\n')
+}
+
+/**
+ * The config files git reads in a worktree, existing or not yet: those it
+ * reports, the repository's and the worktree's own, the global and system
+ * ones, and the targets of `include.path` and `includeIf.<condition>.path`. An include that
+ * applies only under a condition is listed once git reads it: a change that
+ * meets the condition changes a file already listed.
+ */
+async function configFiles($: $, place: Found): Promise<string[]> {
+  const [home, xdg] = await Promise.all([
+    $.env.get('HOME').catch(() => undefined),
+    $.env.get('XDG_CONFIG_HOME').catch(() => undefined),
+  ])
+  const files = new Set([`${place.repo}/config`, `${place.gitDir}/config.worktree`, '/etc/gitconfig'])
+  if (home !== undefined) files.add(`${home}/.gitconfig`)
+  // Git takes an empty `XDG_CONFIG_HOME` as unset.
+  const config = xdg !== undefined && xdg !== '' ? xdg : home === undefined ? undefined : `${home}/.config`
+  if (config !== undefined) files.add(`${config}/git/config`)
+  const answer = await $.process
+    .run(['git', 'config', '--list', '--show-origin', '-z'], { cwd: place.root, timeoutMs: GIT_TIMEOUT_MS })
+    .catch(() => undefined)
+  const fields = answer?.exitCode === 0 ? answer.stdout.split('\0') : []
+  // Each entry is its origin, then `key\nvalue`; a path git gives relative is the worktree's.
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const origin = fields[i] as string
+    if (!origin.startsWith('file:')) continue
+    const file = origin.startsWith('file:/') ? origin.slice(5) : `${place.root}/${origin.slice(5)}`
+    files.add(file)
+    const entry = fields[i + 1] as string
+    const cut = entry.indexOf('\n')
+    if (cut < 0 || !/^include(if\..*)?\.path$/i.test(entry.slice(0, cut))) continue
+    const path = entry.slice(cut + 1)
+    const target = path.startsWith('~/')
+      ? home === undefined
+        ? undefined
+        : `${home}${path.slice(1)}`
+      : path.startsWith('/')
+        ? path
+        : `${file.slice(0, file.lastIndexOf('/'))}/${path}`
+    if (target !== undefined) files.add(target)
+  }
+  return [...files].sort()
 }
 
 /**
@@ -338,15 +444,23 @@ function remoteUrl($: $, dir: string, name: string): Promise<string | null> {
   return isUrl(name) ? Promise.resolve(name) : git($, dir, ['remote', 'get-url', '--push', name])
 }
 
-/** The worktree a directory belongs to, asked of git once per directory. */
+/** The worktree a directory belongs to, asked of git once per directory in one. */
 async function placeOf($: $, dir: string): Promise<Place> {
   const known = places.get(dir)
   if (known !== undefined) return known
-  const out = await git($, dir, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'])
-  const [root, repo] = out?.split('\n') ?? []
+  const out = await git($, dir, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--show-toplevel',
+    '--git-common-dir',
+    '--git-dir',
+  ])
+  const [root, repo, gitDir] = out?.split('\n') ?? []
   // A git before 2.31 echoes `--path-format=absolute` it does not know.
-  const place = root?.startsWith('/') && repo?.startsWith('/') ? { root, repo } : null
-  places.set(dir, place)
+  const place =
+    root?.startsWith('/') && repo?.startsWith('/') && gitDir?.startsWith('/') ? { root, repo, gitDir } : null
+  // A directory outside git is asked again: a `git init` there makes it a worktree.
+  if (place !== null) places.set(dir, place)
   return place
 }
 
