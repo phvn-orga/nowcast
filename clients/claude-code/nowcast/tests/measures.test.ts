@@ -349,7 +349,7 @@ test("the cache's lifetime is the last one a response wrote with", () => {
   expect(lastTtl(wrote(0, 0))).toBe(undefined)
 })
 
-test("at entry, the cache's time and lifetime come from the main thread's last response that used it", async ($, on) => {
+test("at entry, the cache's time and lifetime come from the main thread's last request that used it", async ($, on) => {
   const w = world(on, { answer: service(true), env: { XDG_RUNTIME_DIR: '/run/user/1000', HOME: '/home/u' } })
   engine(on)
   await $.session.start(START)
@@ -361,6 +361,8 @@ test("at entry, the cache's time and lifetime come from the main thread's last r
   cat?.stdout(
     [
       row('a', '2026-11-26T10:00:00.000Z', { input_tokens: 1, cache_creation_input_tokens: 5, cache_creation: { ephemeral_1h_input_tokens: 5 } }),
+      // The tool results the next request answers, written as it went out.
+      JSON.stringify({ type: 'user', timestamp: '2026-11-26T10:04:30.000Z', message: { content: [] } }),
       row('b', '2026-11-26T10:05:00.000Z', { input_tokens: 1, cache_read_input_tokens: 5 }),
       row('c', '2026-11-26T10:06:00.000Z', { input_tokens: 1 }),
       '',
@@ -373,23 +375,32 @@ test("at entry, the cache's time and lifetime come from the main thread's last r
   const measures = await sent(w)
 
   expect(measures?.tokens).toEqual({ input: 4, output: 0, cache_creation: 5, cache_read: 10 })
-  expect(measures?.last_request_at).toBe('2026-11-26T10:05:00.000Z')
+  expect(measures?.last_request_at).toBe('2026-11-26T10:04:30.000Z')
   expect(measures?.cache_ttl).toBe('1h')
   expect(measures?.context).toEqual({ window: 200000 })
 })
 
-test('the last response that used the cache is the latest of the main thread that read or wrote it', () => {
-  const row = (timestamp: unknown, usage: Record<string, unknown>, isSidechain?: boolean) =>
-    JSON.stringify({ type: 'assistant', timestamp, isSidechain, message: { usage } })
+test('the last request that used the cache went out when the row before its response was written', () => {
+  const response = (id: string, timestamp: unknown, usage: Record<string, unknown>, isSidechain?: boolean) =>
+    JSON.stringify({ type: 'assistant', timestamp, isSidechain, message: { id, usage } })
+  const input = (timestamp: unknown) => JSON.stringify({ type: 'user', timestamp, message: { content: [] } })
+  const cached = { cache_read_input_tokens: 3 }
   expect(
     lastCachedAt(
       [
-        row('2026-11-26T10:00:00Z', { cache_creation_input_tokens: 3 }),
-        row('2026-11-26T10:01:00Z', { input_tokens: 3 }),
-        row('2026-11-26T10:02:00Z', { cache_read_input_tokens: 3 }, true),
-        row(12, { cache_read_input_tokens: 3 }),
+        input('2026-11-26T10:00:00Z'),
+        // A row with no time, and a subagent's, tell nothing of the request.
+        JSON.stringify({ type: 'file-history-snapshot' }),
+        response('s', '2026-11-26T10:00:30Z', cached, true),
+        // One response, one record per content block.
+        response('r', '2026-11-26T10:01:00Z', cached),
+        response('r', '2026-11-26T10:02:00Z', cached),
+        response('n', '2026-11-26T10:03:00Z', { input_tokens: 3 }),
       ].join('\n'),
     ),
   ).toBe('2026-11-26T10:00:00.000Z')
+  // Nothing before the response: its own first record.
+  expect(lastCachedAt(response('r', '2026-11-26T10:01:00Z', cached))).toBe('2026-11-26T10:01:00.000Z')
+  expect(lastCachedAt(response('r', '2026-11-26T10:01:00Z', { input_tokens: 3 }))).toBe(undefined)
   expect(lastCachedAt('')).toBe(undefined)
 })

@@ -159,15 +159,16 @@ test('after a /clear, a subscription that follows the conversation moves, and th
   await w.clock.advance(50)
   await w.clock.settle()
 
-  // The service ends the previous subscription before the new one is asked for.
+  // The new session is declared, once; then the service ends the previous
+  // subscription before the new one is asked for.
   expect(w.requests.slice(requests).map(path)).toEqual([
+    'PUT /v1/session',
     'DELETE /v1/subscriptions/s-1',
     'POST /v1/subscriptions',
-    'PUT /v1/session',
   ])
-  expect(JSON.parse(w.requests[requests + 1]?.body ?? 'null')).toMatchObject({ params: { id: 'session-2' } })
-  // The moved subscription is the first write into the new state, before the conversation.
-  const after = w.writes.slice(writes)
+  expect(JSON.parse(w.requests[requests + 2]?.body ?? 'null')).toMatchObject({ params: { id: 'session-2' } })
+  // But for the stream, the moved subscription is the first write into the new state, before the conversation.
+  const after = w.writes.slice(writes).filter(x => x.key !== 'stream')
   const moved: NowcastSubscription = {
     brick: 'claude-code',
     kind: 'sessions',

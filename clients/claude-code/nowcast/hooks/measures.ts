@@ -430,20 +430,40 @@ export function lastTtl(text: string): '5m' | '1h' | undefined {
 }
 
 /**
- * When the main thread's last response that read or wrote its cache was
- * written, RFC 3339: the time of the last request that refreshed the cache,
- * as near as the transcript tells.
+ * When the main thread's last request that read or wrote its cache went out,
+ * RFC 3339: the time of the row before its response's first record, the
+ * prompt or the tool results it answers, which the request follows at once;
+ * that first record's own time when no row precedes it.
  */
 export function lastCachedAt(text: string): string | undefined {
-  const lines = text.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const row = parse(lines[i] ?? '')
-    const usage = row?.type === 'assistant' && row.isSidechain !== true ? row.message?.usage : undefined
-    if ((usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) === 0) continue
-    const at = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : Number.NaN
-    if (!Number.isNaN(at)) return new Date(at).toISOString()
+  const rows = text.split('\n').map(parse)
+  const main = (row: Row | undefined): row is Row => row !== undefined && row.isSidechain !== true
+  let last = rows.length - 1
+  for (; last >= 0; last--) {
+    const row = rows[last]
+    const usage = main(row) && row.type === 'assistant' ? row.message?.usage : undefined
+    if ((usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) > 0) break
   }
-  return undefined
+  if (last < 0) return undefined
+  // Each content block of a response is a record of its own, under the response's id.
+  const id = rows[last]?.message?.id
+  let first = last
+  for (let i = last - 1; i >= 0 && id !== undefined; i--) {
+    const row = rows[i]
+    if (main(row) && row.type === 'assistant' && row.message?.id === id) first = i
+  }
+  for (let i = first - 1; i >= 0; i--) {
+    const row = rows[i]
+    const at = main(row) ? timeOf(row) : undefined
+    if (at !== undefined) return at
+  }
+  return timeOf(rows[first])
+}
+
+/** A row's time, RFC 3339; undefined when it has none. */
+function timeOf(row: Row | undefined): string | undefined {
+  const at = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : Number.NaN
+  return Number.isNaN(at) ? undefined : new Date(at).toISOString()
 }
 
 type Row = {

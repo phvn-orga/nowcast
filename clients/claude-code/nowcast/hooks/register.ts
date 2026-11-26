@@ -129,7 +129,9 @@ function awaitNewId($: $, ended: string, attempt: number): void {
 
 /**
  * Runs `watch` for `session`, which `start` declares, unless it already runs.
- * With `entry`, enters the conversation first, unless already in it.
+ * With `entry`, enters the conversation first, unless already in it: the
+ * service's version is read and the session declared before the moves, and
+ * `start` does neither again.
  */
 function follow($: $, session: string, entry: boolean): Promise<void> {
   queue = queue
@@ -142,13 +144,16 @@ function follow($: $, session: string, entry: boolean): Promise<void> {
       // A new session starts with an empty state: the subscriptions are
       // written again, and the new `watch` sends the last value of every
       // flow again, each written anew. Those that follow the conversation
-      // move first, before anything is written: the new `watch` never sends
-      // their previous flow.
+      // move first, before anything but the stream is written, and once the
+      // service knows the new session: the new `watch` never sends their
+      // previous flow.
       forgetFlows()
+      const verdict = entering ? await checkService($) : undefined
+      if (verdict === null) await declare($, session)
       if (entering) await moveTo($, session)
       await rewrite($)
       if (entering) await enter($, session)
-      watch = start($, session)
+      watch = start($, session, verdict)
     })
     .catch(error => $.ui.log(`nowcast: cannot follow session ${session}: ${message(error)}`, { to: 'debug' }))
   return queue
@@ -200,24 +205,28 @@ async function declare($: $, session: string): Promise<void> {
 /**
  * Runs `watch` for `session` until stopped, starting it again if it exits.
  * Each start reads the service's version first; the session is declared
- * once the version is accepted.
+ * once the version is accepted. A `verdict` given is the first start's
+ * reading, its session declared when it accepts the version.
  * The `watch` started again resumes after the last update the previous one
  * printed, rather than sending every last value again. A new session gets a
  * new `start`, with no update seen: its state is empty and needs them all.
  */
-function start($: $, session: string): Watch {
+function start($: $, session: string, verdict?: string | null): Watch {
   let child: ReturnType<$['process']['spawn']> | undefined
   let stopped = false
   let lastEventId: string | undefined
-  let declared = false
+  let declared = verdict === null
+  let read = verdict
   void (async () => {
     let delay = FIRST_RESTART_MS
     for (;;) {
       const startedAt = await $.clock.now()
       if (stopped) return
-      // Read before anything goes to the service, and again before each
-      // start: an upgrade during the session is taken.
-      let why = await checkService($)
+      // Read before anything goes to the service (by the entry, for the
+      // first start), and again before each start: an upgrade during the
+      // session is taken.
+      let why = read !== undefined ? read : await checkService($)
+      read = undefined
       // Stopped while the version was read: no `watch` for the session left behind.
       if (stopped) return
       if (why === null && !declared) {
