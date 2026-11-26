@@ -98,6 +98,9 @@ export function subscribeFor(
     if (refused !== null) return refused
     entries.set(id, entry)
     await saveIds($)
+    // A conversation entered while the service was asked did not move it.
+    const now = await $.session.id()
+    if (behind(entry, now)) await move($, entry, now)
     return answer(entry)
   })
 }
@@ -156,24 +159,31 @@ export async function flowChanged($: $, flow: string): Promise<void> {
  * shows the previous flow again. Called before anything else is written.
  */
 export async function moveTo($: $, conversation: string): Promise<void> {
-  const moving = [...entries.values()].filter(
-    entry => entry.asked.conversation !== undefined && !same(entry.wanted, filled(entry.asked, conversation)),
-  )
+  const moving = [...entries.values()].filter(entry => behind(entry, conversation))
   await Promise.all(
     moving.map(entry =>
       serial(entry.id, async () => {
-        if (entries.get(entry.id) !== entry) return
-        const service = entry.value.service
-        entry.wanted = filled(entry.asked, conversation)
-        entry.refused = 0
-        entry.activeSince = null
-        entry.value = { ...shown(entry.asked, entry.wanted), status: 'retrying', error: null, flow: null, service: null }
-        if (service !== null) await release($, service)
-        const refused = await attempt($, entry)
-        if (refused !== null) await set($, entry, { status: 'failed', error: reason(refused), service: null })
+        if (entries.get(entry.id) === entry) await move($, entry, conversation)
       }),
     ),
   )
+}
+
+/** Whether `entry` follows the conversation and asks for another one than `conversation`. */
+function behind(entry: Entry, conversation: string): boolean {
+  return entry.asked.conversation !== undefined && !same(entry.wanted, filled(entry.asked, conversation))
+}
+
+/** Moves `entry` to `conversation`, from within its `serial`. */
+async function move($: $, entry: Entry, conversation: string): Promise<void> {
+  const service = entry.value.service
+  entry.wanted = filled(entry.asked, conversation)
+  entry.refused = 0
+  entry.activeSince = null
+  entry.value = { ...shown(entry.asked, entry.wanted), status: 'retrying', error: null, flow: null, service: null }
+  if (service !== null) await release($, service)
+  const refused = await attempt($, entry)
+  if (refused !== null) await set($, entry, { status: 'failed', error: reason(refused), service: null })
 }
 
 /** Writes every subscription kept again, into a state a `/clear` emptied. */

@@ -201,3 +201,34 @@ test('after a resume, the first measure carries the resumed context; a new conve
 
   expect(inputsTo(w, 'claude-code/session/session-2').map(m => m.context)).toEqual([resumed])
 })
+
+test('a subscription asked for as the conversation changes ends in the new one', plugins, async ($, on) => {
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => (open = resolve))
+  const answer = service()
+  // The first subscription is answered only once the /clear is entered.
+  let first = true
+  const w = world(on, {
+    answer: async request => {
+      if (first && path(request) === 'POST /v1/subscriptions') {
+        first = false
+        await gate
+      }
+      return answer(request)
+    },
+  })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  const asked = call($, 'subscribe', FOLLOWS)
+  await w.clock.settle()
+  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: RESUME })
+  w.session.id = 'session-2'
+  await w.clock.advance(50)
+  open()
+  await asked
+  await w.clock.settle()
+
+  expect(w.subscription(ID)).toMatchObject({ params: { id: 'session-2' }, flow: 'claude-code/sessions/session-2' })
+  expect(w.requests.filter(r => r.method === 'DELETE').map(path)).toEqual(['DELETE /v1/subscriptions/s-1'])
+})

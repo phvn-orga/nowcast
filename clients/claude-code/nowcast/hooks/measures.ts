@@ -206,7 +206,9 @@ async function measured($: $): Promise<Measured> {
 export async function enterMeasures($: $, id: string): Promise<void> {
   await quietly($, async () => {
     const { context } = await $.session.usage()
-    const m = current?.id === id ? current : begin($, id, new Date(await $.clock.now()).toISOString())
+    // Read before the check: a request may start the measures meanwhile.
+    const since = new Date(await $.clock.now()).toISOString()
+    const m = current?.id === id ? current : begin($, id, since)
     m.context = context
     // Past an unload, `schedule` is refused: nothing left to send.
     void m.seeding
