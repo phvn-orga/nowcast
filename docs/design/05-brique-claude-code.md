@@ -331,7 +331,10 @@ l'URL du remote `origin` et la clé forge de ce worktree : un `git checkout` lan
 dans un terminal est ainsi pris au travail suivant.
 
 Pour ne pas lancer jusqu'à sept commandes git à chaque travail, il garde ces réponses
-avec l'empreinte des fichiers dont elles dépendent :
+avec une empreinte des fichiers dont elles dépendent, le SHA-256 de leurs contenus
+(un fichier absent se distingue d'un fichier vide). Une date
+et une taille laisseraient passer deux écritures de même taille dans la même
+milliseconde ; le contenu ne laisse rien passer. Les fichiers :
 
 - le `HEAD` du worktree, dans son répertoire git propre (`.bare/worktrees/<nom>/`
   pour un worktree lié), que donne `git rev-parse --git-dir` ;
