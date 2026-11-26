@@ -18,7 +18,7 @@ function repository(branches: Record<string, string | null>) {
     const name = cwd?.match(/^\/lab\/nowcast\/([^/.][^/]*)/)?.[1]
     if (name === undefined) return { exitCode: 128, stdout: '' }
     const line = args.join(' ')
-    if (args[1] === '--path-format=absolute') return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n` }
+    if (args[1] === '--path-format=absolute') return { exitCode: 0, stdout: `${ROOT(name)}\n${REPO}\n${REPO}/worktrees/${name}\n` }
     if (args[0] === 'symbolic-ref') {
       const branch = name in branches ? branches[name] : name
       return branch === null ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: `${branch}\n` }
