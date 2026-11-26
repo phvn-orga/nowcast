@@ -160,7 +160,7 @@ n'envoie rien pour cette session.
 | `cache_ttl` | Durée de vie du cache du fil principal, `5m` ou `1h` ; facultatif | transcription (plus bas) |
 | `rate_limits` | Fenêtres de quota de la dernière réponse ; vide hors abonnement | `session.measure`, champ `rateLimits` |
 | `cost_usd` | Coût de la session ; facultatif | `session.measure`, champ `cost.usd` |
-| `worktrees` | Worktrees où la session a écrit, le plus récent d'abord ; facultatif | `tool.call` (« Les worktrees de la session ») |
+| `worktrees` | Worktrees où la session a travaillé, le plus récent d'abord, celui de son répertoire marqué ; facultatif | `tool.call` (« Les worktrees de la session ») |
 
 `context` et `tokens` ne mesurent pas la même chose. `context` est ce que la prochaine
 requête du fil principal renverra au modèle. `tokens` est tout ce que la session a
@@ -297,34 +297,67 @@ Une session ancrée dans un worktree, souvent le principal sur `main`, peut écr
 dans d'autres par leur chemin sans jamais s'y déplacer. Un consommateur qui suit le
 répertoire de la session, comme une bande qui affiche la PR et la CI de sa branche,
 montre alors la mauvaise. Le mod central relève donc les worktrees où sa session
-écrit, et suit leurs flux forge (`02-clients.md`) ; le consommateur choisit lesquels
-montrer.
+travaille, marque celui où se trouve son répertoire, et suit leurs flux forge
+(`02-clients.md`) ; le consommateur choisit lesquels montrer.
 
 ### Ce qui compte
 
-- **Une écriture, rien d'autre.** Un appel `Edit` ou `Write` qui a abouti (son
-  résultat n'a pas `isError`), du fil principal comme d'un sous-agent : son
-  `file_path` désigne le worktree. Une lecture ne compte pas : une session qui lit
-  `main` pour comparer n'y travaille pas.
-- **Une commande Bash n'ajoute pas de worktree.** Un `git -C <worktree> commit`, un
-  `cd` suivi d'une écriture ou un `rm` ne sont pas relevés : il faudrait analyser la
-  commande pour savoir où elle écrit. Claude Code n'a pas d'outil de suppression.
-  Certaines commandes font en revanche relire les entrées déjà là (plus bas).
-- Un fichier hors de tout dépôt git ne compte pas.
+- **Une écriture.** Un appel `Edit` ou `Write` qui a abouti (son résultat n'a pas
+  `isError`), du fil principal comme d'un sous-agent : son `file_path` désigne le
+  worktree. Une lecture par `Read` ne compte pas : une session qui lit `main` pour
+  comparer n'y travaille pas.
+- **Une commande Bash qui a tourné**, réussie ou non : une commande en échec
+  (tests rouges, build cassé) est du travail là où elle a tourné. Chaque
+  répertoire où elle s'exécute désigne un worktree : celui où elle part (pour un
+  sous-agent, le sien), et ceux où un `cd` ou un `git -C` mène un de ses
+  programmes. Une commande refusée n'a pas tourné et ne compte pas.
+- **Le répertoire de la session.** Le worktree qui le contient est l'entrée
+  active, relevée dès que le répertoire y entre, comme un travail du fil
+  principal, qu'il y ait écrit ou non : une session qui entre dans un worktree
+  (EnterWorktree) pour seulement y pousser ou y ouvrir une PR l'y trouve. Le mod
+  relit ce répertoire après EnterWorktree, ExitWorktree et les appels Bash du fil
+  principal, et au début et à la fin de chacun de ses tours. Il ne s'appuie pas
+  sur `CwdChanged` : sur un compte d'organisation, le plugin intégré
+  `cc-plugin-sec-default` peut faire passer les événements classiques avant les
+  plugins installés. Rester dans le même worktree ne compte qu'une fois.
+- Un fichier ou un répertoire hors de tout dépôt git ne compte pas.
 
 ### Du fichier au worktree
 
 Pour un répertoire qu'il n'a pas encore vu, le mod demande à git la racine du
 worktree et le répertoire git commun (`git rev-parse --show-toplevel
---git-common-dir`), et garde la réponse. À chaque écriture, il relit la branche,
+--git-common-dir`), et garde la réponse. À chaque travail relevé, il relit la branche,
 l'URL du remote `origin` et la clé forge de ce worktree : un `git checkout` lancé
-dans un terminal est ainsi pris à l'écriture suivante.
+dans un terminal est ainsi pris au travail suivant.
 
-Il relit aussi une entrée, sans changer son rang ni sa date, après une commande de
-son agent qui peut déplacer une branche ou changer où `git push` l'envoie : `git
-switch`, `git checkout`, `git branch -m`, `-u` ou `--unset-upstream`, `git push
--u`, `gh pr checkout`. Le répertoire de la commande, `cd` et `git -C` compris,
-désigne l'entrée. Toutes sont relues quand ce répertoire reste inconnu, quand un
+Pour ne pas lancer jusqu'à sept commandes git à chaque travail, il garde ces réponses
+avec une empreinte des fichiers dont elles dépendent, le SHA-256 de leurs contenus
+(un fichier absent se distingue d'un fichier vide). Une date
+et une taille laisseraient passer deux écritures de même taille dans la même
+milliseconde ; le contenu ne laisse rien passer. Les fichiers :
+
+- le `HEAD` du worktree, dans son répertoire git propre (`.bare/worktrees/<nom>/`
+  pour un worktree lié), que donne `git rev-parse --git-dir` ;
+- sa `reftable/tables.list` : au format de refs `reftable`, le fichier `HEAD`
+  reste `ref: refs/heads/.invalid` quelle que soit la branche ;
+- les fichiers de config que git lit : ceux qu'il cite (`git config --list
+  --show-origin`, `includeIf` compris), la config du dépôt et celle du worktree, la
+  config globale et `/etc/gitconfig`, et les cibles de `include.path` et
+  `includeIf.<condition>.path`, même absents ;
+- le fichier `.git` de la racine, qui désigne le répertoire git : un worktree
+  recréé au même endroit avec un autre répertoire git est relu.
+
+Tant que l'empreinte ne change pas, il ne redemande que `@{push}` : sa réponse
+dépend aussi de la branche de suivi distante, qu'un `git push` ou un `git fetch`
+crée ou supprime sans toucher ces fichiers. Un `git checkout` ou un `git config`
+lancé dans un terminal change l'empreinte, et reste pris au travail suivant.
+
+Il relit aussi les entrées après une commande de son agent qui peut déplacer une
+branche ou changer où `git push` l'envoie : `git switch`, `git checkout`, `git
+branch -m`, `-u` ou `--unset-upstream`, `git push -u`, `gh pr checkout`. Le
+répertoire de la commande, `cd` et `git -C` compris, désigne l'entrée, déjà
+relevée comme un travail (plus haut). Toutes sont relues, sans changer leur rang
+ni leur date, quand ce répertoire reste inconnu, quand un
 `git branch` nomme une autre branche que la courante (un autre worktree peut la
 porter), et après `git worktree add`, `move`, `remove` ou `prune`. Une commande
 qui a échoué compte aussi : elle a pu changer de branche avant d'échouer. Une
@@ -342,7 +375,8 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
     "written_at": "2026-11-10T08:58:12Z",
     "forge": { "remote": "git@github.com:phvn-orga/nowcast.git",
                "branch": "design-session-worktrees" },
-    "writers": ["main"] }
+    "writers": ["main"],
+    "active": true }
 ]
 ```
 
@@ -352,27 +386,29 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
 | `repo` | Répertoire git commun, le même pour tous les worktrees d'un dépôt |
 | `branch` | Branche courante, `null` en HEAD détaché |
 | `remote` | URL du remote `origin` telle que git l'a, `null` sans lui. Pas la clé forge : voir `forge` |
-| `written_at` | Dernière écriture relevée dans ce worktree |
+| `written_at` | Dernier travail relevé dans ce worktree |
+| `active` | `true` pour le worktree qui contient le répertoire de la session, au plus une entrée ; aucune quand ce répertoire n'est dans aucun worktree git, le consommateur ne montre alors ni PR ni CI. `false` sur une entrée écrite par un mod plus ancien |
 | `forge` | Clé des flux `pr` et `pipelines` de la brique forge, `{remote, branch}` : la branche où `git push` l'enverrait et l'URL de push de ce remote (`02-clients.md`). `null` en HEAD détaché ou sans remote de push ; absent d'une entrée écrite par un mod plus ancien. Le schéma de `claude-code.measure/v1` le décrit |
-| `writers` | Les sortes de boucle dont un `Edit` ou un `Write` y a abouti : `main` (le fil principal), `subagent`, `workflow`. Une boucle est celle d'un workflow quand un `agent.spawn` portant `workflow` a démarré son `agentId`, ou quand une boucle d'un workflow l'a démarrée (`parentAgentId`), à toute profondeur ; tout autre `agentId` est un sous-agent. Absent d'une entrée écrite par un mod plus ancien, et le reste aux écritures suivantes : qui y a écrit avant reste inconnu |
+| `writers` | Les sortes de boucle qui y ont travaillé (un `Edit` ou un `Write` qui a abouti, une commande Bash ; `main` quand le répertoire de la session y est entré) : `main` (le fil principal), `subagent`, `workflow`. Une boucle est celle d'un workflow quand un `agent.spawn` portant `workflow` a démarré son `agentId`, ou quand une boucle d'un workflow l'a démarrée (`parentAgentId`), à toute profondeur ; tout autre `agentId` est un sous-agent. Absent d'une entrée écrite par un mod plus ancien, et le reste aux écritures suivantes : qui y a écrit avant reste inconnu |
 
-- **Triée par écriture**, la plus récente d'abord.
-- **Au plus 16 worktrees.** Au-delà, celui dont l'écriture est la plus ancienne
-  sort. Aucun délai : une fenêtre de temps (les worktrees des dix dernières
+- **Triée par travail**, le plus récent d'abord.
+- **Au plus 16 worktrees.** Au-delà, celui dont le dernier travail est le plus
+  ancien sort, jamais l'entrée active. Aucun délai : une fenêtre de temps (les worktrees des dix dernières
   minutes, par exemple) est l'affaire du consommateur, qui a les dates.
 - **Un worktree dont la racine n'existe plus sort de la liste**, quoi qui l'ait
-  supprimé : vérifié à chaque écriture relevée, à chaque relecture, et au début et
+  supprimé : vérifié à chaque travail relevé, à chaque relecture, et au début et
   à la fin de chaque tour du fil principal. Les tours prennent ce qu'aucune
   commande relevée ne dit : `wt remove`, qui supprime en arrière-plan, un terminal,
   une autre session. Le contrôle ne demande que l'existence de chaque racine, sans
   appel à git.
-- **Vide tant que la session n'a rien écrit** : un consommateur se rabat alors sur
-  le répertoire de la session.
+- **L'entrée active dit où est la session.** Un consommateur montre sa PR et sa
+  CI, et les autres entrées comme des worktrees annexes, sans rien suivre
+  lui-même.
 - **Elle appartient à la session.** Après un `/clear`, la nouvelle session part
   d'une liste vide. Un rechargement du mod la retrouve dans son état.
-- **Elle dit qui a écrit** (`writers`). Un long workflow crée beaucoup de worktrees
+- **Elle dit qui y a travaillé** (`writers`). Un long workflow crée beaucoup de worktrees
   et suit lui-même leur CI : un consommateur qui réveille la session à la fin d'un
-  pipeline peut ignorer un worktree où seuls les agents d'un workflow ont écrit.
+  pipeline peut ignorer un worktree où seuls les agents d'un workflow ont travaillé.
 
 ### Où la lire
 
@@ -390,8 +426,11 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
 
 ### Limites connues
 
+- **Une commande Bash qui ne fait que lire compte.** Un `git -C ../main log` lancé
+  pour comparer relève `main` : il faudrait analyser la commande pour savoir si
+  elle écrit.
 - **Les agents d'un workflow ne sont connus qu'en mémoire.** Après un rechargement
-  du mod en plein workflow, les écritures de ses agents comptent comme `subagent` :
+  du mod en plein workflow, le travail de ses agents compte comme `subagent` :
   la session est réveillée comme avant `writers`.
 - **Un agent de workflow relancé après un blocage compte comme `subagent`.** Sa
   relance ne lève pas de nouvel `agent.spawn` : son nouvel `agentId` reste inconnu.
@@ -406,9 +445,6 @@ relecture fait sortir toute entrée dont le worktree n'existe plus. La brique gi
 
 ### Plus tard
 
-- **Les écritures par Bash.** Le résultat d'un appel porte `isReadOnly`, posé par
-  le contrôle de l'outil lui-même : son absence dit qu'une commande a pu écrire,
-  pas où. Le répertoire de la commande (un `cd`, `git -C`) en donnerait une part.
 - **`NotebookEdit` et les outils MCP** qui écrivent un fichier.
 - **Une reprise** part d'une liste vide. Les transcriptions portent les `Edit` et
   `Write` passés, avec leur date, et le mod les lit déjà à son chargement pour les
