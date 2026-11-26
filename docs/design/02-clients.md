@@ -30,7 +30,9 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   et renvoie sa requête. La mort du processus d'ancrage termine tout.
 - **Les abonnements suivent le processus d'ancrage, pas l'identifiant de session.** Un
   `/clear` ne coupe donc rien : le client se désabonne de ce qu'il ne veut plus. Le
-  service n'a pas à deviner ce que signifie un changement de session.
+  service n'a pas à deviner ce que signifie un changement de session. Un abonnement
+  qui doit suivre la conversation, et non le processus, est l'affaire du client :
+  c'est lui qui le déplace (plus bas, « Le mod central entre dans la conversation »).
 - **Un flux par session, des requêtes en appels HTTP.** La session tient un seul flux
   ouvert, qui regroupe tous ses abonnements. S'abonner, se désabonner, demander un
   rafraîchissement, envoyer une entrée, lire la dernière valeur d'un flux ou annoncer
@@ -218,6 +220,36 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   s'abonne suit son abonnement dans l'état du mod central, qui lui donne le flux une
   fois connu (voir plus bas). Pas d'API de requêtes entre mods à concevoir. Validé par un spike, puis
   par l'implémentation (voir « Ce que peuvent les clients »).
+- **Le mod central entre dans la conversation de la même façon à chaque changement.**
+  La conversation est l'identifiant de session de Claude Code : `/clear` en crée un
+  nouveau, `--resume`, `--continue` et `/resume` reviennent à celui de la conversation
+  reprise (seul `--fork-session` en crée un). Au démarrage du processus, après un
+  `/clear`, après une reprise, et en filet de sécurité au début d'un tour sous un
+  autre identifiant, il y entre, dans cet ordre :
+  1. il déplace les abonnements qui suivent la conversation. Une requête nomme le
+     paramètre que le mod remplit avec l'identifiant
+     (`subscribe({ name, brick: "claude-code", kind: "sessions", params: {},
+     conversation: "id" })`). Il garde la requête telle quelle et, à chaque entrée,
+     supprime l'abonnement à l'ancien identifiant avant d'en prendre un au nouveau,
+     sous le même nom, avant toute autre écriture : la valeur de l'ancien flux ne
+     revient plus au consommateur ;
+  2. il réécrit les autres abonnements dans l'état, que le changement a vidé ;
+  3. il publie la conversation dans son état (`conversation: { id, since }`) : un
+     consommateur repart de zéro sur cette écriture, sans déduire le changement d'une
+     fin de session ni attendre une minuterie ;
+  4. il envoie aussitôt les mesures de la conversation (`05-brique-claude-code.md`) :
+     une nouvelle conversation montre un contexte vide plutôt que celui de la
+     précédente, une conversation reprise montre le sien ;
+  5. il repart d'une liste de worktrees vide et localise aussitôt le worktree actif.
+
+  Un rechargement du mod n'est pas une entrée : il retrouve la conversation dans son
+  état, qui survit au rechargement et pas au processus. Une compaction non plus (même
+  conversation, le moteur mesure le nouveau contexte), ni un redémarrage du service
+  (le mod déclare à nouveau la même session). Le service et les briques ne changent
+  pas : la notion de conversation reste dans le client. Écartés : laisser chaque
+  consommateur déduire le changement de `session.end` avec une minuterie, car aucun
+  `session.start` ne suit un `/clear` ni un `/resume` ; et réabonner tous les
+  abonnements à chaque changement, ce qui couperait ceux qui suivent le processus.
 - **Le mod central refuse un service trop ancien.** Il déclare la plus ancienne
   version du service qu'il accepte, et lit celle du service en marche
   (`GET /v1/service`, `03-contrats.md` section 3) avant tout autre échange avec
@@ -232,11 +264,12 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   service déjà lancé garde l'ancien binaire jusqu'à son redémarrage, et ne s'arrête
   pas seul tant qu'une session le tient.
 - **Le mod central envoie les mesures de sa session** à la brique claude-code, quand
-  elle est activée : il s'abonne au flux de sa session, y envoie une entrée après
-  chaque requête au modèle et à chaque `session.measure`, et y relit ce que la brique
+  elle est activée : il s'abonne au flux de sa session, y envoie une entrée à l'entrée
+  dans une conversation, après chaque requête au modèle et à chaque
+  `session.measure`, et y relit ce que la brique
   en retient (`05-brique-claude-code.md`). Ce flux suit
-  l'identifiant de session : après un `/clear`, le mod s'abonne au nouveau sous le
-  même nom, ce qui remplace l'abonnement à l'ancien.
+  l'identifiant de session : à l'entrée dans une conversation, le mod s'abonne au
+  nouveau sous le même nom, ce qui remplace l'abonnement à l'ancien.
 - **L'affichage n'est jamais l'affaire du mod central.** Il porte la logique et sert
   d'interface entre le service et les mods d'affichage, qui montrent ce qu'il tient.
 - **Le mod central rafraîchit la brique forge sur ce que fait son agent.** Il observe
@@ -309,7 +342,9 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
 - **Un `watch` par identifiant de session.** Comme `/clear` vide l'état du plugin, le
   mod central arrête alors `watch` et le relance sous le nouvel identifiant, sans
   `Last-Event-ID` : le service envoie à nouveau chaque dernière valeur, qui remplit
-  l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage.
+  l'état vidé. Il ne se réabonne pas : les abonnements suivent l'ancrage, sauf ceux
+  qui suivent la conversation, déplacés avant le nouveau `watch`, qui n'envoie donc
+  plus l'ancien flux.
 - **La bibliothèque des mods est `$.nowcast`, un *noun* de l'API plugin ajouté par le
   mod central.** Un mod qui déclare `nowcast` dans ses dépendances reçoit
   `subscribe`, `unsubscribe`, `refresh`, `refreshBrick`, `refreshForge`, `input`, `last` et `history`, typés par le contrat du mod
@@ -367,7 +402,8 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
     consommateur suit son abonnement sans attendre la réponse, puis lit la valeur
     dans `flows`. Un nouvel abonnement efface la valeur `ended` qu'un ancien a
     laissée sur son flux.
-  - **Ni un `/clear` ni un rechargement ne coupent un abonnement.** La famille sert
+  - **Ni un `/clear` ni un rechargement ne coupent un abonnement**, sauf un
+    abonnement qui suit la conversation, que l'entrée déplace. La famille sert
     aussi de registre au mod central : elle survit à son propre rechargement, et il
     la réécrit depuis sa mémoire après un `/clear`, qui la vide. Comme l'API plugin
     ne liste pas les membres d'une famille, une clé `subscribed` de son état donne
@@ -411,6 +447,11 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
     porte sa raison, dont `clear`. Après un `/clear`, aucun événement de début n'est
     émis. Observé sur 2.1.319 : un `/clear` se présente comme une fin de session de
     raison `clear`, et le nouvel identifiant apparaît dans `$.session.id()` peu après.
+    Observé le 2026-11-26 : un `/resume` en cours de session se présente de même, en
+    raison `resume`, sans `session.start` non plus. Avant la première requête,
+    `$.session.usage().context` ne donne que la fenêtre d'une nouvelle conversation
+    (démarrage, `/clear`), et le contexte de la conversation reprise après
+    `--resume` ou `/resume`.
   - Le contexte, le cache, le modèle et l'effort d'une session n'existent que dans le
     moteur, qui les donne aux plugins par ses événements : le service ne peut pas les
     lire lui-même, le client les lui transmet.
