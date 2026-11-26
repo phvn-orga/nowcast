@@ -226,21 +226,23 @@ rôles du mod central envers la brique forge et les mods d'affichage revus le
   reprise (seul `--fork-session` en crée un). Au démarrage du processus, après un
   `/clear`, après une reprise, et en filet de sécurité au début d'un tour sous un
   autre identifiant, il y entre, dans cet ordre :
-  1. il déplace les abonnements qui suivent la conversation. Une requête nomme le
+  1. il déclare la nouvelle session au service, une fois : `watch`, relancé ensuite,
+     ne la déclare pas une seconde fois avant de se connecter ;
+  2. il déplace les abonnements qui suivent la conversation. Une requête nomme le
      paramètre que le mod remplit avec l'identifiant
      (`subscribe({ name, brick: "claude-code", kind: "sessions", params: {},
      conversation: "id" })`). Il garde la requête telle quelle et, à chaque entrée,
      supprime l'abonnement à l'ancien identifiant avant d'en prendre un au nouveau,
      sous le même nom, avant toute autre écriture : la valeur de l'ancien flux ne
      revient plus au consommateur ;
-  2. il réécrit les autres abonnements dans l'état, que le changement a vidé ;
-  3. il publie la conversation dans son état (`conversation: { id, since }`) : un
+  3. il réécrit les autres abonnements dans l'état, que le changement a vidé ;
+  4. il publie la conversation dans son état (`conversation: { id, since }`) : un
      consommateur repart de zéro sur cette écriture, sans déduire le changement d'une
      fin de session ni attendre une minuterie ;
-  4. il envoie aussitôt les mesures de la conversation (`05-brique-claude-code.md`) :
+  5. il envoie aussitôt les mesures de la conversation (`05-brique-claude-code.md`) :
      une nouvelle conversation montre un contexte vide plutôt que celui de la
      précédente, une conversation reprise montre le sien ;
-  5. il repart d'une liste de worktrees vide et localise aussitôt le worktree actif.
+  6. il repart d'une liste de worktrees vide et localise aussitôt le worktree actif.
 
   Un rechargement du mod n'est pas une entrée : il retrouve la conversation dans son
   état, qui survit au rechargement et pas au processus. Une compaction non plus (même

@@ -203,8 +203,11 @@ rechargement du plugin en cours de session. Les requêtes d'avant n'ont déclenc
 sous-agents (`~/.claude/projects/*/<id>.jsonl` et `<id>/subagents/*.jsonl`) : il y
 somme l'`usage` de chaque réponse, une fois par identifiant de message. Dans celle du
 fil principal, la dernière réponse qui a lu ou écrit le cache donne
-`last_request_at` (sa date d'écriture, à peine après l'envoi de la requête), et la
-dernière qui l'a écrit `cache_ttl`. Il ajoute ensuite chaque requête qu'il voit, et
+`last_request_at` : la date de la ligne qui précède son premier enregistrement (le
+prompt ou les résultats d'outils auxquels elle répond), que la requête suit aussitôt.
+Une réponse s'écrit en un enregistrement par bloc de contenu, et le premier arrive
+après la réflexion du modèle : sa date avancerait l'échéance du cache d'autant. La
+dernière réponse qui a écrit en cache donne `cache_ttl`. Il ajoute ensuite chaque requête qu'il voit, et
 une requête vue depuis l'emporte sur la transcription. Une transcription illisible ou dans un format inattendu le fait
 compter depuis son chargement, sans erreur. Après un `/clear`, la nouvelle session a
 une transcription vide et repart de zéro.
