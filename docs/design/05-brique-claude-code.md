@@ -330,6 +330,25 @@ worktree et le répertoire git commun (`git rev-parse --show-toplevel
 l'URL du remote `origin` et la clé forge de ce worktree : un `git checkout` lancé
 dans un terminal est ainsi pris au travail suivant.
 
+Pour ne pas lancer jusqu'à sept commandes git à chaque travail, il garde ces réponses
+avec l'empreinte des fichiers dont elles dépendent :
+
+- le `HEAD` du worktree, dans son répertoire git propre (`.bare/worktrees/<nom>/`
+  pour un worktree lié), que donne `git rev-parse --git-dir` ;
+- sa `reftable/tables.list` : au format de refs `reftable`, le fichier `HEAD`
+  reste `ref: refs/heads/.invalid` quelle que soit la branche ;
+- les fichiers de config que git lit : ceux qu'il cite (`git config --list
+  --show-origin`, `includeIf` compris), la config du dépôt et celle du worktree, la
+  config globale et `/etc/gitconfig`, et les cibles de `include.path` et
+  `includeIf.<condition>.path`, même absents ;
+- le fichier `.git` de la racine, qui désigne le répertoire git : un worktree
+  recréé au même endroit avec un autre répertoire git est relu.
+
+Tant que l'empreinte ne change pas, il ne redemande que `@{push}` : sa réponse
+dépend aussi de la branche de suivi distante, qu'un `git push` ou un `git fetch`
+crée ou supprime sans toucher ces fichiers. Un `git checkout` ou un `git config`
+lancé dans un terminal change l'empreinte, et reste pris au travail suivant.
+
 Il relit aussi les entrées après une commande de son agent qui peut déplacer une
 branche ou changer où `git push` l'envoie : `git switch`, `git checkout`, `git
 branch -m`, `-u` ou `--unset-upstream`, `git push -u`, `gh pr checkout`. Le
