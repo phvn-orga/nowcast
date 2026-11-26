@@ -3,7 +3,7 @@
 
 import type { HttpResponse, On } from 'claude-code'
 import { type Engine, type Plugin, expect, test } from 'claude-code/testing'
-import { lastTtl, sumUsage } from '../hooks/measures'
+import { lastCachedAt, lastTtl, sumUsage } from '../hooks/measures'
 import { COMPOSER, type Request, START, type World, world } from './world'
 
 const FLOW = 'claude-code/session/session-1'
@@ -27,6 +27,7 @@ function engine(on: On, usage: typeof USAGE | null = USAGE, withEffort = true) {
   on('session.root', () => ({ value: '/project' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000 }, rateLimits: [] } }))
   on('turn.step', async function* (_, e) {
     return {
       turnId: e.turnId,
@@ -318,7 +319,7 @@ test("the tokens spent before the mod loaded come from the session's transcripts
   await $.session.measure(MEASURE as never)
   await w.clock.settle()
   const cat = w.children.find(c => c.argv[0] === 'sh')
-  expect(cat?.argv.slice(-2)).toEqual(['/home/u/.claude/projects', 'session-1'])
+  expect(cat?.argv.slice(-3, -1)).toEqual(['/home/u/.claude/projects', 'session-1'])
   cat?.stdout(`${assistant('a', { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 })}\n`)
   cat?.exit(0)
   await w.clock.advance(500)
@@ -346,4 +347,49 @@ test("the cache's lifetime is the last one a response wrote with", () => {
   expect(lastTtl(['t": 1}', wrote(0, 50), wrote(0, 0)].join('\n'))).toBe('5m')
   expect(lastTtl([wrote(0, 50), wrote(10, 0)].join('\n'))).toBe('1h')
   expect(lastTtl(wrote(0, 0))).toBe(undefined)
+})
+
+test("at entry, the cache's time and lifetime come from the main thread's last response that used it", async ($, on) => {
+  const w = world(on, { answer: service(true), env: { XDG_RUNTIME_DIR: '/run/user/1000', HOME: '/home/u' } })
+  engine(on)
+  await $.session.start(START)
+  await w.clock.settle()
+
+  const row = (id: string, timestamp: string, usage: Record<string, unknown>, isSidechain = false) =>
+    JSON.stringify({ type: 'assistant', timestamp, isSidechain, message: { id, usage } })
+  const cat = w.children.find(c => c.argv[0] === 'sh')
+  cat?.stdout(
+    [
+      row('a', '2026-11-26T10:00:00.000Z', { input_tokens: 1, cache_creation_input_tokens: 5, cache_creation: { ephemeral_1h_input_tokens: 5 } }),
+      row('b', '2026-11-26T10:05:00.000Z', { input_tokens: 1, cache_read_input_tokens: 5 }),
+      row('c', '2026-11-26T10:06:00.000Z', { input_tokens: 1 }),
+      '',
+      '--nowcast-subagents--',
+      // A subagent's request does not refresh the main thread's cache.
+      row('d', '2026-11-26T10:09:00.000Z', { input_tokens: 1, cache_read_input_tokens: 5 }, true),
+    ].join('\n'),
+  )
+  cat?.exit(0)
+  const measures = await sent(w)
+
+  expect(measures?.tokens).toEqual({ input: 4, output: 0, cache_creation: 5, cache_read: 10 })
+  expect(measures?.last_request_at).toBe('2026-11-26T10:05:00.000Z')
+  expect(measures?.cache_ttl).toBe('1h')
+  expect(measures?.context).toEqual({ window: 200000 })
+})
+
+test('the last response that used the cache is the latest of the main thread that read or wrote it', () => {
+  const row = (timestamp: unknown, usage: Record<string, unknown>, isSidechain?: boolean) =>
+    JSON.stringify({ type: 'assistant', timestamp, isSidechain, message: { usage } })
+  expect(
+    lastCachedAt(
+      [
+        row('2026-11-26T10:00:00Z', { cache_creation_input_tokens: 3 }),
+        row('2026-11-26T10:01:00Z', { input_tokens: 3 }),
+        row('2026-11-26T10:02:00Z', { cache_read_input_tokens: 3 }, true),
+        row(12, { cache_read_input_tokens: 3 }),
+      ].join('\n'),
+    ),
+  ).toBe('2026-11-26T10:00:00.000Z')
+  expect(lastCachedAt('')).toBe(undefined)
 })

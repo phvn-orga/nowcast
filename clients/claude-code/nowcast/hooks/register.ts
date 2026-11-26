@@ -4,20 +4,26 @@
 // each flow it receives into its state for other mods to read. Requests go
 // from this process to the service: all mods run in it, so the service ties
 // them to the same session.
+//
+// It enters the conversation, Claude Code's session id, the same way whatever
+// brought it there: the process's start, a `/clear`, a resume, or a turn that
+// starts under another id (`enter`). A reload of this mod is not an entry: it
+// takes its state back.
 
 import type { EngineInterface, Register } from 'claude-code'
-import type { NowcastStream } from '../types'
+import type { NowcastConversation, NowcastStream } from '../types'
 import { followForge } from './branches'
 import { CLI, STUB, checkService, history, input, last, refresh, refreshBrick, socketPath } from './client'
 import { apply, forgetFlows, offer, write } from './flows'
 import { refreshForge, registerForge } from './forge'
-import { registerMeasures } from './measures'
+import { enterMeasures, registerMeasures } from './measures'
 import { warnSetup } from './setup'
 import { Lines, type Status, parseLine } from './stream'
-import { flowChanged, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
+import { flowChanged, moveTo, reconnected, restore, rewrite, subscribeFor, unsubscribeFor } from './subscriptions'
 import { checkWorktrees, registerWorktrees } from './worktrees'
 
 const STREAM = { plugin: 'nowcast', key: 'stream' } as const
+const CONVERSATION = { plugin: 'nowcast', key: 'conversation' } as const
 
 /** Why the stream stops when the command cannot start and is not on `PATH`. */
 export const NOT_ON_PATH = `the ${CLI} command is not on PATH; install it, see https://github.com/phvn-orga/nowcast#install`
@@ -38,9 +44,11 @@ type $ = EngineInterface
 /** The running `watch`, for the session it declares. */
 type Watch = { session: string; stop: () => void }
 
-// The running `watch`, and the session changes applied one at a time, in
-// order. Both start over when the mod reloads, as `session.start` does.
+// The running `watch`, the conversation entered, and the session changes
+// applied one at a time, in order. They start over when the mod reloads, as
+// `session.start` does.
 let watch: Watch | undefined
+let entered: string | undefined
 let queue: Promise<void> = Promise.resolve()
 
 // What this mod last wrote about the stream: see `flows.ts`.
@@ -66,18 +74,21 @@ export const register: Register = on => {
   // Once per load of the mod: the session's start, or a reload. The start
   // does not wait for the service: `stream` says when the session is declared.
   // A reload finds the subscriptions it kept in its state, before the mods
-  // that start with it subscribe again under the same names. It also says
-  // when the service needs `nowcast setup`.
+  // that start with it subscribe again under the same names, and the
+  // conversation it entered: it does not enter it again. It also says when
+  // the service needs `nowcast setup`.
   on('session.start', async ($, e, next) => {
     await restore($).catch(error => $.ui.log(`nowcast: cannot restore: ${message(error)}`, { to: 'debug' }))
     const started = await next(e)
-    void follow($, await $.session.id())
+    const session = await $.session.id()
+    const { value } = await $.state.get(CONVERSATION).catch(() => ({ value: undefined }))
+    void follow($, session, value?.id !== session)
     void warnSetup($).catch(error => $.ui.log(`nowcast: cannot read the setup: ${message(error)}`, { to: 'debug' }))
     return started
   })
 
-  // A `/clear` or a resume ends the session and the process goes on under a
-  // new id, with no `session.start`: the new id shows once the end is done.
+  // A `/clear` or a resume ends the session and the process goes on under
+  // another id, with no `session.start`: the id shows once the end is done.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
@@ -95,43 +106,64 @@ export const register: Register = on => {
   // What the agent changes on a forge, refreshed in the forge brick.
   registerForge(on)
 
-  // A backstop: a turn always runs under the session the service knows. Its
+  // A backstop: a turn always runs in the conversation entered. Its
   // worktrees are checked too, as at the end of a turn (`measures.ts`).
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       const session = await $.session.id()
-      if (watch?.session !== session) void follow($, session)
+      if (entered !== session || watch?.session !== session) void follow($, session, true)
       checkWorktrees($)
     }
     return next(e)
   })
 }
 
-/** Follows the session that replaces `ended`, as soon as its id shows. */
+/** Enters the conversation that replaces `ended`, as soon as its id shows. */
 function awaitNewId($: $, ended: string, attempt: number): void {
   $.clock.after(NEW_ID_POLL_MS, async () => {
     const session = await $.session.id()
-    if (session !== ended) await follow($, session)
+    if (session !== ended) await follow($, session, true)
     else if (attempt < NEW_ID_ATTEMPTS) awaitNewId($, ended, attempt + 1)
   })
 }
 
-/** Runs `watch` for `session`, which `start` declares, unless it already runs. */
-function follow($: $, session: string): Promise<void> {
+/**
+ * Runs `watch` for `session`, which `start` declares, unless it already runs.
+ * With `entry`, enters the conversation first, unless already in it.
+ */
+function follow($: $, session: string, entry: boolean): Promise<void> {
   queue = queue
     .then(async () => {
-      if (watch?.session === session) return
+      const entering = entry && entered !== session
+      entered = session
+      if (watch?.session === session && !entering) return
       watch?.stop()
       watch = undefined
       // A new session starts with an empty state: the subscriptions are
       // written again, and the new `watch` sends the last value of every
-      // flow again, each written anew.
+      // flow again, each written anew. Those that follow the conversation
+      // move first, before anything is written: the new `watch` never sends
+      // their previous flow.
       forgetFlows()
+      if (entering) await moveTo($, session)
       await rewrite($)
+      if (entering) await enter($, session)
       watch = start($, session)
     })
     .catch(error => $.ui.log(`nowcast: cannot follow session ${session}: ${message(error)}`, { to: 'debug' }))
   return queue
+}
+
+/**
+ * Enters the conversation `session`, its subscriptions moved: writes it,
+ * sends its measures and locates its active worktree, neither awaited.
+ */
+async function enter($: $, session: string): Promise<void> {
+  const conversation: NowcastConversation = { id: session, since: new Date(await $.clock.now()).toISOString() }
+  await write($, () => $.state.set(CONVERSATION, conversation), 'conversation')
+  // Its log refused past an unload: nothing left to measure.
+  void enterMeasures($, session).catch(() => undefined)
+  checkWorktrees($)
 }
 
 /**

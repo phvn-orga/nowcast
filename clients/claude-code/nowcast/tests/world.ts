@@ -205,6 +205,10 @@ export function world(on: On, options: WorldOptions = {}): World {
     writes.push({ key: e.key, id: undefined, value: e.value })
     return next(e)
   })
+  on('state.set', { plugin: 'nowcast', key: 'conversation' }, (_, e, next) => {
+    writes.push({ key: e.key, id: undefined, value: e.value })
+    return next(e)
+  })
   on('state.set', { plugin: 'nowcast', key: 'subscribed' }, (_, e, next) => {
     writes.push({ key: e.key, id: undefined, value: e.value })
     return next(e)
